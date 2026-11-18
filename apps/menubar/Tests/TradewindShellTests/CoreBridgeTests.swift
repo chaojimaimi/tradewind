@@ -17,6 +17,11 @@ final class FakeRunner: CommandLineRunning, @unchecked Sendable {
         script = replies
     }
 
+    /// 数组形态（脚本化场景与 Swift 无数组展开变参的折中）。
+    init(_ replies: [Reply]) {
+        script = replies
+    }
+
     func run(_ args: [String], tolerate: Set<Int32>) throws -> String {
         lock.lock()
         defer { lock.unlock() }

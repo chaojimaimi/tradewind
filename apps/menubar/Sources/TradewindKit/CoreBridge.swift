@@ -135,6 +135,11 @@ final class CoreBridge {
         try runner.run(["stop"])
     }
 
+    /// 组延迟测试（CLI delay [group]；有界并发 ≤8 由 CLI 保证，M1-plan §9）。
+    func runDelay(group: String) throws {
+        try runner.run(["delay", group])
+    }
+
     /// 前台拉起内核（detached 子进程：壳退出不影响内核，M2-plan §2.1）。
     func startCoreDetached() throws {
         let process = Process()

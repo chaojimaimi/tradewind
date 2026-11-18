@@ -8,10 +8,12 @@ struct GatewayClient {
     /// 本机回环 Origin（网关 Host/Origin 白名单按 127.0.0.1:<port> 校验）
     let baseURL: URL
     let token: String
+    /// 会话可注入（URLProtocol stub 单测；生产用 .shared）
+    let session: URLSession
 
     /// 从 panel_url 解析：http://127.0.0.1:<port>/ui/<token>/ → (baseURL, token)。
     /// 形状不符（降级态空串等）返回 nil——调用方按"面板数据不可用"处理。
-    init?(panelURL: String) {
+    init?(panelURL: String, session: URLSession = .shared) {
         guard let url = URL(string: panelURL),
               let host = url.host,
               let port = url.port,
@@ -27,6 +29,7 @@ struct GatewayClient {
         guard let base = components.url else { return nil }
         baseURL = base
         token = segments[1]
+        self.session = session
     }
 
     /// 构造经网关的 GET 请求（纯函数，单测断言 Cookie 头注入）。
@@ -49,7 +52,7 @@ struct GatewayClient {
 
     /// GET 一段网关 API（节点列表等低频拉取用；WS 速率流由 TrafficStore 负责）。
     func fetch(path: String) async throws -> Data {
-        let (data, response) = try await URLSession.shared.data(for: makeRequest(path: path))
+        let (data, response) = try await session.data(for: makeRequest(path: path))
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw CoreBridgeError.cliFailed(command: "gateway \(path)")
         }
