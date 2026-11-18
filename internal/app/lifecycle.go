@@ -64,10 +64,15 @@ func startCore(home paths.Home, secret string) (*core.Manager, error) {
 }
 
 // fullShutdown 完整还原流程（M0-plan §5.1 步骤 10）：
-// 还原系统代理 → 内核 SIGTERM（5s 后 SIGKILL）→ 移除 core.sock → desired=stopped。
+// 停机快照回写 → 还原系统代理 → 内核 SIGTERM（5s 后 SIGKILL）→ 移除 core.sock → desired=stopped。
 // flock 释放由调用方 defer 完成。任何一步失败都不阻断后续步骤（合并报错）。
 func fullShutdown(home paths.Home, mgr *core.Manager) error {
 	var errs []error
+	// 触发二（M1-plan §4.3）：内核仍在跑时快照当前选择；必须先于 mgr.Stop()，
+	// 失败不阻断还原流程（内核不可达在 snapshot 内部按跳过语义处理）
+	if err := snapshotBeforeStop(home); err != nil {
+		errs = append(errs, err)
+	}
 	if err := restoreSysProxyIfApplied(home); err != nil {
 		errs = append(errs, err)
 	}

@@ -55,6 +55,11 @@ func Add(ctx context.Context, home paths.Home, src AddSource) error {
 	if err != nil {
 		return err
 	}
+	// 触发三（M1-plan §4.3）：切换 current 前对旧订阅快照回写（内核可达时）；
+	// 此刻内核仍运行旧配置，快照归属旧订阅
+	if err := snapshotBeforeSwitch(ctx, home, &idx); err != nil {
+		return err
+	}
 	idx.Items = append(idx.Items, item)
 	// 导入即切换 current（同一管线是 M1 多订阅管理的正确基础，M0-plan §4）
 	idx.Current = uid
