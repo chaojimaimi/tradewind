@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -32,6 +34,10 @@ func Update(ctx context.Context, home paths.Home, target string) error {
 	if err != nil {
 		return err
 	}
+	settings, err := store.LoadSettings(home)
+	if err != nil {
+		return err
+	}
 	var updated, skipped []string
 	for _, uid := range uids {
 		item, ok := idx.ByUID(uid)
@@ -42,7 +48,7 @@ func Update(ctx context.Context, home paths.Home, target string) error {
 			skipped = append(skipped, fmt.Sprintf("%s (%s): file-type, nothing to update", uid, item.Name))
 			continue
 		}
-		if err := updateOne(ctx, home, item); err != nil {
+		if err := updateOne(ctx, home, settings, item); err != nil {
 			return fmt.Errorf("app: update %s (%s): %w", uid, item.Name, err)
 		}
 		updated = append(updated, fmt.Sprintf("%s (%s)", uid, item.Name))
@@ -60,9 +66,67 @@ func Update(ctx context.Context, home paths.Home, target string) error {
 	return ReloadIfRunning(ctx, home)
 }
 
+// DefaultUpdateInterval 是订阅自动更新间隔的默认值（秒，=24h）。
+// UpdateInterval 0/缺失归一到该值——防"0 恒真导致每 30 分钟全量拉取"打爆机场端点（M2-plan §2.2）。
+const DefaultUpdateInterval = 86400
+
+// NormalizeUpdateInterval interval 归一化：非正值 → 默认 86400。
+func NormalizeUpdateInterval(v int) int {
+	if v <= 0 {
+		return DefaultUpdateInterval
+	}
+	return v
+}
+
+// dueForUpdate 判断条目是否到期可自动拉取：
+// remote 型 + allow_auto_update 生效（指针 nil 视为 true）+ now-updated ≥ interval。
+func dueForUpdate(item store.ProfileItem, now time.Time) bool {
+	if item.Type != store.ProfileTypeRemote {
+		return false
+	}
+	if item.AllowAutoUpdate != nil && !*item.AllowAutoUpdate {
+		return false
+	}
+	return now.Unix()-item.Updated >= int64(NormalizeUpdateInterval(item.UpdateInterval))
+}
+
+// fetchForUpdate 订阅拉取的两层回退（M2-plan §2.2）：
+// update_via_proxy 开启且内核可达 → 先经自身代理（127.0.0.1:mixed）拉取；
+// 失败回退直连重试一次（内核在跑但隧道坏的实战场景）；两层失败才返回错误。
+// 未运行/未开启 → 直连。
+func fetchForUpdate(ctx context.Context, home paths.Home, settings store.Settings, rawURL string) (subscription.Result, error) {
+	if settings.UpdateViaProxyEnabled() && CoreReachable(home) {
+		client, err := proxyClient(settings.MixedPort)
+		if err == nil {
+			res, err := subscription.Fetch(ctx, client, rawURL)
+			if err == nil {
+				return res, nil
+			}
+			fmt.Printf("update: fetch via self proxy failed (%v); retrying direct\n", err)
+		}
+	}
+	return subscription.Fetch(ctx, nil, rawURL)
+}
+
+// proxyClient 构造经自身 mixed 端口的 HTTP 客户端（超时继承 fetchTimeout）。
+func proxyClient(mixedPort int) (*http.Client, error) {
+	proxyURL, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", mixedPort))
+	if err != nil {
+		return nil, fmt.Errorf("app: parse proxy url: %w", err)
+	}
+	return &http.Client{
+		Timeout:   fetchTimeout,
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+	}, nil
+}
+
+// fetchTimeout 与 subscription 包内单次拉取超时一致（此处显式声明避免导出内部常量）。
+const fetchTimeout = 30 * time.Second
+
 // updateOne 拉取 + 校验 + 覆写订阅原文件与 extra（拉取失败则该项保持原样）。
-func updateOne(ctx context.Context, home paths.Home, item *store.ProfileItem) error {
-	res, err := subscription.Fetch(ctx, nil, item.URL)
+// 成功拉取即刷新 Updated（无论内容是否变更）——调度器 due 判据依赖该语义（v1.2）。
+func updateOne(ctx context.Context, home paths.Home, settings store.Settings, item *store.ProfileItem) error {
+	res, err := fetchForUpdate(ctx, home, settings, item.URL)
 	if err != nil {
 		return err
 	}

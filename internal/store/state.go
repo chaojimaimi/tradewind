@@ -41,9 +41,13 @@ type SysProxyState struct {
 }
 
 // CoreState 记录内核期望状态与最近已知 pid（孤儿内核检测用）。
+// Generation 每次 start 自增：防 KeepAlive 快速循环下新旧实例的 state 覆写交错
+// （关停路径检测到 generation 与自身不符 → 放弃 state 写入与系统代理还原，
+// 所有权归新实例，M2-plan §2.3）。
 type CoreState struct {
-	Desired string `json:"desired"`
-	PID     int    `json:"pid"`
+	Desired    string `json:"desired"`
+	PID        int    `json:"pid"`
+	Generation int    `json:"generation"`
 }
 
 // State 是 state.json 的顶层结构：内核期望状态 + 系统代理备份。

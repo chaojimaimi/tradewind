@@ -29,6 +29,8 @@ func TestSettingsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadSettings: %v", err)
 	}
+	// 缺省的 log_retention_days 在加载时归一为默认 14（M2-plan §2.4）
+	s.LogRetentionDays = DefaultLogRetentionDays
 	if got != s {
 		t.Fatalf("round trip got %+v, want %+v", got, s)
 	}
@@ -42,6 +44,7 @@ func TestSettingsValidate(t *testing.T) {
 		{MixedPort: 7897, GatewayPort: 70000, Mode: "rule", LogLevel: "info"},
 		{MixedPort: 7897, GatewayPort: 39097, Mode: "turbo", LogLevel: "info"},
 		{MixedPort: 7897, GatewayPort: 39097, Mode: "rule", LogLevel: "loud"},
+		{MixedPort: 7897, GatewayPort: 39097, Mode: "rule", LogLevel: "info", LogRetentionDays: -1},
 	}
 	for _, s := range bad {
 		if err := s.Validate(); err == nil {
@@ -94,5 +97,39 @@ func TestLoadSettingsCorrupt(t *testing.T) {
 	}
 	if _, err := LoadSettings(home); err == nil {
 		t.Fatal("corrupt settings: want error")
+	}
+}
+
+func TestLoadSettingsM2NewKeysDefaults(t *testing.T) {
+	// M2 新增键：旧 settings.yaml 缺 log_retention_days/update_via_proxy → 归一默认（14 / true）
+	home := paths.Home(t.TempDir())
+	if err := os.WriteFile(home.SettingsFile(), []byte("mixed_port: 17897\nmode: rule\nlog_level: info\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := LoadSettings(home)
+	if err != nil {
+		t.Fatalf("LoadSettings: %v", err)
+	}
+	if s.LogRetentionDays != DefaultLogRetentionDays {
+		t.Fatalf("log_retention_days = %d, want default %d", s.LogRetentionDays, DefaultLogRetentionDays)
+	}
+	if !s.UpdateViaProxyEnabled() {
+		t.Fatal("update_via_proxy nil must default to true")
+	}
+}
+
+func TestUpdateViaProxyExplicitValues(t *testing.T) {
+	// 指针语义：nil=true；显式 false 必须生效（不能被默认吞掉）
+	no := false
+	s := Settings{UpdateViaProxy: &no}
+	if s.UpdateViaProxyEnabled() {
+		t.Fatal("explicit update_via_proxy=false must stay false")
+	}
+	yes := true
+	if !(Settings{UpdateViaProxy: &yes}).UpdateViaProxyEnabled() {
+		t.Fatal("explicit true must stay true")
+	}
+	if !(Settings{}).UpdateViaProxyEnabled() {
+		t.Fatal("nil must default true")
 	}
 }

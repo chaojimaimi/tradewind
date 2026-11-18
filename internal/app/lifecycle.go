@@ -65,8 +65,19 @@ func startCore(home paths.Home, secret string) (*core.Manager, error) {
 
 // fullShutdown 完整还原流程（M0-plan §5.1 步骤 10）：
 // 停机快照回写 → 还原系统代理 → 内核 SIGTERM（5s 后 SIGKILL）→ 移除 core.sock → desired=stopped。
+// generation 归属校验（M2-plan §2.3）：state 中代际与本实例不符 → 新实例已接管，
+// 本进程只停自己的内核子进程，绝不覆写他人 state / 还原他人的系统代理。
+// myGen=0 表示本进程尚未写入代际（start 早期失败路径，持 pidfile 锁期间无接管可能）→ 照常还原。
 // flock 释放由调用方 defer 完成。任何一步失败都不阻断后续步骤（合并报错）。
-func fullShutdown(home paths.Home, mgr *core.Manager) error {
+func fullShutdown(home paths.Home, mgr *core.Manager, myGen int) error {
+	if myGen > 0 && !generationIsMine(home, myGen) {
+		fmt.Printf("shutdown: state taken over by newer instance (generation %d); skip restore, stop own core only\n",
+			stGeneration(home))
+		if mgr != nil {
+			return mgr.Stop()
+		}
+		return nil
+	}
 	var errs []error
 	// 触发二（M1-plan §4.3）：内核仍在跑时快照当前选择；必须先于 mgr.Stop()，
 	// 失败不阻断还原流程（内核不可达在 snapshot 内部按跳过语义处理）
@@ -90,6 +101,20 @@ func fullShutdown(home paths.Home, mgr *core.Manager) error {
 	return nil
 }
 
+// generationIsMine 校验 state 归属：generation 与自身一致（或 state 无代际记录）→ 归我。
+func generationIsMine(home paths.Home, myGen int) bool {
+	return stGeneration(home) == myGen
+}
+
+// stGeneration 读取当前 state 代际（读失败按 0 处理，走兼容路径）。
+func stGeneration(home paths.Home) int {
+	st, err := store.LoadState(home)
+	if err != nil {
+		return 0
+	}
+	return st.Core.Generation
+}
+
 // restoreSysProxyIfApplied 按 state.json 备份精确还原系统代理（applied=false 即无操作）。
 func restoreSysProxyIfApplied(home paths.Home) error {
 	st, err := store.LoadState(home)
@@ -107,13 +132,13 @@ func restoreSysProxyIfApplied(home paths.Home) error {
 	return nil
 }
 
-// markStopped 写回 desired=stopped、applied=false。
+// markStopped 写回 desired=stopped、applied=false（保留 generation——代际单调递增不重置）。
 func markStopped(home paths.Home) error {
 	st, err := store.LoadState(home)
 	if err != nil {
 		return err
 	}
-	st.Core = store.CoreState{Desired: store.DesiredStopped, PID: 0}
+	st.Core = store.CoreState{Desired: store.DesiredStopped, PID: 0, Generation: st.Core.Generation}
 	st.SysProxy.Applied = false
 	return store.SaveState(home, st)
 }
