@@ -34,10 +34,20 @@ final class PanelModel: ObservableObject {
     private let bridge: CoreBridge?
     /// 网关会话注入点（URLProtocol stub 单测；生产默认 .shared）
     private let gatewaySession: URLSession
+    /// WS 速率流（速率卡 + 菜单栏速率文本的数据源）
+    let traffic: TrafficStore
+    /// popover 开合事件（壳装配层在 show 时发送；面板据此刷新）
+    let popoverDidShow = PassthroughSubject<Void, Never>()
 
-    init(bridge: CoreBridge?, session: URLSession = .shared) {
+    init(bridge: CoreBridge?, session: URLSession = .shared, traffic: TrafficStore? = nil) {
         self.bridge = bridge
         self.gatewaySession = session
+        self.traffic = traffic ?? TrafficStore()
+    }
+
+    /// 壳装配层：popover 展示时触发一次刷新。
+    func notifyPopoverShown() {
+        popoverDidShow.send(())
     }
 
     /// 默认模型：live CLI 桥；CLI 不可用仍可进面板（控制面禁用 + 明确提示）。
@@ -67,9 +77,11 @@ final class PanelModel: ObservableObject {
             let report = try bridge.status()
             self.report = report
             gateway = GatewayClient(panelURL: report.panelURL, session: gatewaySession)
+            traffic.attach(gateway: gateway)
             await refreshGroups()
         } catch {
             degraded = true
+            traffic.attach(gateway: nil)
             showToast("状态获取失败：CLI 不可用")
         }
     }

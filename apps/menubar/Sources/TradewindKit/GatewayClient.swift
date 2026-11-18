@@ -58,6 +58,14 @@ struct GatewayClient {
         }
         return data
     }
+
+    /// 构造带显式 Cookie 头的 WS 任务（/traffic 速率流；WHY URLRequest 形态：
+    /// webSocketTask(with: URLRequest) 才能携带自定义头，URL 直构不带 storage）。
+    func webSocketTask(path: String) -> URLSessionWebSocketTask {
+        var request = URLRequest(url: baseURL.appendingPathComponent(path))
+        request.setValue("\(Self.cookieName)=\(token)", forHTTPHeaderField: "Cookie")
+        return session.webSocketTask(with: request)
+    }
 }
 
 /// GET /proxies 的裁剪解码模型（demo 节点列表所需字段）。
