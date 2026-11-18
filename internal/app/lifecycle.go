@@ -147,35 +147,8 @@ func cleanupResidues(home paths.Home) error {
 	return store.SaveState(home, st)
 }
 
-// applySysProxy 备份 → 落盘 applied=true → 写入 127.0.0.1:port。
-// 崩溃安全顺序：备份先行落盘，apply 中途被 kill 也能在下次启动还原。
+// applySysProxy start 路径的系统代理写入（真实 runner）。
+// 实现已抽到 app/sysproxy.go 的 applySysProxyRunner（sysproxy on 与 start 共用一份语义）。
 func applySysProxy(home paths.Home, port int) ([]store.ServiceBackup, error) {
-	runner := sysproxy.SystemRunner()
-	svcs, err := sysproxy.ActiveServices(runner)
-	if err != nil {
-		return nil, err
-	}
-	if len(svcs) == 0 {
-		return nil, errors.New("app: no active network services found")
-	}
-	backups, err := sysproxy.Snapshot(runner, svcs)
-	if err != nil {
-		return nil, err
-	}
-	st, err := store.LoadState(home)
-	if err != nil {
-		return nil, err
-	}
-	st.SysProxy = store.SysProxyState{Applied: true, Services: backups}
-	if err := store.SaveState(home, st); err != nil {
-		return nil, err
-	}
-	if err := sysproxy.Apply(runner, svcs, "127.0.0.1", port); err != nil {
-		// 写入失败立即回滚备份，绝不留下半应用状态
-		_ = sysproxy.Restore(runner, backups)
-		st.SysProxy.Applied = false
-		_ = store.SaveState(home, st)
-		return nil, fmt.Errorf("app: apply sysproxy: %w (networksetup 需要管理员权限)", err)
-	}
-	return backups, nil
+	return applySysProxyRunner(home, port, sysproxy.SystemRunner())
 }
