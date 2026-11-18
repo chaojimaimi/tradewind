@@ -20,6 +20,7 @@ Usage:
   tradewind start [--no-sysproxy]                     foreground run; Ctrl+C for graceful exit
   tradewind stop                                      SIGTERM the running instance
   tradewind status                                    core / system proxy / subscription overview
+  tradewind version                                   show app and core version
 
 Data directory defaults to ~/Library/Application Support/tradewind,
 override with ` + paths.EnvHome + ` (used by tests and smoke).
@@ -45,6 +46,8 @@ func main() {
 		err = cmdStop(home, args[1:])
 	case "status":
 		err = cmdStatus(home, args[1:])
+	case "version":
+		err = cmdVersion(home, args[1:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -112,5 +115,14 @@ func cmdStatus(home paths.Home, args []string) error {
 		// 退出码契约（M0-plan §4）：1 = 内核异常，供脚本判断
 		os.Exit(code)
 	}
+	return nil
+}
+
+func cmdVersion(home paths.Home, args []string) error {
+	fs := flag.NewFlagSet("version", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	fmt.Print(app.VersionReport(home))
 	return nil
 }
