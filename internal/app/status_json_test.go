@@ -20,6 +20,12 @@ func TestStatusJSONDegradedPanel(t *testing.T) {
 		t.Fatal(err)
 	}
 	seedIndex(t, home, nil)
+	// pid 报告自 state.json（运行态真相源）；预置 running 态供断言
+	st := store.DefaultState()
+	st.Core = store.CoreState{Desired: store.DesiredRunning, PID: 4242, Generation: 1}
+	if err := store.SaveState(home, st); err != nil {
+		t.Fatal(err)
+	}
 
 	r, err := Status(home)
 	if err != nil {
