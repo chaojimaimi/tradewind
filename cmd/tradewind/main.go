@@ -58,7 +58,8 @@ func main() {
 		err = cmdDelay(home, args[1:])
 	case "panel":
 		err = cmdPanel(home, args[1:])
-	case "version":
+	case "version", "--version", "-v":
+		// WHY 收编惯用 flag 形式：用户直觉输入 tradewind --version，而非子命令
 		err = cmdVersion(home, args[1:])
 	case "help", "-h", "--help":
 		usage()
