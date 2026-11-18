@@ -10,27 +10,39 @@ import (
 
 // 应用设置的默认值（与内置模板保持一致；settings 覆盖一切）。
 const (
-	DefaultMixedPort = 7897
-	DefaultMode      = "rule"
-	DefaultLogLevel  = "info"
+	DefaultMixedPort   = 7897
+	DefaultGatewayPort = 39097 // 面板网关：避开 Verge 9097 控制器与 7895-7899 代理段（M1-plan §4.1）
+	DefaultMode        = "rule"
+	DefaultLogLevel    = "info"
 )
 
 // Settings 是 settings.yaml：应用级端口/模式/日志级别。
 type Settings struct {
-	MixedPort int    `yaml:"mixed_port" json:"mixed_port"`
-	Mode      string `yaml:"mode" json:"mode"`
-	LogLevel  string `yaml:"log_level" json:"log_level"`
+	MixedPort    int    `yaml:"mixed_port" json:"mixed_port"`
+	GatewayPort  int    `yaml:"gateway_port" json:"gateway_port"`
+	PanelEnabled bool   `yaml:"panel_enabled" json:"panel_enabled"`
+	Mode         string `yaml:"mode" json:"mode"`
+	LogLevel     string `yaml:"log_level" json:"log_level"`
 }
 
 // DefaultSettings 返回默认设置。
 func DefaultSettings() Settings {
-	return Settings{MixedPort: DefaultMixedPort, Mode: DefaultMode, LogLevel: DefaultLogLevel}
+	return Settings{
+		MixedPort:    DefaultMixedPort,
+		GatewayPort:  DefaultGatewayPort,
+		PanelEnabled: true,
+		Mode:         DefaultMode,
+		LogLevel:     DefaultLogLevel,
+	}
 }
 
 // Validate 校验设置取值范围，防止非法值进入 runtime.yaml 导致内核拒绝启动。
 func (s Settings) Validate() error {
 	if s.MixedPort < 1 || s.MixedPort > 65535 {
 		return fmt.Errorf("store: invalid mixed_port %d", s.MixedPort)
+	}
+	if s.GatewayPort < 1 || s.GatewayPort > 65535 {
+		return fmt.Errorf("store: invalid gateway_port %d", s.GatewayPort)
 	}
 	switch s.Mode {
 	case "rule", "global", "direct":
@@ -46,6 +58,7 @@ func (s Settings) Validate() error {
 }
 
 // LoadSettings 读取设置；文件不存在时返回默认值。
+// 旧版 settings.yaml 缺 gateway_port（或显式 0）→ 归一为默认 39097（M1-plan §4.1）。
 func LoadSettings(h paths.Home) (Settings, error) {
 	s := DefaultSettings()
 	if err := ReadYAML(h.SettingsFile(), &s); err != nil {
@@ -53,6 +66,9 @@ func LoadSettings(h paths.Home) (Settings, error) {
 			return DefaultSettings(), nil
 		}
 		return Settings{}, err
+	}
+	if s.GatewayPort == 0 {
+		s.GatewayPort = DefaultGatewayPort
 	}
 	if err := s.Validate(); err != nil {
 		return Settings{}, err

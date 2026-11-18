@@ -66,5 +66,11 @@ func (h Home) LogFile1() string     { return h.join("logs", "core.log.1") }
 func (h Home) GeoIP() string        { return h.join("geoip.metadb") }
 func (h Home) GeoSite() string      { return h.join("geosite.dat") }
 
+// UIDir 是面板网关静态托管的 metacubexd 资源目录（M1-plan §1.3）。
+func (h Home) UIDir() string { return h.join("ui") }
+
+// PanelTokenFile 是面板网关凭据文件（32 字节 hex，600，首启生成）。
+func (h Home) PanelTokenFile() string { return h.join("panel_token") }
+
 // ProfileFile 返回某个订阅原文件路径（订阅文件本身只读）。
 func (h Home) ProfileFile(file string) string { return h.join("profiles", file) }

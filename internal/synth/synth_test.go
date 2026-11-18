@@ -16,8 +16,11 @@ var updateGolden = flag.Bool("update-golden", false, "rewrite golden files")
 
 func testInjection() Injection {
 	return Injection{
-		Settings: store.Settings{MixedPort: 17890, Mode: "rule", LogLevel: "info"},
-		Secret:   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		Settings: store.Settings{
+			MixedPort: 17890, GatewayPort: store.DefaultGatewayPort, PanelEnabled: true,
+			Mode: "rule", LogLevel: "info",
+		},
+		Secret: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 	}
 }
 
@@ -119,7 +122,7 @@ rules:
 func TestSynthSettingsOverrideTemplate(t *testing.T) {
 	sub, _ := os.ReadFile(filepath.Join("testdata", "subscription.yaml"))
 	inj := testInjection()
-	inj.Settings = store.Settings{MixedPort: 18888, Mode: "global", LogLevel: "debug"}
+	inj.Settings = store.Settings{MixedPort: 18888, GatewayPort: store.DefaultGatewayPort, Mode: "global", LogLevel: "debug"}
 	got, err := Synth(sub, inj)
 	if err != nil {
 		t.Fatal(err)
