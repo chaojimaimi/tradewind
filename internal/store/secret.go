@@ -3,6 +3,7 @@ package store
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -18,7 +19,7 @@ func EnsureSecret(h paths.Home) (string, error) {
 		if s := strings.TrimSpace(string(data)); s != "" {
 			return s, nil
 		}
-	} else if !os.IsNotExist(err) {
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("store: read secret: %w", err)
 	}
 	buf := make([]byte, 32)
@@ -30,4 +31,14 @@ func EnsureSecret(h paths.Home) (string, error) {
 		return "", err
 	}
 	return secret, nil
+}
+
+// ReadSecret 只读获取 secret（绝不生成）。不存在或不可读时返回空串，
+// 供 status/探测等只读路径使用。
+func ReadSecret(h paths.Home) string {
+	data, err := os.ReadFile(h.SecretFile())
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
