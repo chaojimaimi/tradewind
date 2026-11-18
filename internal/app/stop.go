@@ -52,5 +52,9 @@ func Stop(home paths.Home) error {
 		return fmt.Errorf("app: tradewind (pid %d) did not exit within %s; try SIGKILL manually", pid, stopTimeout)
 	}
 	fmt.Println("tradewind stopped")
+	// KeepAlive 语义提示（M2-plan §2.3）：exit 0 不被拉回，但下次登录仍自启
+	if autostartEnabled() {
+		fmt.Println("autostart 开启中：本次手动停止不会被 launchd 拉回（SuccessfulExit 语义）；下次登录仍自启")
+	}
 	return nil
 }

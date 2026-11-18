@@ -28,6 +28,7 @@ Usage:
   tradewind sysproxy on|off                           runtime system proxy toggle (idempotent; on requires core running)
   tradewind list                                      list subscriptions (uid/name/type/updated/traffic/expire)
   tradewind use <UID|NAME>                            switch the current subscription (snapshot + hot reload)
+  tradewind autostart on|off|status                   manage the launchd LaunchAgent (starts on login, crash-restart)
   tradewind panel                                     open metacubexd via the panel gateway
   tradewind version                                   show app and core version
 
@@ -69,6 +70,8 @@ func main() {
 		err = cmdList(home, args[1:])
 	case "use":
 		err = cmdUse(home, args[1:])
+	case "autostart":
+		err = cmdAutostart(home, args[1:])
 	case "panel":
 		err = cmdPanel(home, args[1:])
 	case "version", "--version", "-v":
@@ -213,6 +216,18 @@ func cmdUse(home paths.Home, args []string) error {
 		return err
 	}
 	return app.Use(context.Background(), home, fs.Arg(0))
+}
+
+func cmdAutostart(home paths.Home, args []string) error {
+	fs := flag.NewFlagSet("autostart", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	action := fs.Arg(0)
+	if action == "" {
+		action = "status"
+	}
+	return app.Autostart(home, action)
 }
 
 func cmdPanel(home paths.Home, args []string) error {
