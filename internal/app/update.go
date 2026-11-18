@@ -14,7 +14,13 @@ import (
 // Update 手动更新订阅（target: UID | current | all）。
 // 仅对 remote 型生效；file 型明确报错跳过（本地文件无更新语义，M0-plan §4）。
 // 成功后内核在跑 → 重新合成 + 热重载（ReloadIfRunning）；未运行 → 仅落盘。
+// mutation.lock 覆盖 fetch→SaveIndex→Synthesize→PUT 全程，与调度器互斥（M2-plan §2.2）。
 func Update(ctx context.Context, home paths.Home, target string) error {
+	lock, err := AcquireMutationLock(home)
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
 	idx, err := store.LoadIndex(home)
 	if err != nil {
 		return err

@@ -26,6 +26,8 @@ Usage:
   tradewind delay [GROUP]                             latency test, default group from last selection
   tradewind mode [rule|global|direct]                 show or switch outbound mode (hot-applied when running)
   tradewind sysproxy on|off                           runtime system proxy toggle (idempotent; on requires core running)
+  tradewind list                                      list subscriptions (uid/name/type/updated/traffic/expire)
+  tradewind use <UID|NAME>                            switch the current subscription (snapshot + hot reload)
   tradewind panel                                     open metacubexd via the panel gateway
   tradewind version                                   show app and core version
 
@@ -63,6 +65,10 @@ func main() {
 		err = cmdMode(home, args[1:])
 	case "sysproxy":
 		err = cmdSysProxy(home, args[1:])
+	case "list":
+		err = cmdList(home, args[1:])
+	case "use":
+		err = cmdUse(home, args[1:])
 	case "panel":
 		err = cmdPanel(home, args[1:])
 	case "version", "--version", "-v":
@@ -191,6 +197,22 @@ func cmdSysProxy(home paths.Home, args []string) error {
 		return app.SysProxyOn(home)
 	}
 	return app.SysProxyOff(home)
+}
+
+func cmdList(home paths.Home, args []string) error {
+	fs := flag.NewFlagSet("list", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return app.List(home)
+}
+
+func cmdUse(home paths.Home, args []string) error {
+	fs := flag.NewFlagSet("use", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return app.Use(context.Background(), home, fs.Arg(0))
 }
 
 func cmdPanel(home paths.Home, args []string) error {

@@ -22,10 +22,16 @@ type AddSource struct {
 
 // Add 导入订阅（含校验），写入 profiles/<uid>.yaml 并成为 current。
 // URL 拉取失败或校验不过 → 不落盘、返回错误（M0-plan §4）。
+// mutation.lock 覆盖 fetch→SaveIndex→Synthesize→PUT 全程（M2-plan §2.2）。
 func Add(ctx context.Context, home paths.Home, src AddSource) error {
 	if (src.URL == "") == (src.FilePath == "") {
 		return fmt.Errorf("app: provide either <url> or --file <path>, not both/neither")
 	}
+	lock, err := AcquireMutationLock(home)
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
 	body, url, name, err := loadSource(ctx, src)
 	if err != nil {
 		return err

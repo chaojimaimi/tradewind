@@ -57,14 +57,17 @@ func (h Home) LogsDir() string      { return h.join("logs") }
 func (h Home) IndexFile() string    { return h.join("profiles.yaml") }
 func (h Home) SettingsFile() string { return h.join("settings.yaml") }
 func (h Home) StateFile() string    { return h.join("state.json") }
-func (h Home) SecretFile() string   { return h.join("secret") }
-func (h Home) RuntimeFile() string  { return h.join("runtime.yaml") }
-func (h Home) SockFile() string     { return h.join("core.sock") }
-func (h Home) PIDFile() string      { return h.join("tradewind.pid") }
-func (h Home) LogFile() string      { return h.join("logs", "core.log") }
-func (h Home) LogFile1() string     { return h.join("logs", "core.log.1") }
-func (h Home) GeoIP() string        { return h.join("geoip.metadb") }
-func (h Home) GeoSite() string      { return h.join("geosite.dat") }
+
+// MutationLockFile 是跨进程写互斥锁（flock；调度器 vs 手动 update/use/add，M2-plan §2.2）。
+func (h Home) MutationLockFile() string { return h.join("mutation.lock") }
+func (h Home) SecretFile() string       { return h.join("secret") }
+func (h Home) RuntimeFile() string      { return h.join("runtime.yaml") }
+func (h Home) SockFile() string         { return h.join("core.sock") }
+func (h Home) PIDFile() string          { return h.join("tradewind.pid") }
+func (h Home) LogFile() string          { return h.join("logs", "core.log") }
+func (h Home) LogFile1() string         { return h.join("logs", "core.log.1") }
+func (h Home) GeoIP() string            { return h.join("geoip.metadb") }
+func (h Home) GeoSite() string          { return h.join("geosite.dat") }
 
 // UIDir 是面板网关静态托管的 metacubexd 资源目录（M1-plan §1.3）。
 func (h Home) UIDir() string { return h.join("ui") }
