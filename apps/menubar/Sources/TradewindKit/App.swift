@@ -19,6 +19,8 @@ public enum TradewindApp {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
+    /// popover 展开期间的全局点击监听（收起兜底，见 popoverWillShow）
+    private var outsideClickMonitor: Any?
     private let popover = NSPopover()
     /// 面板状态与 WS 速率（壳的数据中枢；菜单栏图标/速率文本同源于此）
     private lazy var model: PanelModel = .live()
@@ -54,6 +56,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         button.target = self
         button.action = #selector(statusItemClicked(_:))
+        // WHY 扩展 sendAction 掩码：状态项按钮默认仅左键触发 action——不扩展则右键
+        // 事件永远到不了 statusItemClicked，Quit 菜单入口失效（M2 真机验收缺陷）
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         item.menu = nil // 事件全走 action：左键 popover / 右键菜单
         statusItem = item
         refreshIcon()
@@ -63,6 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let event = NSApp.currentEvent else { return }
         // 右键（或 control+左键）→ Quit 菜单（退壳不停内核，M2-plan §5 v1.1）
         if event.type == .rightMouseUp || (event.type == .leftMouseUp && event.modifierFlags.contains(.control)) {
+            if popover.isShown { popover.performClose(sender) } // code-reviewer LOW：避免菜单下悬挂
             showQuitMenu(sender)
             return
         }
@@ -125,9 +131,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// popover 生命周期：展示时刷新面板数据（与周期 timer 双保险）。
+/// popover 生命周期：展示时刷新面板数据 + 全局收起兜底（与周期 timer 双保险）。
 extension AppDelegate: NSPopoverDelegate {
     func popoverWillShow(_ notification: Notification) {
         model.notifyPopoverShown()
+        // WHY 全局监听兜底：.transient 在 accessory（LSUIElement）应用下的自动收起不可靠——
+        // 点击桌面/其他状态项不触发 resignKey，popover 悬挂不收（M2 真机验收缺陷）。
+        // 显式监听进程外点击保证交互契约"点击外部即收起"；全局监听不接收本进程事件，
+        // 状态项 toggle 与 popover 内部点击不受影响。
+        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown]
+        ) { [weak self] _ in
+            DispatchQueue.main.async { self?.popover.performClose(nil) }
+        }
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        if let monitor = outsideClickMonitor {
+            NSEvent.removeMonitor(monitor)
+            outsideClickMonitor = nil
+        }
     }
 }
