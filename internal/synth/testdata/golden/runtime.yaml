@@ -12,6 +12,10 @@ log-level: info
 external-controller: ""
 # 仅监听本机回环，不向局域网暴露代理端口
 allow-lan: false
+# M1 #4：内核侧节点选择持久化。mihomo 该键默认 false——缺失则节点选择重启即丢
+# （M1-plan §1.1 前置依赖）；synth 以本模板为基底，无需双重注入
+profile:
+  store-selected: true
 # M0 最小 DNS 段：enable + 默认 nameserver（白名单完整版 DNS 延后 M1）
 dns:
   enable: true

@@ -128,3 +128,116 @@ func TestNewClientMissingSockFileAllowed(t *testing.T) {
 		t.Fatal("NewClient must not create sock file")
 	}
 }
+
+func TestClientGetProxies(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/proxies", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"proxies":{
+			"🚀 节点选择":{"name":"🚀 节点选择","type":"Selector","now":"FAKE-HK-01","all":["FAKE-HK-01","FAKE-JP-01"],"history":[{"time":"t","delay":120}]},
+			"AUTO":{"name":"AUTO","type":"URLTest","now":"FAKE-JP-01","all":["FAKE-HK-01"]},
+			"FAKE-HK-01":{"name":"FAKE-HK-01","type":"Socks5","history":[]}
+		}}`))
+	})
+	c, cleanup := newStubAPI(t, mux)
+	defer cleanup()
+
+	proxies, err := c.GetProxies(context.Background())
+	if err != nil {
+		t.Fatalf("GetProxies: %v", err)
+	}
+	g := proxies["🚀 节点选择"]
+	if !g.IsGroup() || g.Now != "FAKE-HK-01" || len(g.All) != 2 {
+		t.Fatalf("group entry = %+v", g)
+	}
+	if d, ok := g.LastDelay(); !ok || d != 120 {
+		t.Fatalf("LastDelay = %d %v, want 120 true", d, ok)
+	}
+	if d, ok := proxies["FAKE-HK-01"].LastDelay(); ok {
+		t.Fatalf("empty history LastDelay = %d, want false", d)
+	}
+	if proxies["FAKE-HK-01"].IsGroup() {
+		t.Fatal("Socks5 entry must not be a group")
+	}
+}
+
+func TestClientSelectProxyEscapesGroupName(t *testing.T) {
+	// emoji+空格组名必须以 path 段转义形式上线（断言原始 RequestURI，M1-plan §5.1）
+	mux := http.NewServeMux()
+	var gotURI, gotBody string
+	mux.HandleFunc("/proxies/", func(w http.ResponseWriter, r *http.Request) {
+		gotURI = r.URL.RequestURI()
+		data, _ := io.ReadAll(r.Body)
+		gotBody = string(data)
+		if r.Method != http.MethodPut {
+			t.Errorf("method = %s, want PUT", r.Method)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	c, cleanup := newStubAPI(t, mux)
+	defer cleanup()
+
+	if err := c.SelectProxy(context.Background(), "🚀 节点选择", "FAKE-JP-01"); err != nil {
+		t.Fatalf("SelectProxy: %v", err)
+	}
+	if gotURI != "/proxies/%F0%9F%9A%80%20%E8%8A%82%E7%82%B9%E9%80%89%E6%8B%A9" {
+		t.Fatalf("request URI = %q, want escaped emoji group segment", gotURI)
+	}
+	if gotBody != `{"name":"FAKE-JP-01"}` {
+		t.Fatalf("body = %q", gotBody)
+	}
+}
+
+func TestClientProxyDelay(t *testing.T) {
+	mux := http.NewServeMux()
+	var gotQuery string
+	mux.HandleFunc("/proxies/", func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Write([]byte(`{"delay":230}`))
+	})
+	c, cleanup := newStubAPI(t, mux)
+	defer cleanup()
+
+	d, err := c.ProxyDelay(context.Background(), "🇭🇰 HK-01", 5000, "http://www.gstatic.com/generate_204")
+	if err != nil {
+		t.Fatalf("ProxyDelay: %v", err)
+	}
+	if d != 230 {
+		t.Fatalf("delay = %d, want 230", d)
+	}
+	if gotQuery != "timeout=5000&url=http%3A%2F%2Fwww.gstatic.com%2Fgenerate_204" {
+		t.Fatalf("query = %q", gotQuery)
+	}
+}
+
+func TestClientProxyDelayEmojiNameEscaped(t *testing.T) {
+	mux := http.NewServeMux()
+	var gotURI string
+	mux.HandleFunc("/proxies/", func(w http.ResponseWriter, r *http.Request) {
+		gotURI = r.URL.RequestURI()
+		w.Write([]byte(`{"delay":1}`))
+	})
+	c, cleanup := newStubAPI(t, mux)
+	defer cleanup()
+
+	if _, err := c.ProxyDelay(context.Background(), "🇭🇰 HK-01", 1000, "http://x"); err != nil {
+		t.Fatalf("ProxyDelay: %v", err)
+	}
+	if !strings.HasPrefix(gotURI, "/proxies/%F0%9F%87%AD%F0%9F%87%B0%20HK-01/delay") {
+		t.Fatalf("request URI = %q, want escaped emoji node segment", gotURI)
+	}
+}
+
+func TestClientProxyDelayFailureIsError(t *testing.T) {
+	// 实测 mihomo v1.19.34：不可达节点返回 503 + {"message":...}，必须折为 error
+	mux := http.NewServeMux()
+	mux.HandleFunc("/proxies/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"message":"An error occurred in the delay test"}`))
+	})
+	c, cleanup := newStubAPI(t, mux)
+	defer cleanup()
+
+	if _, err := c.ProxyDelay(context.Background(), "n1", 100, "http://x"); err == nil {
+		t.Fatal("delay failure: want error")
+	}
+}

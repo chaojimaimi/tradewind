@@ -109,6 +109,11 @@ rules:
 	if dns == nil || dns["enable"] != true {
 		t.Fatalf("dns = %v, want template dns preserved (subscription dns dropped)", out["dns"])
 	}
+	// M1 前置依赖：profile.store-selected 必须进 runtime（mihomo 默认 false，缺失则重启丢选择）
+	profile, _ := out["profile"].(map[string]any)
+	if profile == nil || profile["store-selected"] != true {
+		t.Fatalf("profile = %v, want store-selected true from template", out["profile"])
+	}
 }
 
 func TestSynthSettingsOverrideTemplate(t *testing.T) {

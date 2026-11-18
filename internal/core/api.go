@@ -8,6 +8,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -16,7 +18,47 @@ import (
 const apiTimeout = 10 * time.Second
 
 // apiMaxBody 限制响应体读取上限，防异常内核响应拖垮内存。
-const apiMaxBody = 1 << 20
+// M1 提升到 8MB：大订阅的 GET /proxies 全量响应可超 1MB（M1-plan §5.1）。
+const apiMaxBody = 8 << 20
+
+// 延迟测试默认参数（M1-plan §5.1 / DESIGN P0 #5）。
+const (
+	DefaultDelayTimeoutMS = 5000
+	DefaultDelayTestURL   = "http://www.gstatic.com/generate_204"
+)
+
+// DelaySample 是节点延迟历史中的单条采样（仅 M1 所需字段）。
+type DelaySample struct {
+	Delay int `json:"delay"`
+}
+
+// Proxy 是 GET /proxies 的单条目（字段裁剪到 M1 所需）。
+type Proxy struct {
+	Name    string        `json:"name"`
+	Type    string        `json:"type"`
+	Now     string        `json:"now"`
+	All     []string      `json:"all"`
+	History []DelaySample `json:"history"`
+}
+
+// IsGroup 判断该条目是否策略组（Selector/URLTest/Fallback/LoadBalance/Relay）。
+func (p Proxy) IsGroup() bool {
+	switch p.Type {
+	case "Selector", "URLTest", "Fallback", "LoadBalance", "Relay":
+		return true
+	}
+	return false
+}
+
+// LastDelay 返回最近一次延迟采样（毫秒）；无记录或记录为 0（未测）时返回 false。
+func (p Proxy) LastDelay() (int, bool) {
+	if n := len(p.History); n > 0 {
+		if d := p.History[n-1].Delay; d > 0 {
+			return d, true
+		}
+	}
+	return 0, false
+}
 
 // Client 是 mihomo unix socket RESTful 客户端。
 // M0 仅需两个端点（M0-plan §5.3）：GET /version、PUT /configs?force=true。
@@ -65,6 +107,52 @@ func (c *Client) PutConfigs(ctx context.Context, configPath string) error {
 	}
 	_, err = c.do(ctx, http.MethodPut, "/configs?force=true", payload)
 	return err
+}
+
+// GetProxies 请求 GET /proxies，返回全量节点/组（键为节点或组名）。
+func (c *Client) GetProxies(ctx context.Context) (map[string]Proxy, error) {
+	data, err := c.do(ctx, http.MethodGet, "/proxies", nil)
+	if err != nil {
+		return nil, err
+	}
+	var res struct {
+		Proxies map[string]Proxy `json:"proxies"`
+	}
+	if err := json.Unmarshal(data, &res); err != nil {
+		return nil, fmt.Errorf("core: parse /proxies: %w", err)
+	}
+	return res.Proxies, nil
+}
+
+// SelectProxy 切换组内节点：PUT /proxies/{group}，body {"name": node}（M1-plan §5.1）。
+// 组名经 url.PathEscape——emoji/空格必须编码为单个 path 段。
+func (c *Client) SelectProxy(ctx context.Context, group, node string) error {
+	payload, err := json.Marshal(map[string]string{"name": node})
+	if err != nil {
+		return fmt.Errorf("core: marshal payload: %w", err)
+	}
+	_, err = c.do(ctx, http.MethodPut, "/proxies/"+url.PathEscape(group), payload)
+	return err
+}
+
+// ProxyDelay 单节点延迟测试：GET /proxies/{name}/delay?timeout=&url=，
+// 返回毫秒数；内核测试失败（超时/不可达）按非 2xx 折为 error（实测 503）。
+func (c *Client) ProxyDelay(ctx context.Context, name string, timeoutMS int, testURL string) (int, error) {
+	q := url.Values{}
+	q.Set("timeout", strconv.Itoa(timeoutMS))
+	q.Set("url", testURL)
+	endpoint := "/proxies/" + url.PathEscape(name) + "/delay?" + q.Encode()
+	data, err := c.do(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return 0, err
+	}
+	var res struct {
+		Delay int `json:"delay"`
+	}
+	if err := json.Unmarshal(data, &res); err != nil {
+		return 0, fmt.Errorf("core: parse /proxies/{name}/delay: %w", err)
+	}
+	return res.Delay, nil
 }
 
 // do 执行请求；非 2xx 返回携带响应摘要的错误。
