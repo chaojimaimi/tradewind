@@ -34,7 +34,7 @@ func (h Home) String() string { return string(h) }
 // Ensure 创建数据目录及固定子目录，权限 700/700。
 // 显式 chmod：MkdirAll 对已存在目录不会修正权限，而目录权限 700 是 unix socket 的真正防线。
 func (h Home) Ensure() error {
-	for _, dir := range []string{h.String(), h.Bin(), h.ProfilesDir(), h.LogsDir()} {
+	for _, dir := range []string{h.String(), h.BinDir(), h.ProfilesDir(), h.LogsDir()} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("paths: create %s: %w", dir, err)
 		}
@@ -49,6 +49,7 @@ func (h Home) join(elem ...string) string {
 	return filepath.Join(append([]string{h.String()}, elem...)...)
 }
 
+func (h Home) BinDir() string       { return h.join("bin") }
 func (h Home) Bin() string          { return h.join("bin", "mihomo") }
 func (h Home) Sidecar() string      { return h.join("bin", "mihomo.sha256") }
 func (h Home) ProfilesDir() string  { return h.join("profiles") }

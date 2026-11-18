@@ -34,7 +34,7 @@ func TestEnsureCreatesDirs700(t *testing.T) {
 	if err := home.Ensure(); err != nil {
 		t.Fatalf("Ensure again: %v", err)
 	}
-	for _, dir := range []string{home.String(), home.Bin(), home.ProfilesDir(), home.LogsDir()} {
+	for _, dir := range []string{home.String(), home.BinDir(), home.ProfilesDir(), home.LogsDir()} {
 		info, err := os.Stat(dir)
 		if err != nil {
 			t.Fatalf("stat %s: %v", dir, err)
@@ -48,6 +48,7 @@ func TestEnsureCreatesDirs700(t *testing.T) {
 func TestSubpaths(t *testing.T) {
 	home := Home("/data")
 	cases := map[string]func() string{
+		"bin":               home.BinDir,
 		"bin/mihomo":        home.Bin,
 		"bin/mihomo.sha256": home.Sidecar,
 		"profiles.yaml":     home.IndexFile,
