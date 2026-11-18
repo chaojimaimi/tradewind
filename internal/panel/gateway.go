@@ -33,9 +33,9 @@ type Gateway struct {
 	proxy http.Handler // 内核反代；nil 时非 /ui 请求按 404（仅中间装配状态）
 }
 
-// NewGateway 构造网关。
+// NewGateway 构造网关（含内核反代装配）。
 func NewGateway(cfg Config) *Gateway {
-	return &Gateway{cfg: cfg}
+	return &Gateway{cfg: cfg, proxy: newCoreProxy(cfg.SockPath, cfg.Secret)}
 }
 
 // ServeHTTP 路由：先过纵深防御（Host/Origin），再按路径分流。

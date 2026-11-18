@@ -24,6 +24,10 @@ func newTestGateway(t *testing.T) (*Gateway, string) {
 	if err := os.WriteFile(filepath.Join(ui, "_nuxt", "app.js"), []byte("console.log(1)"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// 审计④（M1-plan §5.2）：metacubexd 前端资产形态——空 defaultBackendURL 构建配置
+	if err := os.WriteFile(filepath.Join(ui, "config.js"), []byte("window.config={defaultBackendURL:\"\"}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	g := NewGateway(Config{Port: 39097, UIDir: ui, Token: testToken, SockPath: "/tmp/none.sock", Secret: "gw-secret"})
 	return g, "127.0.0.1:39097"
 }
@@ -191,13 +195,35 @@ func TestOriginHeaderMustBeSameSource(t *testing.T) {
 	}
 }
 
-func TestAPIPathsWithoutProxyReturn404(t *testing.T) {
-	// 中间装配状态：cookie 合法但反代未装配 → 404（不 panic）
+func TestAPIPathsWithDeadBackendAre502(t *testing.T) {
+	// 反代已装配但内核不可达：502 且错误体是固定文案（审计③：不回显 sock 路径/secret）
 	g, host := newTestGateway(t)
 	auth := map[string]string{"Cookie": cookieName + "=" + testToken}
-	for _, target := range []string{"/version", "/proxies", "/ui/../"} {
-		if rec := get(g, host, target, auth); rec.Code != http.StatusNotFound {
-			t.Fatalf("%s status = %d, want 404 (proxy not wired yet)", target, rec.Code)
+	for _, target := range []string{"/version", "/proxies"} {
+		rec := get(g, host, target, auth)
+		if rec.Code != http.StatusBadGateway {
+			t.Fatalf("%s status = %d, want 502", target, rec.Code)
 		}
+		body := rec.Body.String()
+		if strings.Contains(body, "gw-secret") || strings.Contains(body, "none.sock") {
+			t.Fatalf("%s error body leaks internals: %q", target, body)
+		}
+	}
+	// /ui/../ 是静态分支的穿越拒绝，保持 404
+	if rec := get(g, host, "/ui/../", auth); rec.Code != http.StatusNotFound {
+		t.Fatalf("traversal status = %d, want 404", rec.Code)
+	}
+}
+
+func TestFrontendAssetsContainNoSecret(t *testing.T) {
+	// 审计④：静态托管的前端资产不得携带 secret（网关侧断言；smoke 对真实 ui/ 复核）
+	g, host := newTestGateway(t)
+	auth := map[string]string{"Cookie": cookieName + "=" + testToken}
+	rec := get(g, host, "/ui/config.js", auth)
+	if rec.Code != 200 {
+		t.Fatalf("config.js status = %d", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "gw-secret") {
+		t.Fatal("frontend asset leaked secret")
 	}
 }
