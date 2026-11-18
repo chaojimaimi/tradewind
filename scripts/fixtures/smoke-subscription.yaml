@@ -1,0 +1,22 @@
+# 冒烟用脱敏订阅 fixture：假节点假凭据（loopback 上的空端口），可安全入库。
+# 仅用于断言 add/校验/合成/start 握手/stop 清理全链路；不含出网 204 断言（见 M0-plan §6 fixture 二分）。
+proxies:
+  - name: "FAKE-HK-01"
+    type: socks5
+    server: 127.0.0.1
+    port: 1080
+    udp: true
+  - name: "FAKE-JP-01"
+    type: socks5
+    server: 127.0.0.1
+    port: 1081
+    udp: true
+proxy-groups:
+  - name: "FAKE-GROUP"
+    type: select
+    proxies:
+      - "FAKE-HK-01"
+      - "FAKE-JP-01"
+rules:
+  - DOMAIN,example.invalid,FAKE-GROUP
+  - MATCH,FAKE-GROUP
