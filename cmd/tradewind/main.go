@@ -20,6 +20,9 @@ Usage:
   tradewind start [--no-sysproxy]                     foreground run; Ctrl+C for graceful exit
   tradewind stop                                      SIGTERM the running instance
   tradewind status                                    core / system proxy / subscription overview
+  tradewind nodes [GROUP]                             list policy groups, or GROUP's nodes with last delay
+  tradewind select <GROUP> <NODE>                     switch node (requires core running)
+  tradewind delay [GROUP]                             latency test, default group from last selection
   tradewind version                                   show app and core version
 
 Data directory defaults to ~/Library/Application Support/tradewind,
@@ -46,6 +49,12 @@ func main() {
 		err = cmdStop(home, args[1:])
 	case "status":
 		err = cmdStatus(home, args[1:])
+	case "nodes":
+		err = cmdNodes(home, args[1:])
+	case "select":
+		err = cmdSelect(home, args[1:])
+	case "delay":
+		err = cmdDelay(home, args[1:])
 	case "version":
 		err = cmdVersion(home, args[1:])
 	case "help", "-h", "--help":
@@ -125,4 +134,28 @@ func cmdVersion(home paths.Home, args []string) error {
 	}
 	fmt.Print(app.VersionReport(home))
 	return nil
+}
+
+func cmdNodes(home paths.Home, args []string) error {
+	fs := flag.NewFlagSet("nodes", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return app.Nodes(context.Background(), home, fs.Arg(0))
+}
+
+func cmdSelect(home paths.Home, args []string) error {
+	fs := flag.NewFlagSet("select", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return app.Select(context.Background(), home, fs.Arg(0), fs.Arg(1))
+}
+
+func cmdDelay(home paths.Home, args []string) error {
+	fs := flag.NewFlagSet("delay", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return app.Delay(context.Background(), home, fs.Arg(0))
 }
