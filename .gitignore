@@ -9,3 +9,8 @@ dist/
 
 # 系统
 .DS_Store
+
+# Swift 壳构建产物（apps/menubar）
+.build/
+apps/menubar/dist/
+.swiftpm/
