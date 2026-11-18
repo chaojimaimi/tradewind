@@ -17,8 +17,10 @@
 #   阶段4 mode：mode global → settings/runtime/内核三方一致 → 重启后保持（重合成落地）；
 #     status --json schema（含 panel_url）与 panel --url
 #   阶段5 use：第二订阅 add → 组内回退确定性 → use 切回 → selected 快照保持
+#   阶段6 壳（可自动化部分）：build.sh 产出 .app（LSUIElement）→ 直接拉起存活 ≥30s
+#     不崩 → screencapture 仅存档不断言 → SIGTERM 正常退出（真机交互验收归用户，M2-plan §6）
 #   阶段3 sysproxy：networksetup 快照 → start → 应用 → stop → 逐字段还原 diff
-#   （阶段④⑤插在阶段③之前：阶段③的 Verge-SKIP 是 exit 0 短路，后插会被跳过——M2-plan §9）
+#   （阶段④⑤⑥插在阶段③之前：阶段③的 Verge-SKIP 是 exit 0 短路，后插会被跳过——M2-plan §9）
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -289,6 +291,43 @@ esac
 if "$TW" use nope >/dev/null 2>&1; then fail "unknown use target accepted"; fi
 grep -q 'node: FAKE-JP-01' "$TW_HOME/profiles.yaml" || fail "selected record lost after use round-trip"
 log "STAGE 5 multi-subscription use PASS"
+
+# ============ 阶段 6：壳可自动化部分（M2-plan §6 重定义：build → 存活 → 退出）============
+log "== STAGE 6: menubar shell (automatable part only)"
+log "building Tradewind.app via apps/menubar/build.sh"
+VERSION="$SMOKE_VERSION" "$REPO_ROOT/apps/menubar/build.sh" > "$WORK/shell-build.log" 2>&1 \
+  || { cat "$WORK/shell-build.log"; fail "shell build.sh failed"; }
+SHELL_APP="$REPO_ROOT/apps/menubar/dist/Tradewind.app"
+[[ -x "$SHELL_APP/Contents/MacOS/Tradewind" ]] || fail "shell binary missing in bundle"
+[[ "$(plutil -extract LSUIElement raw "$SHELL_APP/Contents/Info.plist")" == "true" ]] \
+  || fail "LSUIElement must be true (menu bar agent, no dock icon)"
+
+log "launching shell binary directly (env isolation: TRADEDWIND_CLI -> smoke build)"
+TRADEDWIND_CLI="$TW" "$SHELL_APP/Contents/MacOS/Tradewind" > "$WORK/shell-run.log" 2>&1 &
+SHELL_PID=$!
+ALIVE=0
+for _ in $(seq 1 60); do
+  kill -0 "$SHELL_PID" 2>/dev/null || break
+  sleep 0.5
+  ALIVE=$((ALIVE + 1))
+done
+((ALIVE * 500 >= 30000)) || fail "shell exited early (alive ${ALIVE}x500ms); log: $(cat "$WORK/shell-run.log")"
+log "shell alive >=30s without crash"
+
+# screencapture 仅存档：无屏幕录制权限时输出可能为空，不作 PASS/FAIL 判据（M2-plan §6）
+screencapture -x "$WORK/shell-archive.png" 2>/dev/null \
+  || log "note: screencapture unavailable (no screen recording permission); archive skipped"
+
+log "graceful quit (SIGTERM -> AppKit terminates main loop)"
+kill -TERM "$SHELL_PID" 2>/dev/null || true
+QUIT_WAIT=0
+while kill -0 "$SHELL_PID" 2>/dev/null && ((QUIT_WAIT < 50)); do
+  sleep 0.2; QUIT_WAIT=$((QUIT_WAIT + 1))
+done
+kill -0 "$SHELL_PID" 2>/dev/null && fail "shell did not exit after SIGTERM"
+wait "$SHELL_PID" 2>/dev/null || true # 收割后台任务，避免 bash 打印 "Terminated" 通知噪音
+log "shell exited normally"
+log "STAGE 6 shell (automatable part) PASS"
 
 # ============ 真实订阅（可选，M0 断言延续）============
 if [[ -n "$WITH_URL" ]]; then
