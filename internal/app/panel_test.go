@@ -112,12 +112,25 @@ func TestStartGatewayServes(t *testing.T) {
 
 func TestPanelFatalOnDegradedPaths(t *testing.T) {
 	// 三种降级场景必须 fatal（M1-plan §5.2）：ui 缺失 / 未运行 / disabled
+	// WHY 显式 settings：不写则探测默认端口 39097——真机实例恰在跑该端口时本测试
+	// 会误判"可达"。测试不得依赖外部机器状态（写空闲高位端口隔离）。
 	home := paths.Home(t.TempDir())
+	writeIsolatedSettings(t, home)
 	if err := Panel(home); err == nil || !strings.Contains(err.Error(), "ui missing") {
 		t.Fatalf("Panel(ui missing) err = %v, want ui missing fatal", err)
 	}
 	seedUIDir(t, home)
 	if err := Panel(home); err == nil || !strings.Contains(err.Error(), "not reachable") {
 		t.Fatalf("Panel(not running) err = %v, want unreachable fatal", err)
+	}
+}
+
+// writeIsolatedSettings 向临时 home 写入带空闲端口的 settings，隔离真机默认端口。
+func writeIsolatedSettings(t *testing.T, home paths.Home) {
+	t.Helper()
+	settings := store.DefaultSettings()
+	settings.GatewayPort = freePort(t)
+	if err := store.SaveSettings(home, settings); err != nil {
+		t.Fatal(err)
 	}
 }

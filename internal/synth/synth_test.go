@@ -155,3 +155,23 @@ func TestSynthSubscriptionWithoutRules(t *testing.T) {
 		t.Fatalf("output missing proxies:\n%s", got)
 	}
 }
+
+func TestSynthEmptySubscriptionIsBareTemplate(t *testing.T) {
+	// 裸内核场景（无 current 订阅）：Synthesize 注释声明的"纯模板"路径。
+	// 回归背景：空订阅此前因 parseMapping(空) 报 "top level is 0"，从未被覆盖。
+	got, err := Synth(nil, testInjection())
+	if err != nil {
+		t.Fatalf("Synth(nil): %v", err)
+	}
+	text := string(got)
+	for _, want := range []string{"mixed-port: 17890", "mode: rule"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("bare template missing %q:\n%s", want, text)
+		}
+	}
+	for _, banned := range []string{"proxies:", "proxy-groups:", "rules:"} {
+		if strings.Contains(text, banned) {
+			t.Fatalf("bare template must not contain %q:\n%s", banned, text)
+		}
+	}
+}

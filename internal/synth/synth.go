@@ -35,14 +35,19 @@ func Synth(subscription []byte, inj Injection) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("synth: template: %w", err)
 	}
-	subRoot, err := parseMapping(subscription)
-	if err != nil {
-		return nil, fmt.Errorf("synth: subscription: %w", err)
-	}
-	for _, key := range subscriptionKeys {
-		if val, ok := mappingValue(subRoot, key); ok {
-			// 模板不含这三键，实际走 append 分支；setMappingValue 的 replace 分支仅为完备性
-			setMappingValue(root, key, val)
+	// 订阅为空（无 current 订阅，裸内核场景）→ 跳过订阅层，纯模板 + 注入项即产物；
+	// 既有行为声明见 app.Synthesize（"无 current 订阅时合成纯模板"）。
+	// WHY 修复：空订阅此前会因 parseMapping(空) 报 "top level is 0"——从未被覆盖的路径。
+	if len(subscription) > 0 {
+		subRoot, err := parseMapping(subscription)
+		if err != nil {
+			return nil, fmt.Errorf("synth: subscription: %w", err)
+		}
+		for _, key := range subscriptionKeys {
+			if val, ok := mappingValue(subRoot, key); ok {
+				// 模板不含这三键，实际走 append 分支；setMappingValue 的 replace 分支仅为完备性
+				setMappingValue(root, key, val)
+			}
 		}
 	}
 	// 注入顺序固定，保证输出键序确定性

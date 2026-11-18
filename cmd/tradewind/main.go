@@ -23,6 +23,7 @@ Usage:
   tradewind nodes [GROUP]                             list policy groups, or GROUP's nodes with last delay
   tradewind select <GROUP> <NODE>                     switch node (requires core running)
   tradewind delay [GROUP]                             latency test, default group from last selection
+  tradewind mode [rule|global|direct]                 show or switch outbound mode (hot-applied when running)
   tradewind panel                                     open metacubexd via the panel gateway
   tradewind version                                   show app and core version
 
@@ -56,6 +57,8 @@ func main() {
 		err = cmdSelect(home, args[1:])
 	case "delay":
 		err = cmdDelay(home, args[1:])
+	case "mode":
+		err = cmdMode(home, args[1:])
 	case "panel":
 		err = cmdPanel(home, args[1:])
 	case "version", "--version", "-v":
@@ -162,6 +165,14 @@ func cmdDelay(home paths.Home, args []string) error {
 		return err
 	}
 	return app.Delay(context.Background(), home, fs.Arg(0))
+}
+
+func cmdMode(home paths.Home, args []string) error {
+	fs := flag.NewFlagSet("mode", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return app.Mode(context.Background(), home, fs.Arg(0))
 }
 
 func cmdPanel(home paths.Home, args []string) error {

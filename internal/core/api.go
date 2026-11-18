@@ -109,6 +109,17 @@ func (c *Client) PutConfigs(ctx context.Context, configPath string) error {
 	return err
 }
 
+// PatchConfigsMode 运行时热切换出站模式：PATCH /configs {"mode": mode}。
+// mihomo 语义：mode 属可热生效字段，无需 PUT 整份配置重载（M2-plan §2.1）。
+func (c *Client) PatchConfigsMode(ctx context.Context, mode string) error {
+	payload, err := json.Marshal(map[string]string{"mode": mode})
+	if err != nil {
+		return fmt.Errorf("core: marshal payload: %w", err)
+	}
+	_, err = c.do(ctx, http.MethodPatch, "/configs", payload)
+	return err
+}
+
 // GetProxies 请求 GET /proxies，返回全量节点/组（键为节点或组名）。
 func (c *Client) GetProxies(ctx context.Context) (map[string]Proxy, error) {
 	data, err := c.do(ctx, http.MethodGet, "/proxies", nil)
