@@ -2,11 +2,13 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"time"
 
 	"github.com/chaojimaimi/tradewind/internal/core"
+	"github.com/chaojimaimi/tradewind/internal/panel"
 	"github.com/chaojimaimi/tradewind/internal/paths"
 	"github.com/chaojimaimi/tradewind/internal/store"
 )
@@ -21,8 +23,11 @@ type Report struct {
 	CoreVersion string
 	CoreHealthy bool
 	SysProxy    string
-	Profile     string
-	Traffic     string
+	// SysProxyApplied/Services 供 --json 结构化输出（人读版见 SysProxy 字符串）
+	SysProxyApplied  bool
+	SysProxyServices int
+	Profile          string
+	Traffic          string
 }
 
 // ExitCode 供脚本判断（M0-plan §4）：0 正常 / 1 内核异常（desired=running 但不可达）。
@@ -40,9 +45,11 @@ func Status(home paths.Home) (Report, error) {
 		return Report{}, err
 	}
 	r := Report{
-		Desired:  st.Core.Desired,
-		PID:      st.Core.PID,
-		SysProxy: map[bool]string{true: "applied", false: "not applied"}[st.SysProxy.Applied],
+		Desired:          st.Core.Desired,
+		PID:              st.Core.PID,
+		SysProxy:         map[bool]string{true: "applied", false: "not applied"}[st.SysProxy.Applied],
+		SysProxyApplied:  st.SysProxy.Applied,
+		SysProxyServices: len(st.SysProxy.Services),
 	}
 	if st.SysProxy.Applied {
 		r.SysProxy = fmt.Sprintf("applied (%d services backed up)", len(st.SysProxy.Services))
@@ -50,6 +57,87 @@ func Status(home paths.Home) (Report, error) {
 	r.CoreVersion, r.CoreHealthy = probeCore(home)
 	r.Profile, r.Traffic = currentProfile(home)
 	return r, nil
+}
+
+// --- status --json（壳控制面唯一状态源，M2-plan §2.5）---
+
+// statusCoreJSON 是 JSON 输出的 core 段。
+type statusCoreJSON struct {
+	Running bool   `json:"running"`
+	PID     int    `json:"pid"`
+	Version string `json:"version"`
+}
+
+// statusSysProxyJSON 是 JSON 输出的 sys_proxy 段。
+type statusSysProxyJSON struct {
+	Applied  bool `json:"applied"`
+	Services int  `json:"services"`
+}
+
+// statusProfileJSON 是 JSON 输出的 profile 段。
+type statusProfileJSON struct {
+	UID  string `json:"uid"`
+	Name string `json:"name"`
+}
+
+// StatusJSON 是 `status --json` 的顶层结构：mode 提顶层，panel_url 是壳
+// 数据面端口与 token 的唯一来源（免 YAML 解析）。降级时 panel_url 为空串，
+// 壳据此显示"面板数据不可用"（M2-plan §5）。
+type StatusJSON struct {
+	Core     statusCoreJSON     `json:"core"`
+	Mode     string             `json:"mode"`
+	SysProxy statusSysProxyJSON `json:"sys_proxy"`
+	Profile  statusProfileJSON  `json:"profile"`
+	PanelURL string             `json:"panel_url"`
+}
+
+// StatusReport 组装机器可读状态。只读：panel 凭据走只读访问器，
+// 绝不因 status 而生成 token 文件；panel 不可用 → panel_url=""（非错误）。
+func StatusReport(home paths.Home, r Report) (StatusJSON, error) {
+	mode, err := currentMode(home)
+	if err != nil {
+		return StatusJSON{}, err
+	}
+	out := StatusJSON{
+		Core: statusCoreJSON{Running: r.CoreHealthy, PID: r.PID, Version: r.CoreVersion},
+		Mode: mode,
+		SysProxy: statusSysProxyJSON{
+			Applied: r.SysProxyApplied, Services: r.SysProxyServices,
+		},
+	}
+	if idx, err := store.LoadIndex(home); err == nil {
+		if item, ok := idx.CurrentItem(); ok {
+			out.Profile = statusProfileJSON{UID: item.UID, Name: item.Name}
+		}
+	}
+	out.PanelURL = panelURLIfReachable(home)
+	return out, nil
+}
+
+// panelURLIfReachable 网关可达时返回入口 URL（含端口与 token），否则空串。
+// WHY 静默降级：status 的职责是如实上报，panel 关闭不是 status 的错误。
+func panelURLIfReachable(home paths.Home) string {
+	settings, err := store.LoadSettings(home)
+	if err != nil || !settings.PanelEnabled || !uiDirReady(home) {
+		return ""
+	}
+	if !gatewayReachable(settings.GatewayPort) {
+		return ""
+	}
+	token := panel.ReadPanelToken(home)
+	if token == "" {
+		return ""
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d/ui/%s/", settings.GatewayPort, token)
+}
+
+// MarshalStatusJSON 序列化（缩进关闭，壳按 stdout 单行 JSON 解析）。
+func MarshalStatusJSON(out StatusJSON) (string, error) {
+	data, err := json.Marshal(out)
+	if err != nil {
+		return "", fmt.Errorf("app: marshal status json: %w", err)
+	}
+	return string(data), nil
 }
 
 // probeCore 经 unix socket 探测内核健康；sock 不存在或请求失败即不健康。

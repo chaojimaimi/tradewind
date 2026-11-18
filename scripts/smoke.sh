@@ -14,7 +14,11 @@
 #     SPA 深链 /ui/proxies 返回 index.html / 伪造 Origin 与 Host 拒绝
 #   阶段2 节点：select → /proxies now 变化 → profiles.yaml.selected 回写 →
 #     stop → start → now 保持（回归 profile.store-selected 注入）
+#   阶段4 mode：mode global → settings/runtime/内核三方一致 → 重启后保持（重合成落地）；
+#     status --json schema（含 panel_url）与 panel --url
+#   阶段5 use：第二订阅 add → 组内回退确定性 → use 切回 → selected 快照保持
 #   阶段3 sysproxy：networksetup 快照 → start → 应用 → stop → 逐字段还原 diff
+#   （阶段④⑤插在阶段③之前：阶段③的 Verge-SKIP 是 exit 0 短路，后插会被跳过——M2-plan §9）
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -222,6 +226,69 @@ NOW3=$(now_of)
 [[ "$NOW3" == "FAKE-JP-01" ]] || fail "now after restart = $NOW3, want FAKE-JP-01 (store-selected)"
 grep -q "panel=http://127.0.0.1:$GATEWAY_PORT/ui/" "$START_LOG2" || fail "gateway missing after restart"
 log "STAGE 2 node switch PASS"
+
+# ============ 阶段 4：mode 切换 + 机器可读输出（M2-plan §7 验收 1/附）============
+log "== STAGE 4: mode switch"
+mode_of() {
+  curl -s -b "$JAR" "$GW/configs" | python3 -c 'import json,sys; print(json.load(sys.stdin)["mode"])'
+}
+MODE_NOW=$("$TW" mode)
+[[ "$MODE_NOW" == "rule" ]] || fail "initial mode = $MODE_NOW, want rule"
+
+"$TW" mode global || fail "mode global failed"
+grep -q '^mode: global' "$TW_HOME/settings.yaml" || fail "settings.yaml mode not persisted"
+grep -q '^mode: global' "$TW_HOME/runtime.yaml" || fail "runtime.yaml not resynthesized"
+MODE_KV=$(mode_of)
+[[ "$MODE_KV" == "global" ]] || fail "kernel mode = $MODE_KV, want global (PATCH hot-applied)"
+if "$TW" mode bogus >/dev/null 2>&1; then fail "invalid mode accepted"; fi
+
+log "asserting status --json schema (shell control-plane source)"
+"$TW" status --json > "$WORK/status.json"
+python3 - "$WORK/status.json" <<'EOF' || fail "status --json schema invalid"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["core"]["running"] is True, d["core"]
+assert d["core"]["pid"] > 0
+assert d["mode"] in ("rule", "global", "direct"), d
+assert d["sys_proxy"]["applied"] is False, d["sys_proxy"]
+assert d["profile"]["uid"] and d["profile"]["name"], d["profile"]
+assert d["panel_url"].startswith("http://127.0.0.1:19097/ui/"), d["panel_url"]
+EOF
+"$TW" panel --url | grep -q "^http://127.0.0.1:$GATEWAY_PORT/ui/" \
+  || fail "panel --url missing entry URL"
+
+log "stop -> start, asserting mode persistence (file-first resynthesize)"
+"$TW" stop || fail "stage 4 stop failed"
+sleep 1
+START_LOG4="$WORK/start4.log"
+start_bg "$START_LOG4" --no-sysproxy
+MODE_AFTER=$(mode_of)
+[[ "$MODE_AFTER" == "global" ]] || fail "kernel mode after restart = $MODE_AFTER, want global"
+"$TW" mode rule || fail "mode restore to rule failed"
+MODE_RESTORED=$(mode_of)
+[[ "$MODE_RESTORED" == "rule" ]] || fail "kernel mode after restore = $MODE_RESTORED, want rule"
+log "STAGE 4 mode switch PASS"
+
+# ============ 阶段 5：多订阅 use（M2-plan §7 验收 3）============
+log "== STAGE 5: multi-subscription use"
+"$TW" list | grep -q "smoke" || fail "list missing current fixture"
+"$TW" add --file "$REPO_ROOT/scripts/fixtures/smoke-subscription-alt.yaml" --name alt \
+  || fail "add alt fixture failed"
+"$TW" list | grep -q "alt" || fail "list missing alt entry"
+NOW_ALT=$(now_of)
+[[ "$NOW_ALT" == "FAKE-US-01" ]] || fail "now under alt = $NOW_ALT, want FAKE-US-01 (cached node not in alt group -> first member)"
+
+"$TW" use smoke || fail "use smoke failed"
+NOW_BACK=$(now_of)
+case "$NOW_BACK" in
+  FAKE-HK-01|FAKE-JP-01) ;; # 回切后组内成员即可：具体成员由 mihomo cache.db 决定
+  *) fail "now after use smoke = $NOW_BACK, want smoke group member" ;;
+esac
+# 重选 JP：让最终 stop 快照确定化（供既有 cleanup 断言 grep node: FAKE-JP-01）
+"$TW" select FAKE-GROUP FAKE-JP-01 || fail "re-select for deterministic stop snapshot"
+if "$TW" use nope >/dev/null 2>&1; then fail "unknown use target accepted"; fi
+grep -q 'node: FAKE-JP-01' "$TW_HOME/profiles.yaml" || fail "selected record lost after use round-trip"
+log "STAGE 5 multi-subscription use PASS"
 
 # ============ 真实订阅（可选，M0 断言延续）============
 if [[ -n "$WITH_URL" ]]; then

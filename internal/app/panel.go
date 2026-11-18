@@ -69,31 +69,54 @@ func uiDirReady(home paths.Home) bool {
 	return err == nil && !info.IsDir()
 }
 
-// Panel 编排 `tradewind panel`：前置校验 → 打印凭据入口 URL → open 打开浏览器。
+// PanelEntryURL 前置校验并返回凭据入口 URL（`panel` 与 `panel --url` 共用）。
 // 网关降级场景（panel_enabled=false / ui 缺失 / 未运行）明确 fatal（M1-plan §5.2）。
-func Panel(home paths.Home) error {
+// WHY ensure：网关可达时 token 必已存在，正常走只读路径；异常缺失时补齐以自愈。
+func PanelEntryURL(home paths.Home) (string, error) {
 	settings, err := store.LoadSettings(home)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !settings.PanelEnabled {
-		return errors.New("app: panel disabled by settings (panel_enabled=false)")
+		return "", errors.New("app: panel disabled by settings (panel_enabled=false)")
 	}
 	if !uiDirReady(home) {
-		return fmt.Errorf("app: panel ui missing at %s (install metacubexd dist there)", home.UIDir())
+		return "", fmt.Errorf("app: panel ui missing at %s (install metacubexd dist there)", home.UIDir())
 	}
 	if !gatewayReachable(settings.GatewayPort) {
-		return errors.New("app: panel gateway not reachable; run `tradewind start` first")
+		return "", errors.New("app: panel gateway not reachable; run `tradewind start` first")
 	}
-	token, err := panel.EnsurePanelToken(home)
+	token := panel.ReadPanelToken(home)
+	if token == "" {
+		token, err = panel.EnsurePanelToken(home)
+		if err != nil {
+			return "", err
+		}
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d/ui/%s/", settings.GatewayPort, token), nil
+}
+
+// Panel 编排 `tradewind panel`：前置校验 → 打印凭据入口 URL → open 打开浏览器。
+func Panel(home paths.Home) error {
+	url, err := PanelEntryURL(home)
 	if err != nil {
 		return err
 	}
-	url := fmt.Sprintf("http://127.0.0.1:%d/ui/%s/", settings.GatewayPort, token)
 	fmt.Println(url)
 	if err := exec.Command("open", url).Run(); err != nil {
 		return fmt.Errorf("app: open browser: %w", err)
 	}
+	return nil
+}
+
+// PanelURLOnly 编排 `tradewind panel --url`：仅打印入口 URL 不开浏览器
+// （壳"网页面板"按钮复用，M2-plan §2.5）。
+func PanelURLOnly(home paths.Home) error {
+	url, err := PanelEntryURL(home)
+	if err != nil {
+		return err
+	}
+	fmt.Println(url)
 	return nil
 }
 

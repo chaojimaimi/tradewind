@@ -1,0 +1,16 @@
+# 冒烟用第二订阅 fixture（M2 阶段⑤ use 断言）：与主 fixture 同组名 FAKE-GROUP、
+# 不同成员——切换订阅后组内回退是确定性的（缓存节点不在新组 → 回退首成员）。
+proxies:
+  - name: "FAKE-US-01"
+    type: socks5
+    server: 127.0.0.1
+    port: 1180
+    udp: true
+proxy-groups:
+  - name: "FAKE-GROUP"
+    type: select
+    proxies:
+      - "FAKE-US-01"
+rules:
+  - DOMAIN,example.invalid,FAKE-GROUP
+  - MATCH,FAKE-GROUP
