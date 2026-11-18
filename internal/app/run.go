@@ -44,19 +44,33 @@ func Run(ctx context.Context, home paths.Home, opts StartOptions) error {
 	if err != nil {
 		return err
 	}
-	if err := postHandshake(ctx, home, mgr, opts); err != nil {
-		return err
-	}
-	return waitLoop(ctx, home, mgr)
-}
-
-// postHandshake 完成握手后的步骤 7/8：系统代理写入 + desired=running + ready 输出。
-func postHandshake(ctx context.Context, home paths.Home, mgr *core.Manager, opts StartOptions) error {
 	settings, err := store.LoadSettings(home)
 	if err != nil {
 		_ = fullShutdown(home, mgr)
 		return err
 	}
+	// 网关降级（disabled/ui 缺失/端口被占）→ (nil,"")：start 继续运行（M1-plan §5.2）
+	gw, panelURL, err := startGateway(home, settings)
+	if err != nil {
+		_ = fullShutdown(home, mgr)
+		return err
+	}
+	if err := postHandshake(ctx, home, mgr, opts, settings, panelURL); err != nil {
+		if gw != nil {
+			gw.close()
+		}
+		return err
+	}
+	err = waitLoop(ctx, home, mgr)
+	if gw != nil {
+		gw.close()
+	}
+	return err
+}
+
+// postHandshake 完成握手后的步骤 7/8：系统代理写入 + desired=running + ready 输出
+// （M1：ready 行追加 panel 入口 URL，M1-plan §3）。
+func postHandshake(ctx context.Context, home paths.Home, mgr *core.Manager, opts StartOptions, settings store.Settings, panelURL string) error {
 	if opts.ApplySysProxy {
 		if _, err := applySysProxy(home, settings.MixedPort); err != nil {
 			_ = fullShutdown(home, mgr)
@@ -77,8 +91,12 @@ func postHandshake(ctx context.Context, home paths.Home, mgr *core.Manager, opts
 		return err
 	}
 	version, _ := core.NewClient(home.SockFile(), store.ReadSecret(home)).Version(ctx)
-	fmt.Printf("ready: core=%s pid=%d mixed=127.0.0.1:%d sysproxy=%v\n",
+	ready := fmt.Sprintf("ready: core=%s pid=%d mixed=127.0.0.1:%d sysproxy=%v",
 		version, mgr.PID(), settings.MixedPort, opts.ApplySysProxy)
+	if panelURL != "" {
+		ready += " panel=" + panelURL
+	}
+	fmt.Println(ready)
 	return nil
 }
 
