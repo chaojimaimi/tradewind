@@ -1,0 +1,21 @@
+# 测试/冒烟用脱敏订阅：假节点假凭据，可入库（不含出网 204 断言依赖）
+proxies:
+  - name: "FAKE-HK-01"
+    type: socks5
+    server: 127.0.0.1
+    port: 1080
+    udp: true
+  - name: "FAKE-JP-01"
+    type: socks5
+    server: 127.0.0.1
+    port: 1081
+    udp: true
+proxy-groups:
+  - name: "FAKE-GROUP"
+    type: select
+    proxies:
+      - "FAKE-HK-01"
+      - "FAKE-JP-01"
+rules:
+  - DOMAIN,example.invalid,FAKE-GROUP
+  - MATCH,FAKE-GROUP

@@ -1,0 +1,44 @@
+# Tradewind 内置模板（M0 embed-only；M1 开放用户覆盖——显式裁剪声明，M0-plan §3）
+#
+# 键域职责（白名单语义，M0-plan §5.2）：
+#   - proxies / proxy-groups / rules：来自订阅，订阅其余键（tun/external-ui/ports/dns…）一律丢弃
+#   - mixed-port / mode / log-level / secret / external-controller：运行时注入覆盖，settings 覆盖一切
+#   - 其余基础设施键：本模板兜底
+# 本文件中的同名键仅为可读性占位，运行时必被注入值覆盖。
+mixed-port: 17890
+mode: rule
+log-level: info
+# P0 #7：HTTP 控制器保持关闭，控制面仅 unix socket（运行时注入强制空串）
+external-controller: ""
+# 仅监听本机回环，不向局域网暴露代理端口
+allow-lan: false
+# M0 最小 DNS 段：enable + 默认 nameserver（白名单完整版 DNS 延后 M1）
+dns:
+  enable: true
+  ipv6: false
+  enhanced-mode: redir-host
+  nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+# 控制器 secret（首启随机生成，运行时注入覆盖）
+secret: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+proxies:
+  - name: "FAKE-HK-01"
+    type: socks5
+    server: 127.0.0.1
+    port: 1080
+    udp: true
+  - name: "FAKE-JP-01"
+    type: socks5
+    server: 127.0.0.1
+    port: 1081
+    udp: true
+proxy-groups:
+  - name: "FAKE-GROUP"
+    type: select
+    proxies:
+      - "FAKE-HK-01"
+      - "FAKE-JP-01"
+rules:
+  - DOMAIN,example.invalid,FAKE-GROUP
+  - MATCH,FAKE-GROUP
