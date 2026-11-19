@@ -132,4 +132,35 @@ final class StubURLProtocol: URLProtocol {
         #expect(calls.contains(["mode", "global"]))
         #expect(calls.contains(["delay", "组A"]))
     }
+
+    // MARK: 当前节点卡数据路径（M3-plan §3.2）
+
+    @Test func currentNodeDelayResolvesFromMatchedNode() async {
+        // 徽标取 activeGroup.nodes 中 currentNode 匹配项的 delay（组A current HK-1 → 42）
+        StubURLProtocol.handler = { _ in (200, Self.proxiesJSON) }
+        let model = makeModel([FakeRunner.Reply(output: Self.statusWithPanel, exitCode: 0)])
+        await model.refresh()
+        #expect(model.currentNodeDelay == 42)
+    }
+
+    @Test func currentNodeDelayNilWithoutLatencyRecord() async {
+        // 当前节点无延迟采样（US-1 history 空）→ nil，卡片显示"—"（灰）
+        let noDelay = Self.proxiesJSON.replacingOccurrences(
+            of: "\"now\":\"HK-1\"", with: "\"now\":\"US-1\""
+        )
+        StubURLProtocol.handler = { _ in (200, noDelay) }
+        let model = makeModel([FakeRunner.Reply(output: Self.statusWithPanel, exitCode: 0)])
+        await model.refresh()
+        #expect(model.groups[0].currentNode == "US-1")
+        #expect(model.currentNodeDelay == nil)
+    }
+
+    @Test func flagDataPathResolvesCurrentNodeName() async {
+        // 旗帜注入 CurrentNodeCard 数据路径：卡片按 CountryFlag.flag(for: currentNode) 取旗帜
+        StubURLProtocol.handler = { _ in (200, Self.proxiesJSON) }
+        let model = makeModel([FakeRunner.Reply(output: Self.statusWithPanel, exitCode: 0)])
+        await model.refresh()
+        let currentNode = model.groups[0].currentNode ?? ""
+        #expect(CountryFlag.flag(for: currentNode) == "🇭🇰") // HK-1 → 🇭🇰（非兜底）
+    }
 }

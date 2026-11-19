@@ -67,6 +67,12 @@ final class PanelModel: ObservableObject {
     /// 接入路径：系统代理开启即视为有接入（demo：sysProxy || tun；M2 无 TUN）
     var intake: Bool { report?.sysProxy.applied ?? false }
     var iconState: StatusIconState { StatusIcon.state(running: running, intake: intake) }
+    /// 当前节点延迟：activeGroup.nodes 中 currentNode 匹配项的 delay。
+    /// WHY 下沉为模型计算属性：视图内查找无法单测（M3-plan §3.2）
+    var currentNodeDelay: Int? {
+        guard let group = activeGroup, let node = group.currentNode else { return nil }
+        return group.nodes.first { $0.name == node }?.delay
+    }
 
     // MARK: 刷新与动作
 

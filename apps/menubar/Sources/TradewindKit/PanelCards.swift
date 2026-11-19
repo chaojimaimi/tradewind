@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// ② 当前节点卡（节点名 + 固定绿延迟徽标 + 出站模式 seg；demo .ms-chip 单色事实）。
+/// ② 当前节点卡（旗帜 + 节点名 + 固定绿延迟徽标 + 组名 + 出站模式 seg；demo .ms-chip 单色事实）。
 struct CurrentNodeCard: View {
     @ObservedObject var model: PanelModel
     @Environment(\.colorScheme) private var scheme
@@ -8,11 +8,20 @@ struct CurrentNodeCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                Text(currentNodeName ?? "—")
-                    .font(.system(size: 14, weight: .semibold))
-                    .lineLimit(1)
+                if let name = currentNodeName {
+                    Text(CountryFlag.flag(for: name))
+                        .font(.system(size: 16)) // 旗帜 16pt（M3-plan §3.2）
+                    Text(name)
+                        .font(.system(size: 14, weight: .semibold))
+                        .lineLimit(1)
+                } else {
+                    Text("—")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                delayBadge
                 Spacer()
-                Text("当前组 \(currentGroupName ?? "—")")
+                // 组名原样显示（真实组名无 emoji）；"当前组"前缀语义由位置表达（M3-plan §3.2）
+                Text(currentGroupName ?? "—")
                     .font(.system(size: Theme.fontSizeSub))
                     .foregroundStyle(Theme.muted(scheme))
                     .lineLimit(1)
@@ -33,6 +42,25 @@ struct CurrentNodeCard: View {
             }
         }
         .cardStyle()
+    }
+
+    /// 延迟徽标：固定绿（demo .ms-chip：ok 色底 16% + ok 字色，圆角 5，11px mono），
+    /// 不按延迟色阶分级（三色阶已由节点行色点表达）；无记录显示"—"（灰）（M3-plan §3.2）
+    @ViewBuilder private var delayBadge: some View {
+        if let delay = model.currentNodeDelay {
+            Text("\(delay) ms")
+                .font(.system(size: Theme.fontSizeSub, weight: .semibold))
+                .monospacedDigit()
+                .padding(.horizontal, 7)
+                .padding(.vertical, 1)
+                .background(Theme.ok.opacity(0.16), in: RoundedRectangle(cornerRadius: 5))
+                .foregroundStyle(Theme.ok)
+        } else {
+            Text("—")
+                .font(.system(size: Theme.fontSizeSub))
+                .monospacedDigit()
+                .foregroundStyle(Theme.muted(scheme))
+        }
     }
 
     private var activeGroup: ProxyGroup? {
@@ -317,6 +345,10 @@ private struct NodeRow: View {
                 Circle()
                     .fill(LatencyColor.scale(node.delay, scheme: scheme))
                     .frame(width: 8, height: 8)
+                // 旗帜注入（M3-plan §3.1 应用点位：每行节点名前；真实节点名无 emoji 前缀）
+                Text(CountryFlag.flag(for: node.name))
+                    .font(.system(size: 12.5))
+                    .lineLimit(1)
                 Text(node.name)
                     .font(.system(size: 12.5, weight: selected ? .semibold : .regular))
                     .lineLimit(1)
