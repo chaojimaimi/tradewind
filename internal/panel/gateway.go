@@ -115,7 +115,12 @@ func (g *Gateway) handleTokenEntry(w http.ResponseWriter, r *http.Request, seg s
 	// 入口 token 本身即凭据（无 cookie 也走此路径设置新 cookie），重定向携带片段后
 	// 浏览器落地即概览页，免手填后端/免二次导航。直接开 /ui/#/overview 对无 cookie
 	// 浏览器是 404（防泄露语义），故锁定落在重定向目标而非入口形态。
-	http.Redirect(w, r, "/ui/#/overview", http.StatusFound)
+	// WHY 落地页带 ?v=<startedAt>（v0.4.12）：文档缓存键 /ui/（无查询串）会被 v0.4.9
+	// 之前的旧 index.html 长期占据——Last-Modified 启发式新鲜期内浏览器根本不回源，
+	// 响应侧 no-store 管不到已缓存的历史条目（v0.4.9 上线后用户浏览器仍复现"设置屏"
+	// 的残余机理）。落地 URL 每次守护重启换新缓存键（查询串是键的一部分），必回源；
+	// 查询串不影响路由（serveStatic 按 Path 分流），片段 #/overview 照旧由 SPA 消费。
+	http.Redirect(w, r, fmt.Sprintf("/ui/?v=%d#/overview", g.startedAt), http.StatusFound)
 }
 
 // requireCookie 会话校验中间件：无 cookie 或值不符一律 404（同入口的"不泄露"语义）。

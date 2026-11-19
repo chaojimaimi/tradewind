@@ -17,6 +17,11 @@ import (
 // killGrace 是向孤儿内核/残留进程发 SIGTERM 后等待退出的宽限。
 const killGrace = 5 * time.Second
 
+// ErrInstanceRunning 表示 pidfile flock 冲突（活实例持锁）。与 pidfile 打开失败等
+// 其他错误类别显式区分：Run 的幂等分支只对"已在运行"返回成功——若把打开失败也
+// 当幂等成功，launchd crash-restart 语义下会假报成功并永久停止拉起（守护静默下线）。
+var ErrInstanceRunning = errors.New("instance running")
+
 // pidLock 是持有期间阻止第二个 start 实例的 flock 文件锁。
 type pidLock struct {
 	f    *os.File
@@ -31,7 +36,7 @@ func LockPIDFile(home paths.Home) (*pidLock, error) {
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()
-		return nil, fmt.Errorf("app: another tradewind instance is running (%s locked)", home.PIDFile())
+		return nil, fmt.Errorf("app: another tradewind instance is running (%s locked): %w", home.PIDFile(), ErrInstanceRunning)
 	}
 	if err := f.Truncate(0); err == nil {
 		fmt.Fprintf(f, "%d\n", os.Getpid())

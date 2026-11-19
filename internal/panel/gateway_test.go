@@ -56,9 +56,10 @@ func TestTokenEntrySetsCookieAndRedirects(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Fatalf("status = %d, want 302", rec.Code)
 	}
-	// v0.4.9：入口重定向携带 hash 片段，浏览器落地即概览页（链接锁定为 /ui/#/overview）
-	if loc := rec.Header().Get("Location"); loc != "/ui/#/overview" {
-		t.Fatalf("entry Location = %q, want /ui/#/overview", loc)
+	// v0.4.12：落地页 = /ui/?v=<startedAt>#/overview——查询串换新文档缓存键（防 v0.4.9
+	// 前旧 index.html 的启发式缓存残留），片段锁定概览页
+	if loc := rec.Header().Get("Location"); !strings.HasPrefix(loc, "/ui/?v=") || !strings.HasSuffix(loc, "#/overview") {
+		t.Fatalf("entry Location = %q, want /ui/?v=<startedAt>#/overview", loc)
 	}
 	cookies := rec.Result().Cookies()
 	if len(cookies) != 1 {
@@ -91,9 +92,9 @@ func TestTokenEntryWithoutTrailingSlash(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Fatalf("status = %d, want 302", rec.Code)
 	}
-	// v0.4.9：无尾斜杠入口同样落地概览页
-	if loc := rec.Header().Get("Location"); loc != "/ui/#/overview" {
-		t.Fatalf("entry Location = %q, want /ui/#/overview", loc)
+	// v0.4.12：无尾斜杠入口同样落地带缓存键的概览页
+	if loc := rec.Header().Get("Location"); !strings.HasPrefix(loc, "/ui/?v=") || !strings.HasSuffix(loc, "#/overview") {
+		t.Fatalf("entry Location = %q, want /ui/?v=<startedAt>#/overview", loc)
 	}
 	if rec.Result().Cookies()[0].Value != testToken {
 		t.Fatal("cookie not set for slash-less entry")

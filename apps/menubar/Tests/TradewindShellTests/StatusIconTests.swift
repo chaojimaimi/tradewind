@@ -66,6 +66,23 @@ import Testing
         #expect(StatusIcon.brandImage() != nil)
     }
 
+    /// v0.4.12 底色板徽章（用户反馈"圆弧状底色板丢失，只剩 T 形标"）：
+    /// 板区不透明着色、T 形标镂空透底、四角圆弧外透明。位图 top-left 原点 y=16-绘制y。
+    @Test func composedImageBakesPlateWithKnockedOutMark() throws {
+        let active = try #require(StatusIcon.image(.active, scheme: .light))
+        // 板区（标形位图外，旧版恒透明）：绘制坐标 (2,10)→位图 (2,6)，必有板色
+        let platePixel = try pixelColor(of: active, x: 2, y: 6)
+        #expect(platePixel.alphaComponent > 0.9)
+        // 镂空区（竖干厚处：绘制 x≈7-9、y≈3.6-9.5 → 绘制 (8.5,6.5)→位图 (8,9)）：
+        // 硬镂空后 alpha≈0（透出菜单栏底色）。WHY 不取横杠内部：16px 光栅下横杠仅 ~1px
+        // 薄带，任意"内部"像素都叠着上下边缘抗锯齿，alpha 天然不满（资产实测 ≈0.75）
+        let knockoutPixel = try pixelColor(of: active, x: 8, y: 9)
+        #expect(knockoutPixel.alphaComponent < 0.05)
+        // 圆弧外角（绘制 (0.5,0.5)→位图 (0,15) 底行）：板内缩 0.5pt+圆角，角点透明
+        let cornerPixel = try pixelColor(of: active, x: 0, y: 15)
+        #expect(cornerPixel.alphaComponent < 0.1)
+    }
+
     // MARK: 像素取样辅助
 
     /// 合成图绘入 16×16 RGBA 位图后读指定点颜色（换算 sRGB 分量比对）。

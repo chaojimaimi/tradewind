@@ -17,8 +17,8 @@ enum StatusIconState: Equatable {
 /// 改为"主形跟运行态走（运行=品牌色、停止=muted 灰）、绿点跟代理走（仅 active 显示）"，
 /// 停止态再叠加 0.5 alpha 淡化，运行/接入/停止三维正交可辨。
 /// WHY v0.4.10（2026-11-19 拍板 logo 资产接入）：主形从 SF Symbols "wind" 换为品牌
-/// 位图（16/@1x + 32/@2x 两份 PNG）；着色烘焙机制不变（sourceAtop 按 alpha 保形覆色，
-/// 位图自带多色/深墨色不影响），绿点合成机制不变。
+/// 位图（16/@1x + 32/@2x 两份 PNG）。v0.4.12 起合成形态为"圆角底色板 + 标形镂空"
+/// 徽章（用户反馈裸标形丢失了品牌底板，见 image 处 WHY）；绿点合成机制不变。
 enum StatusIcon {
     /// demo 口径：停止 → stopped；运行且（系统代理 或 TUN）→ active；否则 idle。
     static func state(running: Bool, intake: Bool) -> StatusIconState {
@@ -67,18 +67,35 @@ enum StatusIcon {
         state == .stopped ? 0.5 : 1
     }
 
-    /// 16×16 point 品牌主形 + 右下 6pt 代理绿点的合成状态栏图像。
+    /// 16×16 point 品牌徽章 + 右下 6pt 代理绿点的合成状态栏图像。
     /// 纯函数：scheme 参数化、不读全局状态，双状态双主题可单测。
+    /// WHY 底色板（v0.4.12，2026-11-19 用户反馈"圆弧状底色板丢失，只剩 T 形标"）：
+    /// menubar 预置 PNG 是裸标形（mono SVG 只有 T 形双笔画，squircle 底板只存在于
+    /// 应用图标合成）。菜单栏改为"圆角底色板 + T 形标镂空"的徽章形态——与 icns
+    /// 同构（icns 是深板亮标双色，菜单栏单色约束下以镂空近似，T 透出菜单栏底色）。
     static func image(_ state: StatusIconState, scheme: ColorScheme) -> NSImage? {
         guard let glyph = brandImage() else { return nil }
         // 画布=主形逻辑尺寸（16×16 point，位图资产 16/32px 双密度），不做额外扩带
         // （code-reviewer P2 口径沿用：扩带令画布被菜单栏等比缩小）；非翻转坐标原点=左下
         let canvasSize = glyph.size
         return NSImage(size: canvasSize, flipped: false) { _ in
-            glyph.draw(in: NSRect(origin: .zero, size: canvasSize))
-            // sourceAtop 只染已有像素（按 alpha 保形覆色）：烘焙主形色，位图原色不透出
+            // 底色板：全幅内缩 0.5pt 防菜单栏裁边；圆角半径取超椭圆圆角比 0.29×边长
+            // （assets.py squircle n=5 的连续圆角近似，"圆弧状"观感）
+            let inset: CGFloat = 0.5
+            let plate = NSBezierPath(
+                roundedRect: NSRect(origin: .zero, size: canvasSize).insetBy(dx: inset, dy: inset),
+                xRadius: (canvasSize.width - inset * 2) * 0.29,
+                yRadius: (canvasSize.height - inset * 2) * 0.29)
             tint(state, scheme: scheme).setFill()
-            NSRect(origin: .zero, size: canvasSize).fill(using: .sourceAtop)
+            plate.fill()
+            // T 形标镂空：destinationOut 以标形 alpha 反乘底板 alpha，横杠竖干区域透出
+            // 菜单栏底色。双重叠加=硬镂空（dest×(1-a)²）：16px @1x 资产的横杠仅 ~1px 薄带、
+            // 内部 alpha 固有地半透明（≈0.75，实测），单次镂空残留 0.25 会让 1x 密度观感
+            // 洇成"没镂干净"；两 pass 后 0.06，与 @2x（内部 1.0，单双 pass 均 0）观感对齐
+            for _ in 0..<2 {
+                glyph.draw(in: NSRect(origin: .zero, size: canvasSize),
+                           from: .zero, operation: .destinationOut, fraction: 1)
+            }
             guard showsProxyDot(state) else { return true }
             drawProxyDot(in: canvasSize)
             return true

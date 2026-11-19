@@ -92,9 +92,9 @@ func TestStartGatewayServes(t *testing.T) {
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("entry status = %d, want 302", resp.StatusCode)
 	}
-	// v0.4.9：入口重定向携带 hash 片段，浏览器落地即概览页（链接锁定为 /ui/#/overview）
-	if loc := resp.Header.Get("Location"); loc != "/ui/#/overview" {
-		t.Fatalf("entry Location = %q, want /ui/#/overview", loc)
+	// v0.4.12：入口重定向落地带缓存键的概览页（/ui/?v=<startedAt>#/overview）
+	if loc := resp.Header.Get("Location"); !strings.HasPrefix(loc, "/ui/?v=") || !strings.HasSuffix(loc, "#/overview") {
+		t.Fatalf("entry Location = %q, want /ui/?v=<startedAt>#/overview", loc)
 	}
 	if len(resp.Cookies()) != 1 || resp.Cookies()[0].Path != "/" {
 		t.Fatalf("entry cookies = %+v, want one Path=/ cookie", resp.Cookies())

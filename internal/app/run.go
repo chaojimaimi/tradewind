@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -19,14 +20,27 @@ type StartOptions struct {
 }
 
 // Run 执行 start 全流程（M0-plan §5.1），阻塞至信号或内核彻底失活。
-// 返回 nil 表示信号触发的优雅退出；返回错误表示失败（内核 3 次重启耗尽等），
-// 两种路径都已完成完整还原（系统代理/内核/状态文件）。
+// 返回 nil 表示信号触发的优雅退出或幂等命中"已在运行"（v0.4.12）；返回错误表示失败
+// （内核 3 次重启耗尽等），两种路径都已完成完整还原（系统代理/内核/状态文件）。
 func Run(ctx context.Context, home paths.Home, opts StartOptions) error {
 	if err := home.Ensure(); err != nil {
 		return err
 	}
 	lock, err := LockPIDFile(home)
 	if err != nil {
+		// v0.4.12 幂等语义：活实例持 flock 锁 = "已在运行"这一目标态已达成，视为成功。
+		// WHY launchd agent 是 KeepAlive={SuccessfulExit:false}（crash-restart）语义：壳侧
+		// 主开关 detached spawn 抢先持锁后，agent 的重试撞锁 exit(1) 会触发无限 crash-
+		// restart 节流循环（autostart.go 注释预言的坑，2026-11-19 真机日志实证：21ms
+		// 生命周期每 10s 重试）。幂等 exit 0 让 launchd 视为成功、停止重试；壳侧
+		// startCoreDetached 的有界轮询照常拿到 running=true，语义无损。
+		// flock 是内核托管锁（进程死锁自动释放），冲突必然意味着活实例，无陈锁误判。
+		// 审查 P2（2026-11-19）：仅对冲突类别幂等——pidfile 打开失败等必须照常报错，
+		// 否则假报"已运行"会让 launchd 永久停止拉起（静默下线）。
+		if errors.Is(err, ErrInstanceRunning) {
+			fmt.Println("already running: another tradewind instance holds the lock; nothing to do")
+			return nil
+		}
 		return err
 	}
 	defer lock.Release()
