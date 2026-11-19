@@ -33,11 +33,13 @@ struct GatewayClient {
     }
 
     /// 构造经网关的 GET 请求（纯函数，单测断言 Cookie 头注入）。
+    /// WHY 不手动设 Host：CFNetwork 会按 URL 自行生成合法 Host（127.0.0.1:<port>）；
+    /// 曾错误写入带 scheme 的 "Host: http://…"（非法值）→ 网关 400 → 数据面整体降级
+    /// （M2 真机验收缺陷：curl 复现带该头 400 / 去掉 200）。
     func makeRequest(path: String) -> URLRequest {
         var request = URLRequest(url: baseURL.appendingPathComponent(path))
         request.setValue("\(Self.cookieName)=\(token)", forHTTPHeaderField: "Cookie")
         request.setValue(origin, forHTTPHeaderField: "Origin")
-        request.setValue(origin, forHTTPHeaderField: "Host")
         return request
     }
 

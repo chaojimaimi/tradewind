@@ -123,4 +123,14 @@ final class FakeRunner: CommandLineRunning, @unchecked Sendable {
         #expect(request.value(forHTTPHeaderField: "Cookie") == "tradewind_panel=tok")
         #expect(request.value(forHTTPHeaderField: "Origin") == "http://127.0.0.1:39097")
     }
+
+    @Test func requestsNeverOverrideHostHeader() throws {
+        // 回归（M2 真机缺陷）：手动 Host 头携带 scheme 属非法值 → 网关 400 → 数据面降级；
+        // Host 由 CFNetwork 按 URL 生成，请求不得覆写
+        let client = try #require(GatewayClient(panelURL: "http://127.0.0.1:39097/ui/tok/"))
+        for path in ["proxies", "traffic"] {
+            let request = client.makeRequest(path: path)
+            #expect(request.value(forHTTPHeaderField: "Host") == nil)
+        }
+    }
 }
