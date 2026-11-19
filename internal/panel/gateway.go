@@ -202,6 +202,18 @@ func (g *Gateway) serveStatic(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("http://%s", r.Host))
 		return
 	}
+	if cleaned == "/sw.js" {
+		// WHY kill-switch（v0.4.14，Safari 白屏终章配套）：metacubexd 是 Nuxt PWA，
+		// ui/ 自带 sw.js + workbox-*.js；用户浏览器历史会话可能已安装旧 SW，其 precache
+		// 会以旧 app shell（含旧 config.js）应答后续 /ui/* 导航——服务端 no-store/缓存
+		// 击穿全部被绕过。标准解除注册脚本：浏览器在导航时并行做 SW 更新检查（绕过
+		// HTTP 缓存），字节有变 → 安装本脚本 → 评估期 unregister → 注册即冗余 →
+		// 之后所有 /ui/* 导航不再受 SW 控制、直走网络。
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		fmt.Fprint(w, "self.registration.unregister();")
+		return
+	}
 	full := filepath.Join(g.cfg.UIDir, cleaned)
 	switch {
 	case isDir(full):
@@ -246,6 +258,13 @@ func (g *Gateway) serveIndex(w http.ResponseWriter, r *http.Request, full string
 		1)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// WHY Clear-Site-Data（v0.4.14，SW kill 配套）：历史会话遗留的 SW/缓存存储在
+	// 网络导航应答即清（旧 SW 失控后的首次网络导航即净态；若该导航本身被旧 SW
+	// precache 拦截则头到不了浏览器——此一次性过渡由 kill 脚本收敛）。
+	// "storage" 覆盖 localStorage/IndexedDB/SW 与 Cache Storage（不含 cookie——
+	// 面板会话 cookie 独立指令，不受影响）；代价是 metacubexd UI 偏好每次重置，
+	// 可接受（后端地址由 config.js 注入自动回填）。不支持该头的浏览器静默忽略。
+	w.Header().Set("Clear-Site-Data", `"cache", "storage"`)
 	w.Write([]byte(patched))
 }
 

@@ -79,6 +79,11 @@ func TestStartGatewayServes(t *testing.T) {
 	if gw == nil || !strings.HasPrefix(url, "http://127.0.0.1:") || !strings.Contains(url, "/ui/") {
 		t.Fatalf("gw=%v url=%q", gw, url)
 	}
+	// WHY 无 nonce：nonce 只加在点击路径（PanelEntryURL，每次点击唯一）；状态/ready
+	// 行的 URL 保持规范形，避免 GatewayClient 等状态消费者拿到非规范 URL
+	if strings.Contains(url, "?nonce=") {
+		t.Fatalf("startGateway url should be canonical without nonce: %q", url)
+	}
 	// 入口 URL 可达（302）。WHY 不跟随重定向：后续 /ui/ 需 cookie，无 jar 的 client
 	// 跟随过去必得 404——那正是网关的正确行为（本断言只验入口本身）
 	noredirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -109,6 +114,36 @@ func TestStartGatewayServes(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatal("gateway port still reachable after close")
+}
+
+func TestPanelEntryURLHasPerClickNonce(t *testing.T) {
+	// v0.4.14：点击路径（panel / panel --url，壳"网页面板"按钮）的入口 URL 每次调用
+	// 都带唯一 nonce——Safari 对同 URL 导航直接复用 page cache 冻结快照（实测 25s
+	// 网关零请求），nonce 使每次点击强制真实网络导航。nonce 非凭据，服务端 302 语义
+	// 只消费 Path，查询串不影响 isTokenEntry。
+	home := paths.Home(t.TempDir())
+	seedUIDir(t, home)
+	port := freePort(t)
+	gw, _, err := startGateway(home, store.Settings{PanelEnabled: true, GatewayPort: port})
+	if err != nil || gw == nil {
+		t.Fatalf("startGateway: %v %v", gw, err)
+	}
+	defer gw.close()
+	// startGateway 写过 token（EnsurePanelToken），PanelEntryURL 的只读路径即可用
+	u1, err := PanelEntryURL(home)
+	if err != nil {
+		t.Fatalf("PanelEntryURL: %v", err)
+	}
+	u2, err := PanelEntryURL(home)
+	if err != nil {
+		t.Fatalf("PanelEntryURL(2): %v", err)
+	}
+	if !strings.Contains(u1, "?nonce=") || !strings.Contains(u2, "?nonce=") {
+		t.Fatalf("urls missing nonce: %q / %q", u1, u2)
+	}
+	if u1 == u2 {
+		t.Fatalf("nonce must differ per click: %q", u1)
+	}
 }
 
 func TestPanelFatalOnDegradedPaths(t *testing.T) {

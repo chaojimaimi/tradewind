@@ -93,7 +93,12 @@ func PanelEntryURL(home paths.Home) (string, error) {
 			return "", err
 		}
 	}
-	return fmt.Sprintf("http://127.0.0.1:%d/ui/%s/", settings.GatewayPort, token), nil
+	// WHY nonce（v0.4.14，Safari 白屏 7 轮排查终章）：Safari 对「与本机既有页面完全
+	// 同 URL」的新导航会直接复用 page cache 快照——2026-11-19 实测入口流 25s 网关
+	// 零请求而 Safari 已持有旧 index 文档（冻结的白屏坏页被原样端出）。nonce 使每次
+	// "网页面板"点击都是全新 URL，强制真实网络导航。服务端 302 语义不受影响
+	// （isTokenEntry 只消费 Path）；nonce 非凭据，token 语义不变。
+	return fmt.Sprintf("http://127.0.0.1:%d/ui/%s/?nonce=%d", settings.GatewayPort, token, time.Now().UnixNano()), nil
 }
 
 // Panel 编排 `tradewind panel`：前置校验 → 打印凭据入口 URL → open 打开浏览器。

@@ -34,6 +34,13 @@ func newTestGateway(t *testing.T) (*Gateway, string) {
 	if err := os.WriteFile(filepath.Join(ui, "config.js"), []byte("window.config={defaultBackendURL:\"\"}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// v0.4.14：磁盘 sw.js（真实 metacubexd 的 Workbox SW 形态）保留写入——
+	// 证明 /ui/sw.js 走网关 kill-switch 而非透传磁盘 Workbox 脚本
+	if err := os.WriteFile(filepath.Join(ui, "sw.js"),
+		[]byte("importScripts(\"workbox-38b98e80.js\");workbox.precaching.precacheAndRoute([]);"),
+		0o644); err != nil {
+		t.Fatal(err)
+	}
 	g := NewGateway(Config{Port: 39097, UIDir: ui, Token: testToken, SockPath: "/tmp/none.sock", Secret: "gw-secret"})
 	return g, "127.0.0.1:39097"
 }
@@ -83,6 +90,18 @@ func TestTokenEntrySetsCookieAndRedirects(t *testing.T) {
 	raw := rec.Header().Get("Set-Cookie")
 	if strings.Contains(raw, "Domain=") {
 		t.Fatalf("Set-Cookie %q must be host-only (no Domain)", raw)
+	}
+	// v0.4.14：生产入口恒带 ?nonce=（点击路径 nonce 击穿 page cache）——路由对
+	// RawQuery 必须不敏感（isTokenEntry 只消费 Path），带查询串的入口形态不变
+	recQ := get(g, host, "/ui/"+testToken+"/?nonce=1750000000000000000", nil)
+	if recQ.Code != http.StatusFound {
+		t.Fatalf("entry-with-nonce status = %d, want 302", recQ.Code)
+	}
+	if loc := recQ.Header().Get("Location"); !strings.HasPrefix(loc, "/ui/?v=") || !strings.HasSuffix(loc, "#/overview") {
+		t.Fatalf("entry-with-nonce Location = %q", loc)
+	}
+	if c := recQ.Result().Cookies(); len(c) != 1 || c[0].Value != testToken {
+		t.Fatalf("entry-with-nonce cookies = %+v", c)
 	}
 }
 
@@ -274,6 +293,37 @@ func TestConfigJSDynamicallyGenerated(t *testing.T) {
 	}
 }
 
+func TestSWKillSwitch(t *testing.T) {
+	// v0.4.14：ui/sw.js 不透传磁盘 Workbox SW（历史会话已安装的旧 SW 会以 precache
+	// 旧 app shell 应答 /ui/* 导航，绕过服务端全部缓存语义）——改发标准解除注册脚本。
+	// 浏览器导航时并行做 SW 更新检查（绕过 HTTP 缓存），字节有变即安装本脚本并使
+	// 注册冗余，此后 /ui/* 导航直走网络。
+	g, host := newTestGateway(t)
+	auth := map[string]string{"Cookie": cookieName + "=" + testToken}
+	rec := get(g, host, "/ui/sw.js", auth)
+	if rec.Code != 200 {
+		t.Fatalf("sw.js status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "unregister") {
+		t.Fatalf("sw.js body missing unregister kill switch: %q", body)
+	}
+	// 磁盘 Workbox 脚本不得透传（fixture 已写入含 workbox/precache 字样的磁盘 sw.js）
+	if strings.Contains(body, "workbox") || strings.Contains(body, "precach") {
+		t.Fatalf("sw.js leaked disk workbox script: %q", body)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "application/javascript") {
+		t.Fatalf("sw.js Content-Type = %q, want application/javascript", ct)
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("sw.js Cache-Control = %q, want no-store (SW 更新检查必须拉到新脚本)", cc)
+	}
+	// 防泄露语义不变：无 cookie 访问仍 404
+	if rec := get(g, host, "/ui/sw.js", nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("no-cookie sw.js status = %d, want 404", rec.Code)
+	}
+}
+
 func TestIndexNoStoreAndConfigCacheBust(t *testing.T) {
 	// v0.4.9：index.html 恒 no-store（防浏览器按 Last-Modified 启发式缓存旧 index——
 	// 旧 index 引用旧 config.js 会复现"设置屏"），且 config.js 引用改写为
@@ -304,6 +354,11 @@ func TestIndexNoStoreAndConfigCacheBust(t *testing.T) {
 		}
 		if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
 			t.Fatalf("%s Content-Type = %q, want text/html", target, ct)
+		}
+		// v0.4.14：导航应答即清本源 SW/缓存存储（历史遗留 SW precache 绕过服务端缓存
+		// 语义的清障）；cookie 不在 "storage" 指令范围内，会话不受影响
+		if csd := rec.Header().Get("Clear-Site-Data"); !strings.Contains(csd, "storage") {
+			t.Fatalf("%s Clear-Site-Data = %q, want storage directive", target, csd)
 		}
 	}
 	// config.js 拦截分支语义不变：no-store + 动态生成体（双层防缓存的第二层）
