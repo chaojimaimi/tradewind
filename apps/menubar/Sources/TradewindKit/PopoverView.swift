@@ -26,6 +26,8 @@ struct ShellRootView: View {
         }
         .padding(14)
         .frame(width: Theme.popoverWidth)
+        // popover 底色（批①.5 §3.2：demo --mat-pop 合成冷白/冷黑；NSPopover 自身圆角裁切内容）
+        .background(Theme.popBackground(scheme))
         // toast 取 .bottom（M3-plan §3.3.3）：原 .top 压住标题行（用户截图一实锤）；
         // 声明偏差（§1.3）：demo toast 为桌面级通知（popover 之外），壳内为面板内提示
         .overlay(alignment: .bottom) {
@@ -122,9 +124,20 @@ private struct ToastView: View {
 extension View {
     /// 卡片容器（demo .card：mat-card 底 + inset 描边 + 圆角 10 + 上边距）。
     func cardStyle() -> some View {
-        self
+        modifier(CardStyle())
+    }
+}
+
+/// WHY 以 ViewModifier 承载：cardStyle 挂在 View extension 上无法直接持有 @Environment，
+/// modifier 内取 colorScheme 注入 Theme.cardBackground(scheme)（批①.5 §3.2，原静态
+/// quaternaryLabelColor 会被暖色 vibrancy 染色）；调用点签名不变，侵入最小。
+private struct CardStyle: ViewModifier {
+    @Environment(\.colorScheme) private var scheme
+
+    func body(content: Content) -> some View {
+        content
             .padding(12)
-            .background(Theme.cardBackground)
+            .background(Theme.cardBackground(scheme))
             .clipShape(RoundedRectangle(cornerRadius: Theme.radiusCard))
             .overlay(
                 RoundedRectangle(cornerRadius: Theme.radiusCard)
