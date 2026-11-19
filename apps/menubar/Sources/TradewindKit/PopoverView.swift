@@ -118,6 +118,9 @@ private struct ToastView: View {
             .padding(.vertical, 6)
             .background(.ultraThinMaterial, in: Capsule())
             .padding(.bottom, 6) // 随 overlay .bottom 对齐（M3-plan §3.3.3）
+            // WHY 提示层不参与命中测试（v0.4.2 热修，2026-11-19 真机分析发现）：
+            // toast 显示 3s 期间 overlay(.bottom) 会压住底部 FootButton 命中区，致按钮"点了没反应"。
+            .allowsHitTesting(false)
     }
 }
 

@@ -115,6 +115,19 @@ final class StubURLProtocol: URLProtocol {
         #expect(model.toast != nil) // 用户可读提示
     }
 
+    /// v0.4.2 热修：openPanel 的 CLI 失败路径走 catch 分支提示（不触发 NSWorkspace.open，
+    /// 该路径可单测；open 成功/剪贴板路径真开浏览器，维持不测口径）。
+    @Test func openPanelCliFailureShowsToast() async {
+        StubURLProtocol.handler = { _ in (200, Self.proxiesJSON) }
+        let model = makeModel([
+            FakeRunner.Reply(output: Self.statusWithPanel, exitCode: 0), // status
+            FakeRunner.Reply(output: "", exitCode: 1), // panel --url 失败
+        ])
+        await model.refresh()
+        await model.openPanel()
+        #expect(model.toast != nil) // "面板不可用"用户可读提示
+    }
+
     @Test func setModeAndTestLatencyPassExactArgs() async {
         StubURLProtocol.handler = { _ in (200, Self.proxiesJSON) }
         let fake = FakeRunner(

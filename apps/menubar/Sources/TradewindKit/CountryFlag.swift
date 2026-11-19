@@ -114,11 +114,24 @@ enum CountryFlag {
         sortedChineseRegions.first { nodeName.contains($0.alias) }?.flag
     }
 
+    /// 流量单位两字码表（v0.4.2）：仅收 GB 系——其余两字码无"数字+码"单位语义，不入表防扩大误伤面
+    private static let trafficUnits: Set<String> = ["GB", "MB", "KB", "TB", "PB"]
+
     /// ③ 英文：两字码整 token（禁子串）→ 城市名精确大小写子串（取舍见类型注释）
     private static func englishFlag(in nodeName: String) -> String? {
         // 两字码按"非字母数字"切段后整段比对：AUSTIN-01 切段为 AUSTIN/01，均非两字码
+        var previous = ""
         for token in nodeName.uppercased().components(separatedBy: nonTokenCharacters) {
+            // WHY 流量单位不算国家码（v0.4.2 热修，2026-11-19 真机样本
+            // 「有效期2029-07-02, 剩余 96.17 GB」因 "GB" 整 token 命中被误判 🇬🇧）：
+            // 前驱 token 含数字即"数值+单位"语境，跳过该 token 继续后续匹配；
+            // 首 token 无前驱不触发，"GB-London-01" 行首国家码不受影响
+            if trafficUnits.contains(token), previous.contains(where: \.isNumber) {
+                previous = token
+                continue
+            }
             if let flag = twoLetterCodes[token] { return flag }
+            previous = token
         }
         return sortedEnglishCities.first { nodeName.contains($0.name) }?.flag
     }

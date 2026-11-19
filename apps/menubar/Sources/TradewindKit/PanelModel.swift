@@ -157,17 +157,31 @@ final class PanelModel: ObservableObject {
         await refreshGroups()
     }
 
-    /// 网页面板：panel --url → 浏览器唤起（URL 打开失败静默——网关已可达才走到这）。
+    /// 网页面板：panel --url → 浏览器唤起。
+    /// WHY 接收 open 返回值并做剪贴板兜底（v0.4.2 热修，2026-11-19 真机反馈"点击没反应"）：
+    /// 旧实现静默丢弃 NSWorkspace.open 的 Bool 返回值，违反"不静默吞错"准则；
+    /// 打开失败时把入口 URL 复制到剪贴板，保证用户总能拿到入口。catch 分支维持原提示。
+    /// code-reviewer P3：CLI exit 0 但输出空时不复制（清空用户剪贴板）也不谎报"已复制"。
     func openPanel() async {
         guard let bridge else { return }
         do {
             let url = try bridge.panelURL()
-            if let u = URL(string: url), !url.isEmpty {
-                NSWorkspace.shared.open(u)
+            guard let u = URL(string: url), !url.isEmpty else {
+                showToast("面板不可用：入口 URL 为空")
+                return
             }
+            if NSWorkspace.shared.open(u) { return }
+            copyToClipboard(url)
+            showToast("面板打开失败，入口 URL 已复制到剪贴板")
         } catch {
             showToast("面板不可用：\(error.localizedDescription)")
         }
+    }
+
+    /// 剪贴板兜底（v0.4.2）：面板打不开时用户仍可手动粘贴入口 URL。
+    private func copyToClipboard(_ string: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(string, forType: .string)
     }
 
     /// 面板底部退出：停内核 + 精确还原代理 → 退壳。

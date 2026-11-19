@@ -34,4 +34,32 @@ import Testing
         #expect(CountryFlag.flag(for: "节点 🇯🇵 东京 01") == "🇯🇵")
         #expect(CountryFlag.flag(for: "🇰🇷 Seoul-01") == "🇰🇷")
     }
+
+    // MARK: v0.4.2 热修（2026-11-19 真机反馈）：流量单位两字码不再误判为国家码
+
+    /// 真机样本："GB" 紧随含数字 token，属"数值+单位"语境 → 兜底 🌐 而非误判 🇬🇧
+    @Test func trafficUnitAfterNumberYieldsGlobe() {
+        #expect(CountryFlag.flag(for: "有效期2029-07-02, 剩余 96.17 GB") == "🌐")
+    }
+
+    /// 纯英文场景同口径：数字 + GB 单位 → 兜底 🌐
+    @Test func trafficUnitAfterNumberYieldsGlobeInPureEnglish() {
+        #expect(CountryFlag.flag(for: "Node 96.17 GB") == "🌐")
+    }
+
+    /// 单位表不误伤行首国家码：首 token 的 GB 无前驱（无"数字+码"语境）→ 仍正常命中
+    @Test func leadingCountryCodeUnaffectedByUnitTable() {
+        #expect(CountryFlag.flag(for: "GB-London-01") == "🇬🇧")
+    }
+
+    /// 跳过单位后城市名兜底仍生效（code-reviewer P3 固化口径）：GB 被跳过、London 城市名
+    /// 精确大小写子串命中 → 🇬🇧；对照 "96 GB-01"（数字前驱+无城市名）落 🌐 系启发式固有代价
+    @Test func skippedUnitStillFallsBackToCityName() {
+        #expect(CountryFlag.flag(for: "96 GB-London-01") == "🇬🇧")
+    }
+
+    /// 既有行为回归：非单位两字码不受单位表影响
+    @Test func ordinaryTwoLetterCodeStillMatches() {
+        #expect(CountryFlag.flag(for: "US-01") == "🇺🇸")
+    }
 }
