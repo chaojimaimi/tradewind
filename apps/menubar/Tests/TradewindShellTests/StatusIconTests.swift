@@ -16,18 +16,18 @@ import Testing
     @Test func markFollowsRunStateBrightBrandForRunningGrayForStopped() throws {
         let active = try #require(StatusIcon.image(.active, scheme: .light))
         let stopped = try #require(StatusIcon.image(.stopped, scheme: .light))
-        // 标形厚处（位图 (8,9)，v0.4.12 测试同点位）：运行=亮青（亮且绿主导），
+        // 标形厚处（位图 (9,10)，18pt 网格）：运行=亮青（亮且绿主导），
         // 停止=中灰（灰且亮度显著低于亮青）
-        let runningMark = try pixelColor(of: active, x: 8, y: 9)
+        let runningMark = try pixelColor(of: active, x: 9, y: 10)
         #expect(runningMark.alphaComponent > 0.9)
         #expect(runningMark.brightnessComponent > 0.5)
-        let stoppedMark = try pixelColor(of: stopped, x: 8, y: 9)
+        let stoppedMark = try pixelColor(of: stopped, x: 9, y: 10)
         #expect(stoppedMark.alphaComponent > 0.9)
         #expect(stoppedMark.brightnessComponent < 0.75)
         #expect(abs(stoppedMark.redComponent - stoppedMark.greenComponent) < 0.1)
         #expect(abs(stoppedMark.greenComponent - stoppedMark.blueComponent) < 0.1)
         // 停止态双色结构锁点（审查 P3-4）：灰板/灰标仍分层，防未来误用同渐变
-        let stoppedPlate = try pixelColor(of: stopped, x: 2, y: 6)
+        let stoppedPlate = try pixelColor(of: stopped, x: 2, y: 7)
         #expect(stoppedPlate.alphaComponent > 0.9)
         #expect(stoppedMark.brightnessComponent > stoppedPlate.brightnessComponent + 0.15)
     }
@@ -42,7 +42,7 @@ import Testing
         #expect(StatusIcon.alpha(.stopped) == 0.5)
     }
 
-    /// 合成图像：三态双主题均可构造、画布 16×16 point（v0.4.10 品牌位图主形）、
+    /// 合成图像：三态双主题均可构造、画布 18×18 point（v0.4.15 调大一号）、
     /// 非模板（绿点色彩独立于染色）+ active 像素含代理绿点（idle 同位无绿）
     @Test func composedImageRendersAllStatesAndSchemes() throws {
         for scheme in [ColorScheme.light, .dark] {
@@ -53,14 +53,14 @@ import Testing
         let active = try #require(StatusIcon.image(.active, scheme: .light))
         let idle = try #require(StatusIcon.image(.idle, scheme: .light))
         #expect(active.size == idle.size) // 画布统一：点区有无不影响尺寸（菜单栏不跳动）
-        // 画布=品牌位图逻辑尺寸（16×16 point；@1x 16px + @2x 32px 双密度表示）
-        #expect(active.size.width == 16)
-        #expect(active.size.height == 16)
+        // 画布=18×18 point（v0.4.15 用户"调大一个尺寸"；菜单栏内容区 ~24pt 上探安全）
+        #expect(active.size.width == 18)
+        #expect(active.size.height == 18)
         #expect(!active.isTemplate) // template 画布会被 contentTintColor 单色染色
-        // 像素验证：绿点落右下点区中心（点区 drawing 坐标 (9,1,6,6) 中心 (12,4)，
-        // 位图 top-left 原点 y=16-4=12）；idle 同位无绿（主形仅品牌/灰烘焙）
-        #expect(isProxyDotGreen(try pixelColor(of: active, x: 12, y: 12)))
-        #expect(!isProxyDotGreen(try pixelColor(of: idle, x: 12, y: 12)))
+        // 像素验证：绿点落右下点区中心（点区 drawing 坐标 (11,1,6,6) 中心 (14,4)，
+        // 位图 top-left 原点 y=18-4=14）；idle 同位无绿（主形仅品牌/灰烘焙）
+        #expect(isProxyDotGreen(try pixelColor(of: active, x: 14, y: 14)))
+        #expect(!isProxyDotGreen(try pixelColor(of: idle, x: 14, y: 14)))
     }
 
     /// v0.4.10 品牌资产：Bundle.module 两份 PNG 可加载（非 nil 且 16/32 像素尺寸），
@@ -77,23 +77,23 @@ import Testing
     }
 
     /// v0.4.13 双色徽章（用户复测否决单色镂空："T 与底色板分别有色"）：
-    /// 深墨绿底板不透明、亮青标形不透明、四角圆弧外透明。位图 top-left 原点 y=16-绘制y。
+    /// 深墨绿底板不透明、亮青标形不透明、四角圆弧外透明。位图 top-left 原点 y=18-绘制y。
     @Test func composedImageBakesTwoToneBadge() throws {
         let active = try #require(StatusIcon.image(.active, scheme: .light))
-        // 板区（标形位图外，左缘中段 绘制 (2.5,9.5)→位图 (2,6)）：深墨绿=暗且不透明
-        let platePixel = try pixelColor(of: active, x: 2, y: 6)
+        // 板区（标形位图外，左缘中段 绘制 (2.5,10.5)→位图 (2,7)）：深墨绿=暗且不透明
+        let platePixel = try pixelColor(of: active, x: 2, y: 7)
         #expect(platePixel.alphaComponent > 0.9)
         #expect(platePixel.brightnessComponent < 0.4)
         #expect(platePixel.blueComponent > platePixel.redComponent) // 深绿蓝调
-        // 标形亮青（竖干厚处 绘制 (8.5,6.5)→位图 (8,9)）：亮、青绿主导
-        let markPixel = try pixelColor(of: active, x: 8, y: 9)
+        // 标形亮青（竖干厚处：16 位图拉伸到 18pt 竖干 draw x≈8-10.2 → (9.5,7.5)→位图 (9,10)）
+        let markPixel = try pixelColor(of: active, x: 9, y: 10)
         #expect(markPixel.alphaComponent > 0.9)
         #expect(markPixel.brightnessComponent > 0.5)
         #expect(markPixel.greenComponent > markPixel.redComponent)
         // 板与标明暗对比（双色结构锁点）：标显著亮于板
         #expect(markPixel.brightnessComponent > platePixel.brightnessComponent + 0.15)
-        // 圆弧外角（绘制 (0.5,0.5)→位图 (0,15) 底行）：板内缩 0.5pt+圆角，角点透明
-        let cornerPixel = try pixelColor(of: active, x: 0, y: 15)
+        // 圆弧外角（绘制 (0.5,0.5)→位图 (0,17) 底行）：板内缩 0.5pt+圆角，角点透明
+        let cornerPixel = try pixelColor(of: active, x: 0, y: 17)
         #expect(cornerPixel.alphaComponent < 0.1)
     }
 

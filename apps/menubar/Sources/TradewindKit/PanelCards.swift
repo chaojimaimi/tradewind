@@ -32,7 +32,8 @@ struct CurrentNodeCard: View {
                 }
                 delayBadge
                 Spacer()
-                // 组名原样显示（真实组名无 emoji）；"当前组"前缀语义由位置表达（M3-plan §3.2）
+                // 组名展示形态（v0.4.15 与 chips 同口径：icon+demo 中文名）；"当前组"
+                // 前缀语义由位置表达（M3-plan §3.2）
                 Text(currentGroupName ?? "—")
                     .font(.system(size: Theme.fontSizeSub))
                     .foregroundStyle(Theme.muted(scheme))
@@ -112,7 +113,13 @@ struct CurrentNodeCard: View {
     }
 
     private var currentNodeName: String? { activeGroup?.currentNode }
-    private var currentGroupName: String? { activeGroup?.name }
+    /// v0.4.15（审查 P2）：组名位与 demo 同口径用展示形态（"🚀 节点选择"，demo
+    /// curGroup 即此形态）——chips/卡片双名不一致正是用户投诉的那类偏差；
+    /// 选中/语义仍按 id（原名），映射只影响显示。
+    private var currentGroupName: String? {
+        guard let g = activeGroup else { return nil }
+        return g.display.icon.isEmpty ? g.display.name : "\(g.display.icon) \(g.display.name)"
+    }
     /// 链式解析数据路径（视图不自行下探，模型可单测）
     private var nodeChain: (names: [String], tailDelay: Int?)? { model.exitChain() }
 
@@ -248,7 +255,11 @@ private struct GroupChips: View {
                     Button {
                         model.activeGroupID = group.id
                     } label: {
-                        Text(group.name)
+                        // v0.4.15：pill 用 demo 语义展示形态（icon+中文名，如 "♻️ 自动选择"）；
+                        // 选中态仍按 id（原名）判定，映射只影响显示不影响语义
+                        Text(group.display.icon.isEmpty
+                             ? group.display.name
+                             : "\(group.display.icon) \(group.display.name)")
                             .font(.system(size: 12))
                             .padding(.horizontal, 11)
                             .padding(.vertical, 4)

@@ -3,7 +3,8 @@ import Combine
 import Foundation
 import os
 
-/// 策略组视图模型（/proxies 裁剪）：组内成员保持内核顺序（即订阅配置顺序）。
+/// 策略组视图模型（/proxies 裁剪）：组内成员按实测延迟升序（v0.4.15，用户指令
+/// "延迟最低排最上"——偏离 demo 的订阅配置顺序，记偏差）。
 struct ProxyGroup: Identifiable, Equatable {
     struct Node: Identifiable, Equatable {
         let id: String
@@ -16,8 +17,35 @@ struct ProxyGroup: Identifiable, Equatable {
 
     let id: String
     let name: String
+    /// mihomo 组类型（Selector/URLTest/Fallback/LoadBalance/Relay），展示名映射依据
+    let type: String
     let nodes: [Node]
     let currentNode: String?
+
+    /// 策略组展示形态（v0.4.15，用户反馈 pill 显示"Auto/Proxy"与 demo 的
+    /// "节点选择/自动选择/全球直连"不一致）：中文名+图标按 demo 语义映射。
+    /// WHY 名字表优先于类型：订阅可含多个同类型组（如多个地区 Selector），
+    /// 全按类型映射会重名；仅常见英文名（demo mock 形态）映射为 demo 中文语义。
+    /// 未命中组保持原名+类型图标（不丢区分度）。
+    var display: (icon: String, name: String) {
+        switch name {
+        case "Proxy", "节点选择", "手动选择", "手动切换":
+            return ("🚀", "节点选择")
+        case "Auto", "自动选择", "自动":
+            return ("♻️", "自动选择")
+        case "DIRECT", "全球直连", "直连":
+            return ("🎯", "全球直连")
+        default:
+            switch type {
+            case "Selector": return ("🚀", name)
+            case "URLTest": return ("♻️", name)
+            case "Fallback": return ("🪂", name)
+            case "LoadBalance": return ("⚖️", name)
+            case "Relay": return ("🔗", name)
+            default: return ("", name)
+            }
+        }
+    }
 }
 
 /// popover 主面板状态（demo 主面板语义，M2-plan §5）。
@@ -292,6 +320,8 @@ final class PanelModel: ObservableObject {
     }
 
     /// /proxies → 组视图模型；GLOBAL 聚合组与非组条目排除（与 CLI nodes 口径一致）。
+    /// v0.4.15：组内成员按实测延迟升序（未测排尾，用户指令"延迟最低排最上"；
+    /// 同延迟保持内核稳定序）——展示层排序，内核/CLI 口径不变。
     private func refreshGroups() async {
         guard let gateway else {
             degraded = true
@@ -304,13 +334,22 @@ final class PanelModel: ObservableObject {
                 .sorted()
             groups = names.map { name in
                 let entry = proxies.proxies[name]!
+                let nodes = (entry.all ?? []).map { node in
+                    ProxyGroup.Node(id: node, name: node, delay: proxies.proxies[node]?.lastDelay,
+                                    isGroup: proxies.proxies[node]?.isGroup ?? false)
+                }
                 return ProxyGroup(
                     id: name,
                     name: name,
-                    nodes: (entry.all ?? []).map { node in
-                        ProxyGroup.Node(id: node, name: node, delay: proxies.proxies[node]?.lastDelay,
-                                        isGroup: proxies.proxies[node]?.isGroup ?? false)
-                    },
+                    type: entry.type,
+                    nodes: nodes.enumerated().sorted { a, b in
+                        switch (a.element.delay, b.element.delay) {
+                        case let (x?, y?): return x != y ? x < y : a.offset < b.offset
+                        case (.some, nil): return true // 有延迟在前
+                        case (nil, .some): return false // 未测排尾
+                        case (nil, nil): return a.offset < b.offset // 同未测保持内核稳定序
+                        }
+                    }.map(\.element),
                     currentNode: entry.now
                 )
             }

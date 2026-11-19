@@ -63,8 +63,57 @@ final class StubURLProtocol: URLProtocol {
         #expect(model.activeGroupID == "Auto")
         let groupA = model.groups.first { $0.id == "组A" }!
         #expect(groupA.currentNode == "HK-1")
-        #expect(groupA.nodes[0].delay == 42) // 未测节点（US-1）delay 为 nil
+        // v0.4.15：节点按实测延迟升序（HK-1 42 → JP-1 180 → US-1/Auto 未测排尾，
+        // 同延迟保持内核稳定序）；currentNode 仍按名匹配 ✓ 不受排序影响
+        #expect(groupA.nodes.map(\.name) == ["HK-1", "JP-1", "US-1", "Auto"])
+        #expect(groupA.nodes[0].delay == 42)
         #expect(groupA.nodes[2].delay == nil)
+    }
+
+    /// v0.4.15：延迟动态排序锁点——内核序故意乱序（300/100/100/未测），
+    /// 刷新后升序 + 同延迟稳定 + 未测排尾
+    @Test func nodesSortedByDelayAscending() async {
+        let json = """
+        {"proxies":{
+          "GLOBAL":{"name":"GLOBAL","type":"Selector","now":"G"},
+          "G":{"name":"G","type":"Selector","now":"B","all":["B","C","A","D"]},
+          "A":{"name":"A","type":"Socks5","history":[{"delay":100}]},
+          "B":{"name":"B","type":"Socks5","history":[{"delay":300}]},
+          "C":{"name":"C","type":"Socks5","history":[{"delay":100}]},
+          "D":{"name":"D","type":"Socks5","history":[]}
+        }}
+        """
+        StubURLProtocol.handler = { _ in (200, json) }
+        let model = makeModel([FakeRunner.Reply(output: Self.statusWithPanel, exitCode: 0)])
+        await model.refresh()
+        let g = model.groups.first { $0.id == "G" }!
+        #expect(g.nodes.map(\.name) == ["C", "A", "B", "D"]) // C/A 同 100ms 按内核稳定序
+        #expect(g.currentNode == "B") // 选中标记按名匹配，排序不改变语义
+    }
+
+    /// v0.4.15：策略组展示形态——常见英文名映射 demo 中文语义（icon+名）；
+    /// 未命中组保留原名+按类型配图标（多地区组不重名）
+    @Test func groupDisplayMapsDemoSemantics() {
+        func group(_ name: String, _ type: String) -> ProxyGroup {
+            ProxyGroup(id: name, name: name, type: type, nodes: [], currentNode: nil)
+        }
+        #expect(group("Proxy", "Selector").display == ("🚀", "节点选择"))
+        #expect(group("Auto", "URLTest").display == ("♻️", "自动选择"))
+        #expect(group("DIRECT", "Direct").display == ("🎯", "全球直连"))
+        // 中文命名订阅直接命中表（审查 P3-5：名字表全覆盖）
+        #expect(group("节点选择", "Selector").display == ("🚀", "节点选择"))
+        #expect(group("手动选择", "Selector").display == ("🚀", "节点选择"))
+        #expect(group("手动切换", "Selector").display == ("🚀", "节点选择"))
+        #expect(group("自动选择", "URLTest").display == ("♻️", "自动选择"))
+        #expect(group("自动", "URLTest").display == ("♻️", "自动选择"))
+        #expect(group("全球直连", "Direct").display == ("🎯", "全球直连"))
+        #expect(group("直连", "Direct").display == ("🎯", "全球直连"))
+        // 未命中：原名保留 + 类型图标（区分度不丢；Relay/default 分支全覆盖）
+        #expect(group("香港IEPL", "Selector").display == ("🚀", "香港IEPL"))
+        #expect(group("Custom", "LoadBalance").display == ("⚖️", "Custom"))
+        #expect(group("Custom", "Fallback").display == ("🪂", "Custom"))
+        #expect(group("Custom", "Relay").display == ("🔗", "Custom"))
+        #expect(group("Custom", "Unknown").display == ("", "Custom"))
     }
 
     @Test func degradedWhenPanelURLMissing() async {

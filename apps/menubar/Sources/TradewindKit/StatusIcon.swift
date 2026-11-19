@@ -103,14 +103,16 @@ enum StatusIcon {
         state == .stopped ? 0.5 : 1
     }
 
-    /// 16×16 point 品牌徽章 + 右下 6pt 代理绿点的合成状态栏图像。
+    /// 18×18 point 品牌徽章 + 右下 6pt 代理绿点的合成状态栏图像。
+    /// WHY v0.4.15（用户反馈"整体略小，调大一个尺寸"）：16pt 是菜单栏图标的保守
+    /// 惯例值，macOS 菜单栏内容区 ~24pt，18pt 上探安全（SF Symbols 默认 17pt 常规）；
+    /// 位图资产 16/32px 插值放大 1.125x（轻微软化，渐变图形观感可接受；审查 P3-4）。
     /// 纯函数：不读全局状态，双状态可单测。WHY scheme 参数保留但未用：设计资产为
     /// 固定品牌色（不随系统外观切换，Dock 图标同样恒定）；参数留给未来深浅色变体。
     static func image(_ state: StatusIconState, scheme: ColorScheme) -> NSImage? {
         guard let glyph = brandImage() else { return nil }
-        // 画布=主形逻辑尺寸（16×16 point，位图资产 16/32px 双密度），不做额外扩带
-        // （code-reviewer P2 口径沿用：扩带令画布被菜单栏等比缩小）；非翻转坐标原点=左下
-        let canvasSize = glyph.size
+        // 画布=18×18 point（略大于资产逻辑尺寸 16pt，glyph 插值铺满）；非翻转坐标原点=左下
+        let canvasSize = NSSize(width: 18, height: 18)
         let running = state != .stopped
         let plate = running ? plateGradient : stoppedPlateGradient
         let mark = running ? markGradient : stoppedMarkGradient
