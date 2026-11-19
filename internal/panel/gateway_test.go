@@ -246,6 +246,10 @@ func TestConfigJSDynamicallyGenerated(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "application/javascript") {
 		t.Fatalf("config.js Content-Type = %q, want application/javascript", ct)
 	}
+	// v0.4.8：no-store 防浏览器缓存旧配置复现"设置屏"（内容随端口/安装而变且无版本化文件名）
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("config.js Cache-Control = %q, want no-store", cc)
+	}
 	// 审计④：动态生成体同样不得携带 secret（secret 仅服务端反代注入）
 	if strings.Contains(body, "gw-secret") {
 		t.Fatal("config.js leaked secret")

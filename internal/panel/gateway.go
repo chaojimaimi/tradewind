@@ -173,6 +173,9 @@ func (g *Gateway) serveStatic(w http.ResponseWriter, r *http.Request) {
 	// secret 仍由网关反代在服务端注入（覆写 Authorization），浏览器侧无凭据。
 	if cleaned == "/config.js" {
 		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		// WHY no-store（v0.4.8）：内容随网关端口/安装而变且无版本化文件名，浏览器缓存旧值
+		// 会复现"设置屏"症状（2026-11-19 自动化浏览器实测：缓存旧空配置须绕缓存强刷才收敛）
+		w.Header().Set("Cache-Control", "no-store")
 		// WHY 回显 r.Host 而非硬编码 127.0.0.1（审查 P3-1）：ServeHTTP 已先过 allowHostOrigin
 		// 白名单（Host 仅可能是本机网关两种 loopback 形态，无注入面），回显可兼收
 		// localhost 入口路径——浏览器按 Host 连后端，与入口地址一致避免混用回环名。
