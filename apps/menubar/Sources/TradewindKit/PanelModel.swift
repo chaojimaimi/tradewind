@@ -9,6 +9,8 @@ struct ProxyGroup: Identifiable, Equatable {
         let name: String
         /// 最近延迟（毫秒）；nil=未测（灰点）
         let delay: Int?
+        /// 成员本身是策略组=嵌套组，视图据此渲染「组」徽标（v0.4.4）
+        let isGroup: Bool
     }
 
     let id: String
@@ -218,7 +220,8 @@ final class PanelModel: ObservableObject {
                     id: name,
                     name: name,
                     nodes: (entry.all ?? []).map { node in
-                        ProxyGroup.Node(id: node, name: node, delay: proxies.proxies[node]?.lastDelay)
+                        ProxyGroup.Node(id: node, name: node, delay: proxies.proxies[node]?.lastDelay,
+                                        isGroup: proxies.proxies[node]?.isGroup ?? false)
                     },
                     currentNode: entry.now
                 )

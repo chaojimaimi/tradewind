@@ -9,11 +9,18 @@ struct CurrentNodeCard: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 if let name = currentNodeName {
-                    Text(CountryFlag.flag(for: name))
-                        .font(.system(size: 16)) // 旗帜 16pt（M3-plan §3.2）
+                    // WHY v0.4.4：当前节点名是组 id（嵌套组）时不渲染旗帜——组无旗帜语义
+                    // （🌐 误导），名称后「组」徽标标明类型（metacubexd 同类信息位）
+                    if !isNestedGroup(name, in: model.groups) {
+                        Text(CountryFlag.flag(for: name))
+                            .font(.system(size: 16)) // 旗帜 16pt（M3-plan §3.2）
+                    }
                     Text(name)
                         .font(.system(size: 14, weight: .semibold))
                         .lineLimit(1)
+                    if isNestedGroup(name, in: model.groups) {
+                        BadgeView(text: "组")
+                    }
                 } else {
                     Text("—")
                         .font(.system(size: 14, weight: .semibold))
@@ -268,14 +275,21 @@ private struct NodeRow: View {
                 Circle()
                     .fill(LatencyColor.scale(node.delay, scheme: scheme))
                     .frame(width: 8, height: 8)
-                // 旗帜注入（M3-plan §3.1 应用点位：每行节点名前；真实节点名无 emoji 前缀）
-                Text(CountryFlag.flag(for: node.name))
-                    .font(.system(size: 12.5))
-                    .lineLimit(1)
+                // WHY v0.4.4：嵌套组不渲染旗帜——CountryFlag 对组名无语义（🌐 误导），
+                // 「组」徽标标明类型（metacubexd 同类信息位）；2026-11-19 拍板
+                // Auto（url-test）组自身形态保留现状，本批只做组成员识别
+                if !node.isGroup {
+                    Text(CountryFlag.flag(for: node.name))
+                        .font(.system(size: 12.5))
+                        .lineLimit(1)
+                }
                 Text(node.name)
                     .font(.system(size: 12.5, weight: selected ? .semibold : .regular))
                     .lineLimit(1)
                     .foregroundStyle(Color.primary)
+                if node.isGroup {
+                    BadgeView(text: "组")
+                }
                 Spacer()
                 Text(node.delay.map { "\($0) ms" } ?? "—")
                     .font(.system(size: 11.5))
@@ -292,6 +306,12 @@ private struct NodeRow: View {
         }
         .buttonStyle(.plain)
     }
+}
+
+/// 嵌套组判定：成员名命中任一组 id 即为组（CurrentNodeCard 徽标位用；
+/// NodeRow 直接读 node.isGroup 数据字段，无须 contains）
+private func isNestedGroup(_ name: String, in groups: [ProxyGroup]) -> Bool {
+    groups.contains { $0.id == name }
 }
 
 /// 延迟色阶（demo 设计规范面板的纯函数化）。

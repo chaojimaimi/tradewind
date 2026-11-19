@@ -37,11 +37,13 @@ final class StubURLProtocol: URLProtocol {
     {"core":{"running":true,"pid":2640,"version":"v1.19.34"},"mode":"rule","sys_proxy":{"applied":true,"services":1},"profile":{"uid":"u1","name":"sub"},"panel_url":"http://127.0.0.1:19097/ui/tok123/"}
     """
 
+    /// v0.4.4 扩展：加 URLTest 嵌套组 "Auto" 并入 组A.all（真实订阅选择组内常嵌套组）
     private static let proxiesJSON = """
     {"proxies":{
       "GLOBAL":{"name":"GLOBAL","type":"Selector","now":"组A"},
-      "组A":{"name":"组A","type":"Selector","now":"HK-1","all":["HK-1","JP-1","US-1"]},
+      "组A":{"name":"组A","type":"Selector","now":"HK-1","all":["HK-1","JP-1","US-1","Auto"]},
       "组B":{"name":"组B","type":"URLTest","now":"JP-1","all":["JP-1"]},
+      "Auto":{"name":"Auto","type":"URLTest","now":"HK-1","all":["HK-1","JP-1","US-1"]},
       "HK-1":{"name":"HK-1","type":"Socks5","history":[{"delay":42}]},
       "JP-1":{"name":"JP-1","type":"Socks5","history":[{"delay":180}]},
       "US-1":{"name":"US-1","type":"Socks5","history":[]}
@@ -57,9 +59,9 @@ final class StubURLProtocol: URLProtocol {
         let model = makeModel([FakeRunner.Reply(output: Self.statusWithPanel, exitCode: 0)])
         await model.refresh()
         #expect(!model.degraded)
-        #expect(model.groups.map(\.id) == ["组A", "组B"]) // GLOBAL 排除 + 字典序（与 CLI nodes 口径一致）
-        #expect(model.activeGroupID == "组A")
-        let groupA = model.groups[0]
+        #expect(model.groups.map(\.id) == ["Auto", "组A", "组B"]) // GLOBAL 排除 + 字典序（Auto ASCII 在前）
+        #expect(model.activeGroupID == "Auto")
+        let groupA = model.groups.first { $0.id == "组A" }!
         #expect(groupA.currentNode == "HK-1")
         #expect(groupA.nodes[0].delay == 42) // 未测节点（US-1）delay 为 nil
         #expect(groupA.nodes[2].delay == nil)
@@ -143,13 +145,13 @@ final class StubURLProtocol: URLProtocol {
         await model.testLatency()
         let calls = fake.calls
         #expect(calls.contains(["mode", "global"]))
-        #expect(calls.contains(["delay", "组A"]))
+        #expect(calls.contains(["delay", "Auto"])) // 测速作用于 activeGroup（字典序首个=Auto）
     }
 
     // MARK: 当前节点卡数据路径（M3-plan §3.2）
 
     @Test func currentNodeDelayResolvesFromMatchedNode() async {
-        // 徽标取 activeGroup.nodes 中 currentNode 匹配项的 delay（组A current HK-1 → 42）
+        // 徽标取 activeGroup.nodes 中 currentNode 匹配项的 delay（activeGroup=Auto current HK-1 → 42）
         StubURLProtocol.handler = { _ in (200, Self.proxiesJSON) }
         let model = makeModel([FakeRunner.Reply(output: Self.statusWithPanel, exitCode: 0)])
         await model.refresh()
@@ -157,9 +159,13 @@ final class StubURLProtocol: URLProtocol {
     }
 
     @Test func currentNodeDelayNilWithoutLatencyRecord() async {
-        // 当前节点无延迟采样（US-1 history 空）→ nil，卡片显示"—"（灰）
+        // 当前节点无延迟采样 → nil，卡片显示"—"（灰）。替换目标锚定 Auto 组整段前缀
+        // （code-reviewer P3：组A 与 Auto 的 now 同值，全局替换会双双命中——曾致断言
+        // 经"US-1 非成员查找失败"而非本意的"成员在列但 history 空"路径通过）。
+        // activeGroup 为字典序首组 Auto，now→US-1（在 Auto.all 内、history 空）
         let noDelay = Self.proxiesJSON.replacingOccurrences(
-            of: "\"now\":\"HK-1\"", with: "\"now\":\"US-1\""
+            of: "\"Auto\":{\"name\":\"Auto\",\"type\":\"URLTest\",\"now\":\"HK-1\"",
+            with: "\"Auto\":{\"name\":\"Auto\",\"type\":\"URLTest\",\"now\":\"US-1\""
         )
         StubURLProtocol.handler = { _ in (200, noDelay) }
         let model = makeModel([FakeRunner.Reply(output: Self.statusWithPanel, exitCode: 0)])
@@ -175,5 +181,16 @@ final class StubURLProtocol: URLProtocol {
         await model.refresh()
         let currentNode = model.groups[0].currentNode ?? ""
         #expect(CountryFlag.flag(for: currentNode) == "🇭🇰") // HK-1 → 🇭🇰（非兜底）
+    }
+
+    /// v0.4.4 嵌套组识别：组内成员若本身是策略组 → isGroup=true，普通节点 false。
+    @Test func nestedGroupMemberMarkedAsGroup() async {
+        StubURLProtocol.handler = { _ in (200, Self.proxiesJSON) }
+        let model = makeModel([FakeRunner.Reply(output: Self.statusWithPanel, exitCode: 0)])
+        await model.refresh()
+        let groupA = model.groups.first { $0.id == "组A" }!
+        #expect(groupA.nodes.first { $0.name == "Auto" }?.isGroup == true) // URLTest 嵌套组
+        #expect(groupA.nodes.first { $0.name == "HK-1" }?.isGroup == false) // 普通节点
+        #expect(model.groups.first { $0.id == "组B" }!.nodes[0].isGroup == false) // 顶层组成员也是普通节点
     }
 }
