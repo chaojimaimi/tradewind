@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// ② 当前节点卡（旗帜 + 节点名 + 固定绿延迟徽标 + 组名 + 出站模式 seg；demo .ms-chip 单色事实）。
+/// ② 当前节点卡（旗帜 + 节点名 + 延迟徽标 + 组名 + 出站模式 seg）。
 struct CurrentNodeCard: View {
     @ObservedObject var model: PanelModel
     @Environment(\.colorScheme) private var scheme
@@ -31,30 +31,30 @@ struct CurrentNodeCard: View {
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.secondary(scheme))
                 Spacer()
-                Picker("", selection: modeBinding) {
-                    Text("规则").tag("rule")
-                    Text("全局").tag("global")
-                    Text("直连").tag("direct")
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 168)
+                // 自绘分段（批①.5 §3.3，demo .seg；去固定宽 168 改自然宽度，demo 无 flex）
+                SegmentedPill(
+                    options: [("rule", "规则"), ("global", "全局"), ("direct", "直连")],
+                    selection: modeBinding
+                )
                 .disabled(!model.running || model.busy)
             }
         }
         .cardStyle()
     }
 
-    /// 延迟徽标：固定绿（demo .ms-chip：ok 色底 16% + ok 字色，圆角 5，11px mono），
-    /// 不按延迟色阶分级（三色阶已由节点行色点表达）；无记录显示"—"（灰）（M3-plan §3.2）
+    /// 延迟徽标：按延迟色阶着色（底色 16% + 字色同源，LatencyColor.scale 四档，
+    /// 无记录显示"—"灰）。WHY 偏离 demo：demo .ms-chip 为固定绿，但 316ms 绿徽标
+    /// 语义误导——用户 2026-11-19 拍板改延迟色阶（记验收偏差 #2，批①.5 §3.6）
     @ViewBuilder private var delayBadge: some View {
         if let delay = model.currentNodeDelay {
+            let color = LatencyColor.scale(delay, scheme: scheme)
             Text("\(delay) ms")
                 .font(.system(size: Theme.fontSizeSub, weight: .semibold))
                 .monospacedDigit()
                 .padding(.horizontal, 7)
                 .padding(.vertical, 1)
-                .background(Theme.ok.opacity(0.16), in: RoundedRectangle(cornerRadius: 5))
-                .foregroundStyle(Theme.ok)
+                .background(color.opacity(0.16), in: RoundedRectangle(cornerRadius: 5))
+                .foregroundStyle(color)
         } else {
             Text("—")
                 .font(.system(size: Theme.fontSizeSub))
@@ -227,7 +227,7 @@ private struct GroupChips: View {
 }
 
 /// 节点列表：延迟点三色阶（<100 ok / 100-299 warn / ≥300 bad / 未测灰，demo 设计规范）
-/// + ✓ 当前（固定绿延迟徽标仅用于节点卡——v1.1 更正）。
+/// + ✓ 当前（色阶口径同节点卡延迟徽标——批①.5 起两处统一按延迟分级）。
 private struct NodeList: View {
     @ObservedObject var model: PanelModel
     @Environment(\.colorScheme) private var scheme
@@ -236,17 +236,28 @@ private struct NodeList: View {
         model.groups.first { $0.id == model.activeGroupID } ?? model.groups.first
     }
 
+    // 确定性高度（批①.5 §3.1）：≤5 行全显、>5 行固定 168 滚动——
+    // maxHeight 在 NSPopover fittingSize 路径收缩为 0（M3-plan §2.2），判定逻辑见 NodeListLayout
     var body: some View {
-        ScrollView(showsIndicators: true) {
-            VStack(spacing: 2) {
-                ForEach(group?.nodes ?? []) { node in
-                    NodeRow(node: node, selected: node.name == group?.currentNode) {
-                        Task { await model.selectNode(node.name) }
-                    }
+        switch NodeListLayout.layout(forCount: group?.nodes.count ?? 0) {
+        case .fitAll:
+            rows
+        case .fixedScroll:
+            ScrollView(showsIndicators: true) {
+                rows
+            }
+            .frame(height: NodeListLayout.scrollHeight)
+        }
+    }
+
+    private var rows: some View {
+        VStack(spacing: 2) {
+            ForEach(group?.nodes ?? []) { node in
+                NodeRow(node: node, selected: node.name == group?.currentNode) {
+                    Task { await model.selectNode(node.name) }
                 }
             }
         }
-        .frame(maxHeight: 168)
     }
 }
 
@@ -300,32 +311,28 @@ enum LatencyColor {
     }
 }
 
-/// ⑥ 底部：网页面板 / 设置…(置灰 M3) / 退出（停内核+还原代理）。
+/// ⑥ 底部（批①.5 §3.4，demo .pop-foot）：网页面板 / 设置… / ⏻ 退出；
+/// 前两钮等宽（flex:1），⏻ 自然宽（flex:0）+ 危险红（.btn.danger）。
 struct PopoverFootView: View {
     @ObservedObject var model: PanelModel
 
     var body: some View {
         HStack(spacing: 8) {
-            Button {
-                Task { await model.openPanel() }
-            } label: {
+            FootButton(fillsWidth: true, action: { Task { await model.openPanel() } }) {
                 Label("网页面板", systemImage: "globe")
             }
-            Button {
-            } label: {
-                Text("设置…")
+            FootButton(fillsWidth: true, action: {}) {
+                // 设置…：功能归批②，保持禁用但视觉为正常按钮弱化态（文本 tertiary，非系统灰块）
+                Text("设置…").foregroundStyle(.tertiary)
             }
             .disabled(true)
             .help("M3 交付：随原生设置窗口")
-            Button(role: .destructive) {
-                Task { await model.stopCoreAndQuit() }
-            } label: {
-                Image(systemName: "power")
+            // ⏻ 保留 SF Symbol "power"（偏差 #3：demo 文本字形 ⏻ 弃用防字体回退 tofu，观感等价）
+            FootButton(horizontalPadding: 10, action: { Task { await model.stopCoreAndQuit() } }) {
+                Image(systemName: "power").foregroundStyle(Theme.bad)
             }
             .help("停止内核并还原系统代理，然后退出壳")
         }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
         .padding(.top, 12)
     }
 }

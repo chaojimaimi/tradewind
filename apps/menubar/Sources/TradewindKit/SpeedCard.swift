@@ -9,10 +9,11 @@ struct SpeedCardView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 14) {
-                SpeedLabel(symbol: "arrow.down", color: Theme.brand(scheme), value: traffic.down)
-                SpeedLabel(symbol: "arrow.up", color: Theme.warn, value: traffic.up)
+                // ▼▲ 文本符号（批①.5 §3.5，demo .arr 11px；SF 图标观感不符弃用）
+                SpeedLabel(symbol: "▼", color: Theme.brand(scheme), value: traffic.down)
+                SpeedLabel(symbol: "▲", color: Theme.warn, value: traffic.up)
                 Spacer()
-                Text("今日 \(RateText.bytes(traffic.todayBytes))")
+                Text("今日 ↓ \(RateText.bytes(traffic.todayBytes))")
                     .font(.system(size: Theme.fontSizeSub))
                     .monospacedDigit()
                     .foregroundStyle(Theme.muted(scheme))
@@ -31,8 +32,8 @@ private struct SpeedLabel: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: symbol)
-                .font(.system(size: 10))
+            Text(symbol)
+                .font(.system(size: 11)) // demo .arr 11px（批①.5 §3.5）
                 .foregroundStyle(color)
             Text(RateText.bytes(value) + "/s")
                 .font(.system(size: 14, weight: .semibold))
