@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Foundation
+import os
 
 /// 策略组视图模型（/proxies 裁剪）：组内成员保持内核顺序（即订阅配置顺序）。
 struct ProxyGroup: Identifiable, Equatable {
@@ -40,6 +41,11 @@ final class PanelModel: ObservableObject {
     let traffic: TrafficStore
     /// popover 开合事件（壳装配层在 show 时发送；面板据此刷新）
     let popoverDidShow = PassthroughSubject<Void, Never>()
+    /// v0.4.5 openPanel 诊断面包屑：用户端"面板依然打不开"且 v0.4.2 失败分支未见触发，
+    /// 经统一日志区分"动作未触发 / open 返回 false / CLI 抛错"三情形。
+    /// WHY 日志绝不携带 URL/token 本体（token 内嵌 panel URL，落日志即泄露）；
+    /// 排查后保留（个人工具，无害且利于日后定位）。
+    private static let panelLog = Logger(subsystem: "io.github.chaojimaimi.tradewind", category: "panel")
 
     init(bridge: CoreBridge?, session: URLSession = .shared, traffic: TrafficStore? = nil) {
         self.bridge = bridge
@@ -164,18 +170,32 @@ final class PanelModel: ObservableObject {
     /// 旧实现静默丢弃 NSWorkspace.open 的 Bool 返回值，违反"不静默吞错"准则；
     /// 打开失败时把入口 URL 复制到剪贴板，保证用户总能拿到入口。catch 分支维持原提示。
     /// code-reviewer P3：CLI exit 0 但输出空时不复制（清空用户剪贴板）也不谎报"已复制"。
+    /// v0.4.5 追加诊断面包屑（panelLog WHY 见定义处）：fired 无后续即桥缺失，
+    /// 各失败分支各留一条含分支名的记录；动态值显式 .public，否则统一日志里被脱敏成 <private>。
     func openPanel() async {
+        Self.panelLog.notice("openPanel fired")
         guard let bridge else { return }
         do {
             let url = try bridge.panelURL()
+            // 只记长度不记内容，足以区分"URL 空"与"URL 正常"
+            Self.panelLog.notice("panelURL acquired (length=\(url.count, privacy: .public))")
             guard let u = URL(string: url), !url.isEmpty else {
+                Self.panelLog.notice("branch: URL empty")
                 showToast("面板不可用：入口 URL 为空")
                 return
             }
-            if NSWorkspace.shared.open(u) { return }
+            // WHY 先存后判：open 的 Bool 结果落日志再走剪贴板兜底
+            let ok = NSWorkspace.shared.open(u)
+            Self.panelLog.notice("NSWorkspace.open -> \(ok, privacy: .public)")
+            if ok { return }
+            Self.panelLog.notice("branch: open false")
             copyToClipboard(url)
             showToast("面板打开失败，入口 URL 已复制到剪贴板")
         } catch {
+            // error 为 CoreBridgeError.cliFailed：该类型无 LocalizedError 遵从，
+            // localizedDescription 落系统默认文案（仅类型名+case 序号，无关联值/路径/token）。
+            // ⚠️ 若日后为其添加回显 payload 的 LocalizedError（如内嵌 URL），此处 .public 即泄露通道
+            Self.panelLog.notice("branch: cli error: \(error.localizedDescription, privacy: .public)")
             showToast("面板不可用：\(error.localizedDescription)")
         }
     }

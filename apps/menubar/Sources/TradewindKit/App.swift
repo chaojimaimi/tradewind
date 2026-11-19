@@ -22,10 +22,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// popover 展开期间的全局点击监听（收起兜底，见 popoverWillShow）
     private var outsideClickMonitor: Any?
     private let popover = NSPopover()
-    /// 面板状态与 WS 速率（壳的数据中枢；菜单栏图标/速率文本同源于此）
+    /// 面板状态与 WS 速率（壳的数据中枢；菜单栏图标与 popover 速率卡同源于此）
     private lazy var model: PanelModel = .live()
     private var cancellables = Set<AnyCancellable>()
-    /// 周期刷新（M2-plan §8：壳每次操作前探测；5s 供图标/速率保持新鲜）
+    /// 周期刷新（M2-plan §8：壳每次操作前探测；5s 供图标保持新鲜）
     private var refreshTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -95,25 +95,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.terminate(nil) // 壳退出即终止进程；内核由 start 进程守护，不受影响
     }
 
-    // MARK: 状态观察（图标三态 + 运行态速率文本）
+    // MARK: 状态观察（图标三态）
 
     private func observeModel() {
         model.$report
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.refreshIcon() }
             .store(in: &cancellables)
-        model.traffic.$down
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] down in self?.updateRateText(down: down) }
-            .store(in: &cancellables)
     }
 
-    /// demo 口径：运行态显示速率文本，停止态隐藏。
-    private func updateRateText(down: Double) {
-        guard let button = statusItem?.button else { return }
-        let running = model.running
-        button.title = running ? (RateText.statusItem(down: down, up: model.traffic.up) ?? "") : ""
-    }
+    // WHY v0.4.5（2026-11-19 第四轮反馈）：菜单栏速率文本降级为默认关闭——运行态横向
+    // 速率文本占宽且随数值宽度抖动（"↓42.0 MB/s ↑0.8 MB/s"），用户反馈干扰菜单栏；
+    // 速率信息 popover 速率卡已有，title 恒空只留图标（三态着色不变）。
+    // RateText.statusItem 机制保留勿删：批②设置窗口将其转为 opt-in 设置项，届时在
+    // 此处接设置开关恢复 title 刷新（曾用的 traffic.$down 订阅已随 updateRateText 移除）。
 
     private func startRefreshTimer() {
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
