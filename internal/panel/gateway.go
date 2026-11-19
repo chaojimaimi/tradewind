@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // cookieName 是面板会话 cookie 名；值即 panel token（等价凭据，由 HttpOnly+loopback+Lax 保护）。
@@ -22,20 +23,27 @@ type Config struct {
 
 // Gateway 是面板网关 http.Handler：
 //
-//	GET /ui/<token>/   凭据入口 → Set-Cookie(Path=/) → 302 /ui/
-//	GET /ui/*          cookie 校验 → 静态托管（SPA 回退，禁目录列表）
+//	GET /ui/<token>/   凭据入口 → Set-Cookie(Path=/) → 302 /ui/#/overview
+//	GET /ui/*          cookie 校验 → 静态托管（SPA 回退，禁目录列表，index 防缓存）
 //	/* 其余一切         cookie 校验 → 反代内核 API（根路径）
 //
 // WHY 挂 /ui/ 前缀：metacubexd history 路由含 /proxies 等与 API 同名页面路径，
 // 挂根会在刷新/深链时把页面路由误送进 API 反代（M1-plan §5.2）。
 type Gateway struct {
-	cfg   Config
-	proxy http.Handler // 内核反代；nil 时非 /ui 请求按 404（仅中间装配状态）
+	cfg       Config
+	proxy     http.Handler // 内核反代；nil 时非 /ui 请求按 404（仅中间装配状态）
+	startedAt int64        // 网关进程启动时刻（UnixNano），index.html 的 config.js 缓存击穿参数
 }
 
 // NewGateway 构造网关（含内核反代装配）。
 func NewGateway(cfg Config) *Gateway {
-	return &Gateway{cfg: cfg, proxy: newCoreProxy(cfg.SockPath, cfg.Secret)}
+	return &Gateway{
+		cfg:   cfg,
+		proxy: newCoreProxy(cfg.SockPath, cfg.Secret),
+		// WHY 缓存击穿参数（v0.4.9）：每次守护重启/升级必然变化，使 index.html 里
+		// 改写出的 config.js?v=<startedAt> 形成新缓存键，浏览器必然重新拉取
+		startedAt: time.Now().UnixNano(),
+	}
 }
 
 // ServeHTTP 路由：先过纵深防御（Host/Origin），再按路径分流。
@@ -103,7 +111,11 @@ func (g *Gateway) handleTokenEntry(w http.ResponseWriter, r *http.Request, seg s
 		SameSite: http.SameSiteLaxMode,
 		// 无 Domain 属性 → host-only cookie，仅本机回环主机名可见
 	})
-	http.Redirect(w, r, "/ui/", http.StatusFound)
+	// WHY 落地 /ui/#/overview（v0.4.9，2026-11-19 用户指令"链接锁定为 /ui/#/overview"）：
+	// 入口 token 本身即凭据（无 cookie 也走此路径设置新 cookie），重定向携带片段后
+	// 浏览器落地即概览页，免手填后端/免二次导航。直接开 /ui/#/overview 对无 cookie
+	// 浏览器是 404（防泄露语义），故锁定落在重定向目标而非入口形态。
+	http.Redirect(w, r, "/ui/#/overview", http.StatusFound)
 }
 
 // requireCookie 会话校验中间件：无 cookie 或值不符一律 404（同入口的"不泄露"语义）。
@@ -152,9 +164,11 @@ func (g *Gateway) allowHostOrigin(r *http.Request) bool {
 }
 
 // serveStatic 托管 ui/ 静态资源（metacubexd）。
-// 自行解析路径而非直接用 http.FileServer，目的有二：
+// 自行解析路径而非直接用 http.FileServer，目的有三：
 //  1. 禁目录列表（目录请求一律走其 index.html，无 index.html 即 404）；
-//  2. 不存在的无扩展名路径回退 index.html——history 路由（/ui/proxies 等）深链可刷新。
+//  2. 不存在的无扩展名路径回退 index.html——history 路由（/ui/proxies 等）深链可刷新；
+//  3. index.html 恒 no-store 输出，且把 config.js 引用改写为带 startedAt 的查询参数
+//     （v0.4.9 缓存击穿，见 serveIndex）——不走 http.ServeFile 的 Last-Modified 启发式。
 //
 // 路径包含构造：Clean(rest) 恒为根锚定路径，Join(uiDir, ·) 后不可能逃出 uiDir
 // （纵深防御外加显式拒绝 ".."）。
@@ -196,7 +210,38 @@ func (g *Gateway) serveStatic(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	// index.html 统一走 serveIndex（覆盖三种到达：目录请求 /ui/、显式 /ui/index.html、
+	// SPA 回退——metacubexd 是 hash 路由实际只有 /ui/ 一个 HTML 入口，统一处理更稳）
+	if strings.HasSuffix(full, "index.html") {
+		g.serveIndex(w, r, full)
+		return
+	}
 	http.ServeFile(w, r, full)
+}
+
+// serveIndex 托管 index.html：内容改写 + 防缓存头，不走 http.ServeFile。
+// WHY（v0.4.9，2026-11-19 用户指令"链接锁定为 /ui/#/overview 确保正常打开"）：
+// ServeFile 仅按 Last-Modified 启发式协商缓存，磁盘 mtime 老时浏览器本地新鲜期可达数周——
+// 升级后浏览器仍用旧 index.html（引用旧 config.js），metacubexd 复现"设置屏"。
+// index 恒 no-store + config.js 引用改写为 ?v=<startedAt>（每次重启变化 → 新缓存键，
+// 且 config.js 拦截分支本身已 no-store），双层保证浏览器拿到的都是注入后的配置。
+func (g *Gateway) serveIndex(w http.ResponseWriter, r *http.Request, full string) {
+	raw, err := os.ReadFile(full)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	// 真实 index.html（metacubexd 1.275.2）的引用形态是 <script src="config.js"
+	// （无 ./ 前缀、双引号、单次出现）。替换未命中时（如 metacubexd 升级改写法）
+	// 按原样输出、不猜测其他形态——是否命中可由断言 body 含 config.js?v= 直接检验，
+	// 防升级后静默失效。
+	patched := strings.Replace(string(raw),
+		`<script src="config.js"`,
+		fmt.Sprintf(`<script src="config.js?v=%d"`, g.startedAt),
+		1)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(patched))
 }
 
 func isDir(path string) bool {

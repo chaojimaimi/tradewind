@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,7 +16,11 @@ const testToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abc
 func newTestGateway(t *testing.T) (*Gateway, string) {
 	t.Helper()
 	ui := t.TempDir()
-	if err := os.WriteFile(filepath.Join(ui, "index.html"), []byte("<!doctype html><div id=app>INDEX</div>"), 0o644); err != nil {
+	// v0.4.9：fixture 沿用真实 metacubexd index.html 的 config.js 引用形态
+	// （<script src="config.js"，无 ./ 前缀、双引号），供断言改写为 config.js?v=<startedAt>
+	if err := os.WriteFile(filepath.Join(ui, "index.html"),
+		[]byte(`<!doctype html><html><head><script src="config.js"></script></head><body><div id=app>INDEX</div></body></html>`),
+		0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(ui, "_nuxt"), 0o755); err != nil {
@@ -51,6 +56,10 @@ func TestTokenEntrySetsCookieAndRedirects(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Fatalf("status = %d, want 302", rec.Code)
 	}
+	// v0.4.9：入口重定向携带 hash 片段，浏览器落地即概览页（链接锁定为 /ui/#/overview）
+	if loc := rec.Header().Get("Location"); loc != "/ui/#/overview" {
+		t.Fatalf("entry Location = %q, want /ui/#/overview", loc)
+	}
 	cookies := rec.Result().Cookies()
 	if len(cookies) != 1 {
 		t.Fatalf("cookies = %d, want 1", len(cookies))
@@ -81,6 +90,10 @@ func TestTokenEntryWithoutTrailingSlash(t *testing.T) {
 	rec := get(g, host, "/ui/"+testToken, nil)
 	if rec.Code != http.StatusFound {
 		t.Fatalf("status = %d, want 302", rec.Code)
+	}
+	// v0.4.9：无尾斜杠入口同样落地概览页
+	if loc := rec.Header().Get("Location"); loc != "/ui/#/overview" {
+		t.Fatalf("entry Location = %q, want /ui/#/overview", loc)
 	}
 	if rec.Result().Cookies()[0].Value != testToken {
 		t.Fatal("cookie not set for slash-less entry")
@@ -257,5 +270,49 @@ func TestConfigJSDynamicallyGenerated(t *testing.T) {
 	// 防泄露语义不变：无 cookie 访问 config.js 仍 404
 	if rec := get(g, host, "/ui/config.js", nil); rec.Code != http.StatusNotFound {
 		t.Fatalf("no-cookie config.js status = %d, want 404", rec.Code)
+	}
+}
+
+func TestIndexNoStoreAndConfigCacheBust(t *testing.T) {
+	// v0.4.9：index.html 恒 no-store（防浏览器按 Last-Modified 启发式缓存旧 index——
+	// 旧 index 引用旧 config.js 会复现"设置屏"），且 config.js 引用改写为
+	// ?v=<startedAt>（每次守护重启变化 → 新缓存键，缓存击穿）。
+	// 覆盖 index 的三种到达：目录请求 /ui/、显式 /ui/index.html、SPA 回退 /ui/proxies。
+	g, host := newTestGateway(t)
+	auth := map[string]string{"Cookie": cookieName + "=" + testToken}
+	wantSrc := fmt.Sprintf("config.js?v=%d", g.startedAt)
+	for _, target := range []string{"/ui/", "/ui/index.html", "/ui/proxies"} {
+		rec := get(g, host, target, auth)
+		if rec.Code != 200 {
+			t.Fatalf("%s status = %d, want 200", target, rec.Code)
+		}
+		if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+			t.Fatalf("%s Cache-Control = %q, want no-store", target, cc)
+		}
+		body := rec.Body.String()
+		// 替换必须命中：防 metacubexd 升级改写法后静默失效（serveIndex 按原样回退）
+		if !strings.Contains(body, wantSrc) {
+			t.Fatalf("%s body missing rewritten script src %q: %q", target, wantSrc, body)
+		}
+		if strings.Contains(body, `<script src="config.js"`) {
+			t.Fatalf("%s body still has unrewritten config.js reference: %q", target, body)
+		}
+		// 原有内容不丢失
+		if !strings.Contains(body, "INDEX") {
+			t.Fatalf("%s body lost original content: %q", target, body)
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+			t.Fatalf("%s Content-Type = %q, want text/html", target, ct)
+		}
+	}
+	// config.js 拦截分支语义不变：no-store + 动态生成体（双层防缓存的第二层）
+	rec := get(g, host, "/ui/config.js", auth)
+	if rec.Code != 200 || rec.Header().Get("Cache-Control") != "no-store" ||
+		!strings.Contains(rec.Body.String(), "__METACUBEXD_CONFIG__") {
+		t.Fatalf("config.js = %d cc=%q body=%q", rec.Code, rec.Header().Get("Cache-Control"), rec.Body.String())
+	}
+	// 非 index 的静态资源不受影响（仍走 http.ServeFile 原样透传）
+	if rec := get(g, host, "/ui/_nuxt/app.js", auth); rec.Code != 200 || rec.Body.String() != "console.log(1)" {
+		t.Fatalf("asset = %d %q", rec.Code, rec.Body.String())
 	}
 }
