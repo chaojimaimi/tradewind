@@ -62,4 +62,26 @@ import Testing
     @Test func ordinaryTwoLetterCodeStillMatches() {
         #expect(CountryFlag.flag(for: "US-01") == "🇺🇸")
     }
+
+    // MARK: v0.4.7 旗帜映射扩充（2026-11-19 用户订阅实锤：欧洲中小国家区名/两字码）
+
+    /// 真机订阅样本：「爱沙尼亚-EE-1」此前落兜底 🌐；扩充后中文区名与 EE 两字码双路径命中
+    @Test func estoniaRealSubscriptionSampleResolves() {
+        #expect(CountryFlag.flag(for: "爱沙尼亚-EE-1-流量倍率:1") == "🇪🇪")
+        #expect(CountryFlag.flag(for: "EE-01") == "🇪🇪")
+    }
+
+    /// 中文区名优先于两字码：芬兰 + HK 并存时命中 🇫🇮（② 中文匹配先于 ③ 英文）
+    @Test func chineseRegionBeatsTwoLetterCode() {
+        #expect(CountryFlag.flag(for: "芬兰-HK-01") == "🇫🇮")
+    }
+
+    /// 既有样本回归：表格扩充不得改变既有命中（真实订阅名/两字码/反例/流量单位防误判）
+    @Test func expandedTableKeepsExistingSamples() {
+        #expect(CountryFlag.flag(for: "日本-TY-4-HY2-流量倍率:0.6") == "🇯🇵")
+        #expect(CountryFlag.flag(for: "中国香港-IP LC-HK-4-流量倍率:1") == "🇭🇰")
+        #expect(CountryFlag.flag(for: "US-01") == "🇺🇸")
+        #expect(CountryFlag.flag(for: "AUSTIN-01") == "🌐")
+        #expect(CountryFlag.flag(for: "有效期2029-07-02, 剩余 96.17 GB") == "🌐")
+    }
 }

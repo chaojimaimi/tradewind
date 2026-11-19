@@ -33,6 +33,13 @@ final class PanelModel: ObservableObject {
     @Published var busy = false
     /// 操作失败的用户可读提示（toast 位）；自动 3s 清除
     @Published var toast: String?
+    /// 乐观值（v0.4.7 方案 B）：动作发起即翻转 UI，refresh 权威值落地后清除；
+    /// 失败清除即视觉回退 + toast。nil = 无在途动作，一切以 report 权威值为准。
+    /// WHY 2026-11-19 用户复测"点击仍有卡顿（较前减轻）"——async 化后主线程已不阻塞，
+    /// 残余是状态确认延迟（sysproxy 走 networksetup 数百 ms-秒级）；乐观翻转给出即时反馈。
+    @Published private(set) var pendingSysProxy: Bool?
+    /// 同上，主开关（start/stop）的乐观值。
+    @Published private(set) var pendingRunning: Bool?
     private(set) var gateway: GatewayClient?
     private let bridge: CoreBridge?
     /// 网关会话注入点（URLProtocol stub 单测；生产默认 .shared）
@@ -72,9 +79,14 @@ final class PanelModel: ObservableObject {
     // MARK: 派生状态（demo 状态行/图标口径）
 
     var running: Bool { report?.core.running ?? false }
-    /// 接入路径：系统代理开启即视为有接入（demo：sysProxy || tun；M2 无 TUN）
-    var intake: Bool { report?.sysProxy.applied ?? false }
-    var iconState: StatusIconState { StatusIcon.state(running: running, intake: intake) }
+    /// 派生口径（v0.4.7 乐观优先）：pending 在途即取乐观值，UI 点击立即翻转；
+    /// refresh 权威值落地后 pending 清除，自动回权威口径。
+    var effectiveSysProxy: Bool { pendingSysProxy ?? report?.sysProxy.applied ?? false }
+    var effectiveRunning: Bool { pendingRunning ?? running }
+    /// 接入路径：系统代理开启即视为有接入（demo：sysProxy || tun；M2 无 TUN）。
+    /// WHY effective 口径：菜单栏图标绿点随系统代理点击立即翻转（v0.4.7）
+    var intake: Bool { effectiveSysProxy }
+    var iconState: StatusIconState { StatusIcon.state(running: effectiveRunning, intake: intake) }
     /// 当前节点延迟：activeGroup.nodes 中 currentNode 匹配项的 delay。
     /// WHY 下沉为模型计算属性：视图内查找无法单测（M3-plan §3.2）
     var currentNodeDelay: Int? {
@@ -101,22 +113,37 @@ final class PanelModel: ObservableObject {
     }
 
     /// 主开关：开=detached start（壳是观察者），关=stop（优雅还原）。
+    /// 乐观更新（v0.4.7）：入口即置 pendingRunning 翻转 UI；CLI 失败清除（视觉回退），
+    /// 终态统一清 pending 交接权威口径。WHY 见 pendingRunning 定义处。
     func toggleMaster(on: Bool) async {
         guard let bridge else { return }
+        pendingRunning = on
         busy = true
         defer { busy = false }
         do {
             if on {
                 try bridge.startCoreDetached()
                 showToast("Tradewind 已启动：内核就绪后自动刷新")
+                // WHY P2（2026-11-19 审查折入）：startCoreDetached 是纯 spawn，内核 socket
+                // 就绪晚于首个 status 探测——原先"refresh 一次即无条件清 pending"会让
+                // 权威值（未起）先落地，图标"绿→灰→绿"闪回，每次冷启动必现。改有界轮询：
+                // 保留 pendingRunning 反复 refresh，running 命中 true 即 break（权威值
+                // 接管=运行）；5 轮仍未起则回落停止态（真未起，如实呈现，不无限乐观）。
+                for _ in 0..<5 {
+                    await refresh()
+                    if running { break }
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                }
             } else {
                 try await bridge.stopCore()
                 showToast("Tradewind 已停止：系统代理已按备份精确还原")
+                await refresh() // stop 管线同步生效，无 P2 时序，权威值一次落地即交接
             }
         } catch {
+            pendingRunning = nil
             showToast(on ? "启动失败" : "停止失败")
         }
-        await refresh()
+        pendingRunning = nil
     }
 
     /// 出站模式切换（PATCH 热生效；settings 回写由 CLI 保证崩溃不回退）。
@@ -131,14 +158,19 @@ final class PanelModel: ObservableObject {
     }
 
     /// 系统代理开关（幂等；on 需内核可达——CLI 侧守卫，失败明确报错）。
+    /// 乐观更新（v0.4.7）：入口即置 pendingSysProxy 翻转 UI，CLI 失败清除（视觉回退），
+    /// refresh 权威值落地后清除（交接给权威口径）。WHY 见 pendingSysProxy 定义处。
     func setSysProxy(on: Bool) async {
         guard let bridge else { return }
+        pendingSysProxy = on
         do {
             try await bridge.sysProxy(on: on)
         } catch {
+            pendingSysProxy = nil
             showToast(on ? "系统代理开启失败（内核未运行？）" : "系统代理关闭失败")
         }
         await refresh()
+        pendingSysProxy = nil
     }
 
     /// 切换节点：PUT 成功后本地乐观更新（内核失败不更新，重拉修正）。

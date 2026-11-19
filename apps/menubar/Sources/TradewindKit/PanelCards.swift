@@ -96,7 +96,8 @@ struct ToggleGroupCard: View {
                 icon: "globe", label: "系统代理",
                 note: "127.0.0.1:7897",
                 isOn: Binding(
-                    get: { model.report?.sysProxy.applied ?? false },
+                    // v0.4.7 effective 口径：点击立即翻转（乐观值），不等 networksetup 回读
+                    get: { model.effectiveSysProxy },
                     set: { newValue in Task { await model.setSysProxy(on: newValue) } }
                 ),
                 disabled: !model.running || model.busy

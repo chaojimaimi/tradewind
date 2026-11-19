@@ -75,10 +75,12 @@ enum StatusIcon {
     }
 
     /// 右下 6pt 绿点：Theme.ok 填充 + 1pt primary 20% 描边环（深浅底色下与主形柔和解耦）。
+    /// WHY v0.4.7（2026-11-19 用户反馈角标是"绿色小方点"）：NSRect.fill() 填充的是矩形，
+    /// 仅描边环用 oval——实心点与圆环形状不一致；改 ovalIn 填充，点环同为圆形。
     private static func drawProxyDot(in canvasSize: NSSize) {
         let dot = NSRect(x: canvasSize.width - 7, y: 1, width: 6, height: 6)
         NSColor(Theme.ok).setFill()
-        dot.fill()
+        NSBezierPath(ovalIn: dot).fill()
         let ring = NSBezierPath(ovalIn: dot.insetBy(dx: -0.5, dy: -0.5))
         ring.lineWidth = 1
         NSColor(Color.primary.opacity(0.2)).setStroke()

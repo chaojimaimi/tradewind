@@ -102,6 +102,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.refreshIcon() }
             .store(in: &cancellables)
+        // WHY v0.4.7 乐观值（方案 B）也驱动图标：pending 在动作发起即翻转，
+        // 不订阅它们图标要等 CLI+refresh 完成才变（"随点击立即翻转"落空）；
+        // 权威值落地后的收敛由上面的 $report 订阅承担
+        model.$pendingSysProxy
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.refreshIcon() }
+            .store(in: &cancellables)
+        model.$pendingRunning
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.refreshIcon() }
+            .store(in: &cancellables)
     }
 
     // WHY v0.4.5（2026-11-19 第四轮反馈）：菜单栏速率文本降级为默认关闭——运行态横向
@@ -130,7 +141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshIcon() {
         guard let button = statusItem?.button else { return }
         let scheme = Theme.currentScheme()
-        let state = model.iconState // 即 model.report 的推导（sysProxy.applied 决定接入）
+        let state = model.iconState // effective 系推导（v0.4.7：乐观值优先，点击即翻转）
         button.image = StatusIcon.image(state, scheme: scheme)
         button.alphaValue = StatusIcon.alpha(state)
         button.toolTip = statusTooltip(state)

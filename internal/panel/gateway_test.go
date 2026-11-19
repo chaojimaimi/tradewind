@@ -24,7 +24,8 @@ func newTestGateway(t *testing.T) (*Gateway, string) {
 	if err := os.WriteFile(filepath.Join(ui, "_nuxt", "app.js"), []byte("console.log(1)"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// 审计④（M1-plan §5.2）：metacubexd 前端资产形态——空 defaultBackendURL 构建配置
+	// v0.4.7：磁盘 config.js（metacubexd 构建 TTL 空配置形态）保留写入——
+	// 证明 /ui/config.js 走网关动态生成而非透传磁盘文件
 	if err := os.WriteFile(filepath.Join(ui, "config.js"), []byte("window.config={defaultBackendURL:\"\"}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -215,15 +216,42 @@ func TestAPIPathsWithDeadBackendAre502(t *testing.T) {
 	}
 }
 
-func TestFrontendAssetsContainNoSecret(t *testing.T) {
-	// 审计④：静态托管的前端资产不得携带 secret（网关侧断言；smoke 对真实 ui/ 复核）
+func TestConfigJSDynamicallyGenerated(t *testing.T) {
+	// v0.4.7：/ui/config.js 不读磁盘（ui/ 磁盘文件 defaultBackendURL 为空串，
+	// metacubexd 因此停在"未检测到后端"设置屏），网关按自身端口动态生成
 	g, host := newTestGateway(t)
 	auth := map[string]string{"Cookie": cookieName + "=" + testToken}
 	rec := get(g, host, "/ui/config.js", auth)
 	if rec.Code != 200 {
-		t.Fatalf("config.js status = %d", rec.Code)
+		t.Fatalf("config.js status = %d, want 200", rec.Code)
 	}
-	if strings.Contains(rec.Body.String(), "gw-secret") {
-		t.Fatal("frontend asset leaked secret")
+	body := rec.Body.String()
+	// 动态注入的部署定制入口：defaultBackendURL 按白名单内请求 Host 回显（P3-1）
+	if !strings.Contains(body, "__METACUBEXD_CONFIG__") || !strings.Contains(body, "defaultBackendURL") {
+		t.Fatalf("config.js body missing dynamic config: %q", body)
+	}
+	if !strings.Contains(body, "http://"+host) {
+		t.Fatalf("config.js body missing backend URL for test host: %q", body)
+	}
+	// P3-1：localhost 入口路径同样按其 Host 回显（非硬编码 127.0.0.1）
+	if rec := get(g, "localhost:39097", "/ui/config.js", auth); rec.Code != 200 ||
+		!strings.Contains(rec.Body.String(), "http://localhost:39097") {
+		t.Fatalf("localhost config.js = %d %q", rec.Code, rec.Body.String())
+	}
+	// 磁盘文件内容不得透传（newTestGateway 写入的空 defaultBackendURL 构建配置）
+	if strings.Contains(body, "window.config") {
+		t.Fatalf("config.js served disk file instead of dynamic body: %q", body)
+	}
+	// Content-Type 必须是 JS：metacubexd 以 <script src> 引入
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "application/javascript") {
+		t.Fatalf("config.js Content-Type = %q, want application/javascript", ct)
+	}
+	// 审计④：动态生成体同样不得携带 secret（secret 仅服务端反代注入）
+	if strings.Contains(body, "gw-secret") {
+		t.Fatal("config.js leaked secret")
+	}
+	// 防泄露语义不变：无 cookie 访问 config.js 仍 404
+	if rec := get(g, host, "/ui/config.js", nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("no-cookie config.js status = %d, want 404", rec.Code)
 	}
 }

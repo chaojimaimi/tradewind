@@ -100,9 +100,14 @@ struct CommandLineRunner: CommandLineRunning {
 /// 全部机器可读输出；壳不解析人读文本。
 final class CoreBridge {
     private let runner: CommandLineRunning
+    /// detached start 动作注入点（审查 P3-3）：生产默认 Process spawn（见 spawnDetached），
+    /// 单测替换为 no-op——"壳层单测绝不真拉 tradewind 进程"契约对纯 spawn 同样适用
+    /// （真机装有 CLI 时，无缝隙的 start 测试会拉起用户真内核）。
+    var startDetached: () throws -> Void
 
     init(runner: CommandLineRunning) {
         self.runner = runner
+        self.startDetached = { try CoreBridge.spawnDetached() }
     }
 
     /// 默认桥：解析 CLI 路径失败显式报错（壳按"CLI 不可用"降级，控制面禁用）。
@@ -153,6 +158,11 @@ final class CoreBridge {
     /// 前台拉起内核（detached 子进程：壳退出不影响内核，M2-plan §2.1）。
     /// WHY 保持同步：纯 spawn 不等待子进程（毫秒级返回），无主线程阻塞问题。
     func startCoreDetached() throws {
+        try startDetached()
+    }
+
+    /// spawn 实现体（生产默认注入；静态私有：无实例状态，单测不可达）。
+    private static func spawnDetached() throws {
         let process = Process()
         guard let path = CLIPath.resolve() else {
             throw CoreBridgeError.cliNotFound

@@ -51,11 +51,11 @@ private struct PopoverHeadView: View {
     var body: some View {
         HStack(spacing: 10) {
             Circle()
-                .fill(model.running ? Theme.ok : Theme.muted(scheme))
+                .fill(model.effectiveRunning ? Theme.ok : Theme.muted(scheme))
                 .frame(width: 9, height: 9)
-                .shadow(color: model.running ? Theme.ok : .clear, radius: 4)
+                .shadow(color: model.effectiveRunning ? Theme.ok : .clear, radius: 4)
             VStack(alignment: .leading, spacing: 1) {
-                Text(model.running ? "Tradewind 运行中" : "Tradewind 已停止")
+                Text(model.effectiveRunning ? "Tradewind 运行中" : "Tradewind 已停止")
                     .font(.system(size: 14, weight: .semibold))
                 Text(subtitle)
                     .font(.system(size: Theme.fontSizeSub))
@@ -72,17 +72,18 @@ private struct PopoverHeadView: View {
     }
 
     private var subtitle: String {
-        guard model.running, let mode = model.report?.mode else {
+        guard model.effectiveRunning, let mode = model.report?.mode else {
             return "内核已退出，系统代理已还原"
         }
         let modeName = ["rule": "规则", "global": "全局", "direct": "直连"][mode] ?? mode
-        let proxy = (model.report?.sysProxy.applied ?? false) ? "已开启" : "已关闭"
+        // v0.4.7 effective 口径：副标题随系统代理点击立即翻转，不等 networksetup 回读
+        let proxy = model.effectiveSysProxy ? "已开启" : "已关闭"
         return "\(modeName)模式 · 系统代理\(proxy)"
     }
 
     private var masterBinding: Binding<Bool> {
         Binding(
-            get: { model.running },
+            get: { model.effectiveRunning },
             set: { newValue in Task { await model.toggleMaster(on: newValue) } }
         )
     }

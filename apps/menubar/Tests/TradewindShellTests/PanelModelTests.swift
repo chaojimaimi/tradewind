@@ -193,4 +193,92 @@ final class StubURLProtocol: URLProtocol {
         #expect(groupA.nodes.first { $0.name == "HK-1" }?.isGroup == false) // 普通节点
         #expect(model.groups.first { $0.id == "组B" }!.nodes[0].isGroup == false) // 顶层组成员也是普通节点
     }
+
+    // MARK: v0.4.7 乐观更新（方案 B）：动作发起即翻转 UI，权威值落地/失败后清除
+
+    /// ① CLI 失败 → 乐观值清除（UI 视觉回退）+ toast 用户可读提示
+    @Test func sysProxyOptimisticRevertsOnCliFailure() async {
+        StubURLProtocol.handler = { _ in (200, Self.proxiesJSON) }
+        let model = makeModel([
+            FakeRunner.Reply(output: Self.statusWithPanel, exitCode: 0), // 初始 status（applied=true）
+            FakeRunner.Reply(output: "", exitCode: 1),                   // sys-proxy off CLI 失败
+            FakeRunner.Reply(output: Self.statusWithPanel, exitCode: 0), // 失败后的刷新 status
+        ])
+        await model.refresh()
+        await model.setSysProxy(on: false)
+        #expect(model.pendingSysProxy == nil) // 失败回退：乐观值已清除
+        #expect(model.toast != nil)           // 用户可读提示
+        #expect(model.effectiveSysProxy == true) // 权威值未变，effective 仍为 applied=true
+    }
+
+    /// ② 成功路径：乐观值清除，refresh 权威值落地并接管 effective 口径
+    @Test func sysProxyOptimisticClearsOnSuccessAndReportTakesOver() async {
+        StubURLProtocol.handler = { _ in (200, Self.proxiesJSON) }
+        let appliedOff = Self.statusWithPanel.replacingOccurrences(
+            of: "\"applied\":true", with: "\"applied\":false"
+        )
+        let model = makeModel([
+            FakeRunner.Reply(output: appliedOff, exitCode: 0),           // 初始 status（applied=false）
+            FakeRunner.Reply(output: "", exitCode: 0),                   // sys-proxy on CLI 成功
+            FakeRunner.Reply(output: Self.statusWithPanel, exitCode: 0), // 刷新 status（applied=true）
+        ])
+        await model.refresh()
+        #expect(model.effectiveSysProxy == false) // 初始权威值 off
+        await model.setSysProxy(on: true)
+        #expect(model.pendingSysProxy == nil)            // 成功后乐观值清除
+        #expect(model.report?.sysProxy.applied == true)  // report 权威值已落地
+        #expect(model.effectiveSysProxy == true)         // effective 由权威值接管
+    }
+
+    // MARK: P3-3（审查折入）：toggleMaster 开启路径 pendingRunning 生命周期（P2 有界轮询）
+
+    /// start 走注入缝隙的模型构造：startDetached 注入 no-op（单测绝不 spawn 真 CLI），
+    /// 其余 CLI 调用仍走 FakeRunner 脚本；实际调用序列 = 初始 status → start（不耗脚本）→
+    /// 轮询 refresh 的 status × N。
+    private func makeStartModel(_ replies: [FakeRunner.Reply]) -> PanelModel {
+        let bridge = CoreBridge(runner: FakeRunner(replies))
+        bridge.startDetached = {}
+        return PanelModel(bridge: bridge, session: StubURLProtocol.install())
+    }
+
+    /// ① start 后内核未即时就绪（纯 spawn，socket 就绪晚于首个 status 探测）：
+    /// 轮询探测两轮 false、第三轮 true → break；终态 pendingRunning==nil 且权威值接管
+    @Test func masterStartPollsUntilKernelReadyThenHandsOver() async {
+        let stopped = Self.statusWithPanel.replacingOccurrences(
+            of: "\"running\":true", with: "\"running\":false"
+        )
+        StubURLProtocol.handler = { _ in (200, Self.proxiesJSON) }
+        let model = makeStartModel([
+            FakeRunner.Reply(output: stopped, exitCode: 0),              // 初始 status：未运行
+            FakeRunner.Reply(output: stopped, exitCode: 0),              // 轮询探测 1：false
+            FakeRunner.Reply(output: stopped, exitCode: 0),              // 轮询探测 2：false
+            FakeRunner.Reply(output: Self.statusWithPanel, exitCode: 0), // 轮询探测 3：true → break
+        ])
+        await model.refresh()
+        await model.toggleMaster(on: true)
+        #expect(model.pendingRunning == nil)     // 内核就绪后清除（权威值接管）
+        #expect(model.report?.core.running == true)
+        #expect(model.effectiveRunning == true)  // 无"绿→灰→绿"闪回：乐观值撑到真就绪
+    }
+
+    /// ② start 后内核持续未起：5 轮有界轮询耗尽仍未 true → pendingRunning==nil、
+    /// effectiveRunning==false（乐观值被权威值否定，回落实名停止态，不无限乐观）
+    @Test func masterStartBoundedPollingFallsBackToStopped() async {
+        let stopped = Self.statusWithPanel.replacingOccurrences(
+            of: "\"running\":true", with: "\"running\":false"
+        )
+        StubURLProtocol.handler = { _ in (200, Self.proxiesJSON) }
+        var replies = [
+            FakeRunner.Reply(output: stopped, exitCode: 0), // 初始 status：未运行
+        ]
+        for _ in 0..<5 {
+            replies.append(FakeRunner.Reply(output: stopped, exitCode: 0)) // 探测 1..5：均 false
+        }
+        let model = makeStartModel(replies)
+        await model.refresh()
+        await model.toggleMaster(on: true)
+        #expect(model.pendingRunning == nil)
+        #expect(model.report?.core.running == false)
+        #expect(model.effectiveRunning == false)
+    }
 }

@@ -165,6 +165,21 @@ func (g *Gateway) serveStatic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cleaned := filepath.Clean(rest)
+	// WHY 动态生成而非读磁盘（v0.4.7，2026-11-19 自动化浏览器截图真机实锤）：metacubexd
+	// 渲染后停在"未检测到后端 http://127.0.0.1:9090"设置屏——它读部署定制入口 config.js
+	// 的 window.__METACUBEXD_CONFIG__.defaultBackendURL，而 ui/ 磁盘文件该值为空串 →
+	// metacubexd 去扫裸 Clash 默认 9090（本网关在 39097），用户每次都要手填后端地址。
+	// 注入网关自身 loopback origin 后，任意浏览器首次打开即自动连接；
+	// secret 仍由网关反代在服务端注入（覆写 Authorization），浏览器侧无凭据。
+	if cleaned == "/config.js" {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		// WHY 回显 r.Host 而非硬编码 127.0.0.1（审查 P3-1）：ServeHTTP 已先过 allowHostOrigin
+		// 白名单（Host 仅可能是本机网关两种 loopback 形态，无注入面），回显可兼收
+		// localhost 入口路径——浏览器按 Host 连后端，与入口地址一致避免混用回环名。
+		fmt.Fprintf(w, "window.__METACUBEXD_CONFIG__ = { defaultBackendURL: %q };",
+			fmt.Sprintf("http://%s", r.Host))
+		return
+	}
 	full := filepath.Join(g.cfg.UIDir, cleaned)
 	switch {
 	case isDir(full):
