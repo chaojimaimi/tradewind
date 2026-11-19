@@ -145,15 +145,10 @@ struct ToggleRow: View {
             if let badge {
                 BadgeView(text: badge)
             }
-            // 品牌绿 on 态（demo `.switch input:checked` 背景 --ok）。
-            // 取舍声明（M3-plan §3.3.1）：tint 对 macOS 13+ .switch 生效（Package.swift
-            // 平台基线已核），若个别系统版本不生效则接受系统色并在验收记录中声明偏差
-            // （不引入 controlAccent 全局副作用）。
-            Toggle("", isOn: $isOn)
-                .toggleStyle(.switch)
-                .labelsHidden()
-                .controlSize(.small)
-                .tint(Theme.ok)
+            // 自绘复刻 demo .switch（小号）；v0.4.3 缘由：原生 tint 在 NSPopover 首呈现
+            // 竞态丢色（M3-plan §3.3.1 的"接受系统色"预案被真机证伪——macOS 26 无 tint
+            // 即灰轨且首开必现，2026-11-19 用户截图实锤），自绘为确定性修复
+            SwitchPill(isOn: $isOn, small: true, accessibilityLabel: label)
                 .disabled(disabled)
         }
         .padding(.vertical, 7)

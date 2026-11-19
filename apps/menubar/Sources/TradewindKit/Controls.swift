@@ -80,6 +80,85 @@ struct SegmentedPill: View {
     }
 }
 
+// MARK: - 自绘开关（v0.4.3 壳热修，demo .switch 逐值复刻，ui-demo.html L92-101）
+
+/// 自绘开关：替换原生 Toggle(.switch)。
+/// WHY 自绘（v0.4.3 热修，2026-11-19 用户截图实锤）：NSPopover 首次呈现时原生
+/// `.switch` 的 `.tint` 应用存在竞态——首开灰轨、重开才绿；口径升级后开关是壳内
+/// 最后一个原生控件，而 demo `.switch` 本就是自绘形态，故逐值复刻为确定性修复。
+/// 换算口径：on 态 --ok / off 态 --mat-card-2（Theme.controlBackground）；未选中描边
+/// ≈ --hair-2（demo 双主题 rgba(·,·,·,.16) 以 Color.primary.opacity(0.16) 近似，dark
+/// 下 primary 为白亦吻合）；旋钮阴影 0 1px 3px rgba(0,0,0,.35) → radius 1.5 y 1
+/// （blur/2≈radius，同 SegmentedPill 注释口径）。禁用由调用方 .disabled 控制
+/// （isEnabled 环境值生效，Button 不触发）。
+struct SwitchPill: View {
+    @Binding var isOn: Bool
+    var small = false
+    /// VoiceOver 名称（code-reviewer P2：纯图形控件对辅助技术无名无态，调用方必传语义名）
+    var accessibilityLabel: String?
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.isEnabled) private var enabled
+
+    // 几何常量（demo .switch 逐值，internal static 可单测；SwitchPillTests 守门）
+    static let standardWidth: CGFloat = 40
+    static let standardHeight: CGFloat = 24
+    static let standardKnob: CGFloat = 20
+    static let standardCheckedKnobOffset: CGFloat = 16
+    /// 小号（demo .switch.sm）
+    static let smallWidth: CGFloat = 34
+    static let smallHeight: CGFloat = 21
+    static let smallKnob: CGFloat = 17
+    static let smallCheckedKnobOffset: CGFloat = 13
+    /// 旋钮距轨内边（demo top/left 2px）
+    static let knobInset: CGFloat = 2
+
+    var body: some View {
+        Button {
+            isOn.toggle()
+        } label: {
+            track
+        }
+        .buttonStyle(.plain)
+        // demo transition: transform/background（--dur 180ms 逐值；--ease cubic-bezier≈easeInOut）
+        .animation(.easeInOut(duration: 0.18), value: isOn)
+        // VoiceOver：图形控件补名称与开/关值（code-reviewer P2，原生 Toggle 免费提供的能力）
+        .accessibilityLabel(accessibilityLabel ?? "")
+        .accessibilityValue(isOn ? "开" : "关")
+        // 近似原生禁用观感（整体弱化）
+        .opacity(enabled ? 1 : 0.5)
+    }
+
+    private var track: some View {
+        ZStack(alignment: .leading) {
+            Capsule()
+                .fill(isOn ? Theme.ok : Theme.controlBackground(scheme))
+                .overlay(
+                    Capsule().strokeBorder(
+                        isOn ? Color.clear : Color.primary.opacity(0.16),
+                        lineWidth: 1.5 // demo inset box-shadow 1.5px
+                    )
+                )
+            Circle()
+                .fill(.white)
+                .frame(width: knobSize, height: knobSize)
+                .shadow(color: Color.black.opacity(0.35), radius: 1.5, y: 1)
+                .padding(Self.knobInset)
+                .offset(x: isOn ? checkedOffset : 0)
+        }
+        .frame(width: trackSize.width, height: trackSize.height)
+    }
+
+    private var trackSize: (width: CGFloat, height: CGFloat) {
+        small ? (Self.smallWidth, Self.smallHeight) : (Self.standardWidth, Self.standardHeight)
+    }
+
+    private var knobSize: CGFloat { small ? Self.smallKnob : Self.standardKnob }
+
+    private var checkedOffset: CGFloat {
+        small ? Self.smallCheckedKnobOffset : Self.standardCheckedKnobOffset
+    }
+}
+
 // MARK: - 底部按钮（批①.5 §3.4，demo .btn）
 
 /// 底部按钮：padding 5/14、圆角 --r-ctl 6、底 mat-card-2、inset 描边 --hair。

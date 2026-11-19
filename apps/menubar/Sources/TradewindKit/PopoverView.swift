@@ -62,11 +62,10 @@ private struct PopoverHeadView: View {
                     .foregroundStyle(Theme.muted(scheme))
             }
             Spacer()
-            // 主开关同品牌绿（demo `.switch input:checked`；取舍声明见 ToggleRow，M3-plan §3.3.1）
-            Toggle("", isOn: masterBinding)
-                .toggleStyle(.switch)
-                .labelsHidden()
-                .tint(Theme.ok)
+            // 自绘复刻 demo .switch（标准尺寸）；v0.4.3 缘由：原生 tint 在 NSPopover 首呈现
+            // 竞态丢色（M3-plan §3.3.1 的"接受系统色"预案被真机证伪——macOS 26 无 tint
+            // 即灰轨且首开必现，2026-11-19 用户截图实锤），自绘为确定性修复
+            SwitchPill(isOn: masterBinding, accessibilityLabel: "Tradewind 主开关")
                 .disabled(model.busy)
         }
         .padding(.bottom, 4)
