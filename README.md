@@ -34,22 +34,22 @@ tradewind stop                                           # SIGTERM 运行实例
 
 ## 全部子命令
 
-| 命令 | 说明 |
-| --- | --- |
-| `add <url> \| --file` | 导入订阅并置为当前 |
-| `update [UID\|current\|all]` | 手动更新订阅（remote 型） |
-| `start [--no-sysproxy]` | 前台运行（冒烟/开发用 no-sysproxy 隔离） |
-| `stop` | 停止并精确还原系统代理 |
-| `status [--json]` | 概览；`--json` 机器可读（壳专用） |
-| `nodes [GROUP]` / `select <GROUP> <NODE>` | 节点查看/切换 |
-| `delay [GROUP]` | 延迟测试（并发 ≤8） |
-| `mode [rule\|global\|direct]` | 出站模式查看/热切换（崩溃重启不回退） |
-| `sysproxy on\|off` | 系统代理开关（幂等；on 需内核运行） |
-| `list` | 订阅表（uid/名称/类型/更新时间/流量/到期） |
-| `use <UID\|NAME>` | 切换当前订阅（快照回写 + 热重载） |
-| `autostart on\|off\|status` | LaunchAgent 开机自启（崩溃自动拉起） |
-| `panel [--url]` | metacubexd 面板；`--url` 仅打印入口 |
-| `version` | 版本 |
+| 命令                                      | 说明                                       |
+| ----------------------------------------- | ------------------------------------------ |
+| `add <url> \| --file`                     | 导入订阅并置为当前                         |
+| `update [UID\|current\|all]`              | 手动更新订阅（remote 型）                  |
+| `start [--no-sysproxy]`                   | 前台运行（冒烟/开发用 no-sysproxy 隔离）   |
+| `stop`                                    | 停止并精确还原系统代理                     |
+| `status [--json]`                         | 概览；`--json` 机器可读（壳专用）          |
+| `nodes [GROUP]` / `select <GROUP> <NODE>` | 节点查看/切换                              |
+| `delay [GROUP]`                           | 延迟测试（并发 ≤8）                        |
+| `mode [rule\|global\|direct]`             | 出站模式查看/热切换（崩溃重启不回退）      |
+| `sysproxy on\|off`                        | 系统代理开关（幂等；on 需内核运行）        |
+| `list`                                    | 订阅表（uid/名称/类型/更新时间/流量/到期） |
+| `use <UID\|NAME>`                         | 切换当前订阅（快照回写 + 热重载）          |
+| `autostart on\|off\|status`               | LaunchAgent 开机自启（崩溃自动拉起）       |
+| `panel [--url]`                           | metacubexd 面板；`--url` 仅打印入口        |
+| `version`                                 | 版本                                       |
 
 ## 菜单栏壳（Tradewind.app）
 
@@ -61,6 +61,14 @@ tradewind stop                                           # SIGTERM 运行实例
 ① 名称已含旗帜 emoji → 直通；② 中文区名最长匹配（含 印尼/沙特 等短形别名）；
 ③ 英文：两字码仅整 token 匹配（`US-01`→🇺🇸，但 `AUSTIN-01`→🌐 禁子串误判）+
 英文城市名精确大小写子串（`Tokyo-01`→🇯🇵）；④ 兜底 🌐。误匹配仅为观感层面，无功能影响。
+
+**视觉保真②**（M3 批①.5）：popover 底色改显式双主题 tokens（冷白 `#F2F6F8` / 冷黑
+`#26292E`，近似 demo 半透明+blur 合成）；出站模式分段与底部按钮自绘对齐 demo
+（胶囊分段容器/选中钮三层色阶、底部等宽按钮、红⏻——⏻ 保留 SF Symbol 防字体回退）；
+节点列表修复确定性高度（≤5 行全显、>5 行固定 168pt 滚动——修复 NSPopover
+fittingSize 路径下 maxHeight 收缩为 0 致整块不渲染）；延迟徽标按延迟色阶着色
+（<100 绿 / 100-299 橙 / ≥300 红，用户拍板偏离 demo 固定绿）；速率符号改 ▼▲ 文本、
+今日流量加 ↓ 前缀。
 
 ### 安装与启动
 
