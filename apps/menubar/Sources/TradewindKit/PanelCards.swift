@@ -145,10 +145,15 @@ struct ToggleRow: View {
             if let badge {
                 BadgeView(text: badge)
             }
+            // 品牌绿 on 态（demo `.switch input:checked` 背景 --ok）。
+            // 取舍声明（M3-plan §3.3.1）：tint 对 macOS 13+ .switch 生效（Package.swift
+            // 平台基线已核），若个别系统版本不生效则接受系统色并在验收记录中声明偏差
+            // （不引入 controlAccent 全局副作用）。
             Toggle("", isOn: $isOn)
                 .toggleStyle(.switch)
                 .labelsHidden()
                 .controlSize(.small)
+                .tint(Theme.ok)
                 .disabled(disabled)
         }
         .padding(.vertical, 7)
@@ -283,6 +288,7 @@ struct GroupsCardView: View {
 
 private struct GroupChips: View {
     @ObservedObject var model: PanelModel
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -295,9 +301,11 @@ private struct GroupChips: View {
                             .font(.system(size: 12))
                             .padding(.horizontal, 11)
                             .padding(.vertical, 4)
+                            // 选中态 brand（demo chips active 背景 --brand；M3-plan §3.3.2，
+                            // 原 Color.accentColor 为系统蓝的 tokens 应用缺口）
                             .background(
                                 Capsule().fill(group.id == model.activeGroupID
-                                               ? AnyShapeStyle(Color.accentColor)
+                                               ? AnyShapeStyle(Theme.brand(scheme))
                                                : AnyShapeStyle(.quaternary))
                             )
                             .foregroundStyle(group.id == model.activeGroupID ? Color.white : .secondary)

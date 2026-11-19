@@ -26,7 +26,9 @@ struct ShellRootView: View {
         }
         .padding(14)
         .frame(width: Theme.popoverWidth)
-        .overlay(alignment: .top) {
+        // toast 取 .bottom（M3-plan §3.3.3）：原 .top 压住标题行（用户截图一实锤）；
+        // 声明偏差（§1.3）：demo toast 为桌面级通知（popover 之外），壳内为面板内提示
+        .overlay(alignment: .bottom) {
             if let toast = model.toast {
                 ToastView(text: toast)
             }
@@ -58,9 +60,11 @@ private struct PopoverHeadView: View {
                     .foregroundStyle(Theme.muted(scheme))
             }
             Spacer()
+            // 主开关同品牌绿（demo `.switch input:checked`；取舍声明见 ToggleRow，M3-plan §3.3.1）
             Toggle("", isOn: masterBinding)
                 .toggleStyle(.switch)
                 .labelsHidden()
+                .tint(Theme.ok)
                 .disabled(model.busy)
         }
         .padding(.bottom, 4)
@@ -111,7 +115,7 @@ private struct ToastView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
             .background(.ultraThinMaterial, in: Capsule())
-            .padding(.top, 6)
+            .padding(.bottom, 6) // 随 overlay .bottom 对齐（M3-plan §3.3.3）
     }
 }
 
