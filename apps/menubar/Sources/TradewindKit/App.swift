@@ -136,8 +136,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// 图标刷新唯一写入点：合成图像（含代理绿点）+ 淡化 + 三态可辨 tooltip。
     /// WHY v0.4.6：色与形之外补 tooltip 文案兜底，悬停即可知运行/接入/停止。
-    /// 合成图为非 template（主形色已 sourceAtop 烘焙），不设 contentTintColor——
-    /// 对非 template 图是 no-op 死赋值（code-reviewer P3）；StatusIcon.tint 供烘焙使用。
+    /// 合成图为非 template（主形色已离屏渐变烘焙，v0.4.13 双色），不设 contentTintColor
+    /// ——对非 template 图是 no-op 死赋值（code-reviewer P3）。
     private func refreshIcon() {
         guard let button = statusItem?.button else { return }
         let scheme = Theme.currentScheme()

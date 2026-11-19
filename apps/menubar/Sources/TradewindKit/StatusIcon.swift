@@ -17,8 +17,11 @@ enum StatusIconState: Equatable {
 /// 改为"主形跟运行态走（运行=品牌色、停止=muted 灰）、绿点跟代理走（仅 active 显示）"，
 /// 停止态再叠加 0.5 alpha 淡化，运行/接入/停止三维正交可辨。
 /// WHY v0.4.10（2026-11-19 拍板 logo 资产接入）：主形从 SF Symbols "wind" 换为品牌
-/// 位图（16/@1x + 32/@2x 两份 PNG）。v0.4.12 起合成形态为"圆角底色板 + 标形镂空"
-/// 徽章（用户反馈裸标形丢失了品牌底板，见 image 处 WHY）；绿点合成机制不变。
+/// 位图（16/@1x + 32/@2x 两份 PNG）。
+/// WHY v0.4.13（2026-11-19 用户复测否决 v0.4.12 单色镂空近似）："T 形标与底色板分别
+/// 有不同的颜色"是设计稿的硬性要求——改为设计资产原色的双色烘焙：深墨绿对角渐变
+/// 底板 + 亮青渐变标形（取色与方向均来自资产包 assets.py 的 bg/wing 渐变定义），
+/// 与 icns/Dock 图标完全同构。菜单栏项非模板图（自绘烘焙），双色成立。
 enum StatusIcon {
     /// demo 口径：停止 → stopped；运行且（系统代理 或 TUN）→ active；否则 idle。
     static func state(running: Bool, intake: Bool) -> StatusIconState {
@@ -46,15 +49,48 @@ enum StatusIcon {
         return image
     }
 
-    /// 着色（appearance 感知）v0.4.6：运行态（active/idle）=品牌色，仅 stopped=muted 灰
-    /// ——主形编码"是否在运行"，"代理是否开"交给绿点编码。
-    static func tint(_ state: StatusIconState, scheme: ColorScheme) -> NSColor {
-        switch state {
-        case .active, .idle:
-            return NSColor(Theme.brand(scheme))
-        case .stopped:
-            return NSColor(Theme.muted(scheme))
-        }
+    // MARK: 设计资产双色（v0.4.13，色值/方向取自资产包 assets.py defs，严格遵循方案）
+
+    /// 底色板渐变：bg 线性渐变 (110,60)→(940,970)（1024 画布 top-left 坐标），
+    /// 换算 AppKit y-up 角度 ≈ -47.6°；三停点 #0D3A4E / #08222E / #040F18。
+    private static let plateGradient = NSGradient(
+        colors: [srgb("#0D3A4E"), srgb("#08222E"), srgb("#040F18")],
+        atLocations: [0, 0.5, 1], colorSpace: .sRGB)!
+    /// 标形渐变：wing 线性渐变 (200,470)→(820,330)，y-up 角度 ≈ +12.7°；
+    /// 三停点 #2FB6DC / #4FDCE4(.55) / #8EF7DE。
+    private static let markGradient = NSGradient(
+        colors: [srgb("#2FB6DC"), srgb("#4FDCE4"), srgb("#8EF7DE")],
+        atLocations: [0, 0.55, 1], colorSpace: .sRGB)!
+    /// 停止态双色灰（语义=muted：结构保留、色彩退灰；整体 0.5 淡化仍由 App 层叠加）。
+    private static let stoppedPlateGradient = NSGradient(
+        colors: [srgb("#2A2A2C"), srgb("#161618")],
+        atLocations: [0, 1], colorSpace: .sRGB)!
+    private static let stoppedMarkGradient = NSGradient(
+        colors: [srgb("#8E8E93"), srgb("#B8B8BC")],
+        atLocations: [0, 1], colorSpace: .sRGB)!
+    private static let plateAngle: CGFloat = -47.6
+    private static let markAngle: CGFloat = 12.7
+
+    /// #RRGGBB → sRGB（十六进制字面量集中解析，色值与资产定义一字不差）。
+    private static func srgb(_ hex: String) -> NSColor {
+        var v: UInt64 = 0
+        Scanner(string: String(hex.dropFirst())).scanHexInt64(&v)
+        return NSColor(srgbRed: CGFloat((v >> 16) & 0xFF) / 255,
+                       green: CGFloat((v >> 8) & 0xFF) / 255,
+                       blue: CGFloat(v & 0xFF) / 255, alpha: 1)
+    }
+
+    /// 标形的渐变填充版：独立离屏画布先铺渐变再 destinationIn 咬合标形 alpha。
+    /// WHY 离屏：NSImage(size:flipped:) 直接绘制进当前上下文（无独立缓冲），
+    /// destinationIn 若在主画布执行会咬掉已画的底板而非标形。
+    private static func gradientFilledMark(_ glyph: NSImage, size: NSSize, gradient: NSGradient) -> NSImage {
+        let masked = NSImage(size: size)
+        masked.lockFocus()
+        gradient.draw(in: NSRect(origin: .zero, size: size), angle: markAngle)
+        glyph.draw(in: NSRect(origin: .zero, size: size), from: .zero,
+                   operation: .destinationIn, fraction: 1)
+        masked.unlockFocus()
+        return masked
     }
 
     /// 代理绿点仅"运行且有接入"显示（"绿点跟代理走"，v0.4.6）。
@@ -68,34 +104,28 @@ enum StatusIcon {
     }
 
     /// 16×16 point 品牌徽章 + 右下 6pt 代理绿点的合成状态栏图像。
-    /// 纯函数：scheme 参数化、不读全局状态，双状态双主题可单测。
-    /// WHY 底色板（v0.4.12，2026-11-19 用户反馈"圆弧状底色板丢失，只剩 T 形标"）：
-    /// menubar 预置 PNG 是裸标形（mono SVG 只有 T 形双笔画，squircle 底板只存在于
-    /// 应用图标合成）。菜单栏改为"圆角底色板 + T 形标镂空"的徽章形态——与 icns
-    /// 同构（icns 是深板亮标双色，菜单栏单色约束下以镂空近似，T 透出菜单栏底色）。
+    /// 纯函数：不读全局状态，双状态可单测。WHY scheme 参数保留但未用：设计资产为
+    /// 固定品牌色（不随系统外观切换，Dock 图标同样恒定）；参数留给未来深浅色变体。
     static func image(_ state: StatusIconState, scheme: ColorScheme) -> NSImage? {
         guard let glyph = brandImage() else { return nil }
         // 画布=主形逻辑尺寸（16×16 point，位图资产 16/32px 双密度），不做额外扩带
         // （code-reviewer P2 口径沿用：扩带令画布被菜单栏等比缩小）；非翻转坐标原点=左下
         let canvasSize = glyph.size
+        let running = state != .stopped
+        let plate = running ? plateGradient : stoppedPlateGradient
+        let mark = running ? markGradient : stoppedMarkGradient
         return NSImage(size: canvasSize, flipped: false) { _ in
             // 底色板：全幅内缩 0.5pt 防菜单栏裁边；圆角半径取超椭圆圆角比 0.29×边长
             // （assets.py squircle n=5 的连续圆角近似，"圆弧状"观感）
             let inset: CGFloat = 0.5
-            let plate = NSBezierPath(
+            let platePath = NSBezierPath(
                 roundedRect: NSRect(origin: .zero, size: canvasSize).insetBy(dx: inset, dy: inset),
                 xRadius: (canvasSize.width - inset * 2) * 0.29,
                 yRadius: (canvasSize.height - inset * 2) * 0.29)
-            tint(state, scheme: scheme).setFill()
-            plate.fill()
-            // T 形标镂空：destinationOut 以标形 alpha 反乘底板 alpha，横杠竖干区域透出
-            // 菜单栏底色。双重叠加=硬镂空（dest×(1-a)²）：16px @1x 资产的横杠仅 ~1px 薄带、
-            // 内部 alpha 固有地半透明（≈0.75，实测），单次镂空残留 0.25 会让 1x 密度观感
-            // 洇成"没镂干净"；两 pass 后 0.06，与 @2x（内部 1.0，单双 pass 均 0）观感对齐
-            for _ in 0..<2 {
-                glyph.draw(in: NSRect(origin: .zero, size: canvasSize),
-                           from: .zero, operation: .destinationOut, fraction: 1)
-            }
+            plate.draw(in: platePath, angle: plateAngle)
+            // 标形：wing 渐变咬合位图 alpha 后叠入（双色；运行/停止换渐变组）
+            gradientFilledMark(glyph, size: canvasSize, gradient: mark)
+                .draw(in: NSRect(origin: .zero, size: canvasSize))
             guard showsProxyDot(state) else { return true }
             drawProxyDot(in: canvasSize)
             return true

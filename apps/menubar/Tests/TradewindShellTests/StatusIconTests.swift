@@ -12,14 +12,24 @@ import Testing
         #expect(StatusIcon.state(running: true, intake: false) == .idle)
     }
 
-    /// v0.4.6 新语义：主形跟运行态走——active/idle 均品牌色，仅 stopped=muted 灰
-    @Test func tintFollowsRunStateBrandForRunningMutedOnlyWhenStopped() {
-        for scheme in [ColorScheme.light, .dark] {
-            let brand = StatusIcon.tint(.active, scheme: scheme)
-            #expect(StatusIcon.tint(.idle, scheme: scheme) == brand) // 运行无接入仍是品牌色
-            #expect(brand != StatusIcon.tint(.stopped, scheme: scheme)) // 停止=灰可辨
-            #expect(StatusIcon.tint(.stopped, scheme: scheme) == NSColor(Theme.muted(scheme)))
-        }
+    /// v0.4.13 双色语义：运行态=设计资产原色（亮青标形），停止态=退灰可辨
+    @Test func markFollowsRunStateBrightBrandForRunningGrayForStopped() throws {
+        let active = try #require(StatusIcon.image(.active, scheme: .light))
+        let stopped = try #require(StatusIcon.image(.stopped, scheme: .light))
+        // 标形厚处（位图 (8,9)，v0.4.12 测试同点位）：运行=亮青（亮且绿主导），
+        // 停止=中灰（灰且亮度显著低于亮青）
+        let runningMark = try pixelColor(of: active, x: 8, y: 9)
+        #expect(runningMark.alphaComponent > 0.9)
+        #expect(runningMark.brightnessComponent > 0.5)
+        let stoppedMark = try pixelColor(of: stopped, x: 8, y: 9)
+        #expect(stoppedMark.alphaComponent > 0.9)
+        #expect(stoppedMark.brightnessComponent < 0.75)
+        #expect(abs(stoppedMark.redComponent - stoppedMark.greenComponent) < 0.1)
+        #expect(abs(stoppedMark.greenComponent - stoppedMark.blueComponent) < 0.1)
+        // 停止态双色结构锁点（审查 P3-4）：灰板/灰标仍分层，防未来误用同渐变
+        let stoppedPlate = try pixelColor(of: stopped, x: 2, y: 6)
+        #expect(stoppedPlate.alphaComponent > 0.9)
+        #expect(stoppedMark.brightnessComponent > stoppedPlate.brightnessComponent + 0.15)
     }
 
     /// v0.4.6：绿点跟代理走（仅 active）+ 停止态 0.5 淡化
@@ -66,18 +76,22 @@ import Testing
         #expect(StatusIcon.brandImage() != nil)
     }
 
-    /// v0.4.12 底色板徽章（用户反馈"圆弧状底色板丢失，只剩 T 形标"）：
-    /// 板区不透明着色、T 形标镂空透底、四角圆弧外透明。位图 top-left 原点 y=16-绘制y。
-    @Test func composedImageBakesPlateWithKnockedOutMark() throws {
+    /// v0.4.13 双色徽章（用户复测否决单色镂空："T 与底色板分别有色"）：
+    /// 深墨绿底板不透明、亮青标形不透明、四角圆弧外透明。位图 top-left 原点 y=16-绘制y。
+    @Test func composedImageBakesTwoToneBadge() throws {
         let active = try #require(StatusIcon.image(.active, scheme: .light))
-        // 板区（标形位图外，旧版恒透明）：绘制坐标 (2,10)→位图 (2,6)，必有板色
+        // 板区（标形位图外，左缘中段 绘制 (2.5,9.5)→位图 (2,6)）：深墨绿=暗且不透明
         let platePixel = try pixelColor(of: active, x: 2, y: 6)
         #expect(platePixel.alphaComponent > 0.9)
-        // 镂空区（竖干厚处：绘制 x≈7-9、y≈3.6-9.5 → 绘制 (8.5,6.5)→位图 (8,9)）：
-        // 硬镂空后 alpha≈0（透出菜单栏底色）。WHY 不取横杠内部：16px 光栅下横杠仅 ~1px
-        // 薄带，任意"内部"像素都叠着上下边缘抗锯齿，alpha 天然不满（资产实测 ≈0.75）
-        let knockoutPixel = try pixelColor(of: active, x: 8, y: 9)
-        #expect(knockoutPixel.alphaComponent < 0.05)
+        #expect(platePixel.brightnessComponent < 0.4)
+        #expect(platePixel.blueComponent > platePixel.redComponent) // 深绿蓝调
+        // 标形亮青（竖干厚处 绘制 (8.5,6.5)→位图 (8,9)）：亮、青绿主导
+        let markPixel = try pixelColor(of: active, x: 8, y: 9)
+        #expect(markPixel.alphaComponent > 0.9)
+        #expect(markPixel.brightnessComponent > 0.5)
+        #expect(markPixel.greenComponent > markPixel.redComponent)
+        // 板与标明暗对比（双色结构锁点）：标显著亮于板
+        #expect(markPixel.brightnessComponent > platePixel.brightnessComponent + 0.15)
         // 圆弧外角（绘制 (0.5,0.5)→位图 (0,15) 底行）：板内缩 0.5pt+圆角，角点透明
         let cornerPixel = try pixelColor(of: active, x: 0, y: 15)
         #expect(cornerPixel.alphaComponent < 0.1)
