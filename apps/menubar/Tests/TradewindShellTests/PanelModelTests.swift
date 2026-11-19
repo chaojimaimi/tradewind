@@ -194,6 +194,53 @@ final class StubURLProtocol: URLProtocol {
         #expect(model.groups.first { $0.id == "组B" }!.nodes[0].isGroup == false) // 顶层组成员也是普通节点
     }
 
+    // MARK: v0.4.10 链式解析（方案 B，2026-11-19 拍板）
+
+    /// ① 嵌套组链：组A.now=Auto、Auto.now=HK-1 → names=[组A,Auto,HK-1]、tailDelay=42
+    ///（替换锚定组A前缀：组A 与 Auto 的 now 同值，全局替换会双双命中——同既有 P3 口径）
+    @Test func exitChainResolvesNestedGroupToTailNode() async throws {
+        let nested = Self.proxiesJSON.replacingOccurrences(
+            of: "\"组A\":{\"name\":\"组A\",\"type\":\"Selector\",\"now\":\"HK-1\"",
+            with: "\"组A\":{\"name\":\"组A\",\"type\":\"Selector\",\"now\":\"Auto\""
+        )
+        StubURLProtocol.handler = { _ in (200, nested) }
+        let model = makeModel([FakeRunner.Reply(output: Self.statusWithPanel, exitCode: 0)])
+        await model.refresh()
+        model.activeGroupID = "组A"
+        let chain = try #require(model.exitChain())
+        #expect(chain.names == ["组A", "Auto", "HK-1"]) // 深度与 fixture 链一致（上限 3）
+        #expect(chain.tailDelay == 42) // 尾节点 HK-1 的延迟采样
+    }
+
+    /// ② 普通直选组（now=普通节点）→ nil：卡片维持单节点形态
+    @Test func exitChainNilWhenCurrentNodeIsPlainNode() async {
+        StubURLProtocol.handler = { _ in (200, Self.proxiesJSON) }
+        let model = makeModel([FakeRunner.Reply(output: Self.statusWithPanel, exitCode: 0)])
+        await model.refresh()
+        model.activeGroupID = "组B" // URLTest 组但 now=JP-1（普通节点）
+        #expect(model.exitChain() == nil)
+        #expect(model.currentNodeDelay == 180) // 单节点延迟口径不受链式解析影响
+    }
+
+    /// ③ 防环：组X.now=组Y、组Y.now=组X 互指 → names 封顶（≤3）、有界终止不死循环
+    @Test func exitChainBreaksReferenceCycleWithBoundedDepth() async throws {
+        let cyclic = """
+        {"proxies":{
+          "组X":{"name":"组X","type":"Selector","now":"组Y","all":["组Y"]},
+          "组Y":{"name":"组Y","type":"Selector","now":"组X","all":["组X"]},
+          "HK-1":{"name":"HK-1","type":"Socks5","history":[{"delay":42}]}
+        }}
+        """
+        StubURLProtocol.handler = { _ in (200, cyclic) }
+        let model = makeModel([FakeRunner.Reply(output: Self.statusWithPanel, exitCode: 0)])
+        await model.refresh()
+        model.activeGroupID = "组X"
+        let chain = try #require(model.exitChain())
+        #expect((chain.names.count) <= 3) // 深度封顶
+        #expect(chain.names.first == "组X") // 首位恒为当前组名
+        #expect(chain.tailDelay == nil) // 链尾仍是组：无尾节点延迟语义
+    }
+
     // MARK: v0.4.7 乐观更新（方案 B）：动作发起即翻转 UI，权威值落地/失败后清除
 
     /// ① CLI 失败 → 乐观值清除（UI 视觉回退）+ toast 用户可读提示

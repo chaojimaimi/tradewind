@@ -1,6 +1,9 @@
 import SwiftUI
 
-/// ② 当前节点卡（旗帜 + 节点名 + 延迟徽标 + 组名 + 出站模式 seg）。
+/// ② 当前节点卡（旗帜 + 节点名/链式节点 + 延迟徽标 + 组名 + 出站模式 seg）。
+/// v0.4.10 链式展示（方案 B，2026-11-19 用户拍板）：当前节点是嵌套组时沿 now 下探，
+/// 完整呈现 组A [组] → Auto → 🇭🇰尾节点 + 尾节点延迟——旧嵌套组口径「Auto [组] —」
+/// 末端信息缺失，废止；当前节点为普通节点时维持单节点形态（v0.4.4 口径）。
 struct CurrentNodeCard: View {
     @ObservedObject var model: PanelModel
     @Environment(\.colorScheme) private var scheme
@@ -8,16 +11,18 @@ struct CurrentNodeCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                if let name = currentNodeName {
-                    // WHY v0.4.4：当前节点名是组 id（嵌套组）时不渲染旗帜——组无旗帜语义
-                    // （🌐 误导），名称后「组」徽标标明类型（metacubexd 同类信息位）
+                if let chain = nodeChain {
+                    chainView(chain)
+                } else if let name = currentNodeName {
+                    // v0.4.4：当前节点名是组 id（嵌套组）时不渲染旗帜——组无旗帜语义
+                    // （🌐 误导），名称后「组」徽标标明类型（metacubexd 同类信息位）；
+                    // v0.4.10 起嵌套组态改走链式分支，此处仅承接普通节点
                     if !isNestedGroup(name, in: model.groups) {
                         Text(CountryFlag.flag(for: name))
                             .font(.system(size: 16)) // 旗帜 16pt（M3-plan §3.2）
                     }
                     Text(name)
                         .font(.system(size: 14, weight: .semibold))
-                        .lineLimit(1)
                     if isNestedGroup(name, in: model.groups) {
                         BadgeView(text: "组")
                     }
@@ -31,8 +36,8 @@ struct CurrentNodeCard: View {
                 Text(currentGroupName ?? "—")
                     .font(.system(size: Theme.fontSizeSub))
                     .foregroundStyle(Theme.muted(scheme))
-                    .lineLimit(1)
             }
+            .lineLimit(1) // 整行截断（现口径）
             HStack {
                 Text("出站模式")
                     .font(.system(size: 12))
@@ -49,11 +54,43 @@ struct CurrentNodeCard: View {
         .cardStyle()
     }
 
+    /// 链式形态：首位=当前组名（组不带旗帜、带「组」徽标），中间嵌套组名以
+    /// 三级「 → 」衔接（Text(" → ") tertiary），尾节点追加旗帜；延迟徽标由
+    /// 行内 delayBadge 统一呈现（取 tailDelay），此处不重复。
+    @ViewBuilder private func chainView(_ chain: (names: [String], tailDelay: Int?)) -> some View {
+        if let head = chain.names.first {
+            Text(head)
+                .font(.system(size: 14, weight: .semibold))
+            BadgeView(text: "组")
+        }
+        ForEach(chain.names.dropFirst(), id: \.self) { name in
+            Text(" → ")
+                .font(.system(size: Theme.fontSizeSub))
+                .foregroundStyle(.tertiary)
+            if name == chain.names.last, !isNestedGroup(name, in: model.groups) {
+                // 尾节点：旗帜 + 名称（组名不带旗帜的口径只约束链上组名；
+                // code-reviewer P3：深度截断/环致链尾落组时不渲染误导性兜底旗帜）
+                Text(CountryFlag.flag(for: name))
+                    .font(.system(size: 16))
+            }
+            Text(name)
+                .font(.system(size: 14, weight: .semibold))
+        }
+    }
+
+    /// 徽标延迟源：链式态取尾节点延迟（v0.4.10），单节点态取 currentNodeDelay。
+    /// WHY 不用 map/?? 链：Optional.map 嵌套 Int?? 会令 nil 尾延迟误回落到
+    /// currentNodeDelay，须显式分流保证链式态严格以 tailDelay 为准
+    private var badgeDelay: Int? {
+        guard let chain = nodeChain else { return model.currentNodeDelay }
+        return chain.tailDelay
+    }
+
     /// 延迟徽标：按延迟色阶着色（底色 16% + 字色同源，LatencyColor.scale 四档，
     /// 无记录显示"—"灰）。WHY 偏离 demo：demo .ms-chip 为固定绿，但 316ms 绿徽标
     /// 语义误导——用户 2026-11-19 拍板改延迟色阶（记验收偏差 #2，批①.5 §3.6）
     @ViewBuilder private var delayBadge: some View {
-        if let delay = model.currentNodeDelay {
+        if let delay = badgeDelay {
             let color = LatencyColor.scale(delay, scheme: scheme)
             Text("\(delay) ms")
                 .font(.system(size: Theme.fontSizeSub, weight: .semibold))
@@ -76,6 +113,8 @@ struct CurrentNodeCard: View {
 
     private var currentNodeName: String? { activeGroup?.currentNode }
     private var currentGroupName: String? { activeGroup?.name }
+    /// 链式解析数据路径（视图不自行下探，模型可单测）
+    private var nodeChain: (names: [String], tailDelay: Int?)? { model.exitChain() }
 
     private var modeBinding: Binding<String> {
         Binding(

@@ -19,6 +19,8 @@ BIN="$(swift build -c "$CONFIG" --show-bin-path)/TradewindShell"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/Tradewind"
+# 品牌图标（v0.4.10 logo 资产接入，2026-11-19 拍板）：仓内 assets/ 拷入 Resources
+cp "$DIR/assets/Tradewind.icns" "$APP/Contents/Resources/Tradewind.icns"
 cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -31,6 +33,8 @@ cat > "$APP/Contents/Info.plist" <<EOF
 	<key>CFBundleIdentifier</key>
 	<string>io.github.chaojimaimi.tradewind</string>
 	<key>CFBundleExecutable</key>
+	<string>Tradewind</string>
+	<key>CFBundleIconFile</key>
 	<string>Tradewind</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>

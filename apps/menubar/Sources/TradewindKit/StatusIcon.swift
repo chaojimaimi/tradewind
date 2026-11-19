@@ -11,11 +11,14 @@ enum StatusIconState: Equatable {
     case stopped
 }
 
-/// 图标状态推导与图像构造（纯逻辑可单测；SF Symbols "wind" 信风形）。
+/// 图标状态推导与图像构造（纯逻辑可单测；v0.4.10 起主形源为品牌位图 tradewind-menubar）。
 /// WHY v0.4.6（2026-11-19 用户拍板）四态可视化改造：旧版三态同形异色，idle 与 stopped
 /// 同为 muted 灰不可辨，色彩单编码辨识度不足——用户反馈"看不出是否在运行/代理是否开"。
 /// 改为"主形跟运行态走（运行=品牌色、停止=muted 灰）、绿点跟代理走（仅 active 显示）"，
 /// 停止态再叠加 0.5 alpha 淡化，运行/接入/停止三维正交可辨。
+/// WHY v0.4.10（2026-11-19 拍板 logo 资产接入）：主形从 SF Symbols "wind" 换为品牌
+/// 位图（16/@1x + 32/@2x 两份 PNG）；着色烘焙机制不变（sourceAtop 按 alpha 保形覆色，
+/// 位图自带多色/深墨色不影响），绿点合成机制不变。
 enum StatusIcon {
     /// demo 口径：停止 → stopped；运行且（系统代理 或 TUN）→ active；否则 idle。
     static func state(running: Bool, intake: Bool) -> StatusIconState {
@@ -25,11 +28,22 @@ enum StatusIcon {
         return intake ? .active : .idle
     }
 
-    /// 信风形符号名。WHY 合成画布非 template：绿点须以独立色彩烘焙（template 画布会被
-    /// contentTintColor 单色染色，"绿点跟代理走"失效），主形品牌色同样烘焙进画布，
-    /// 深浅色由 Theme 分主题着色达成。
-    static func symbolName(_ state: StatusIconState) -> String {
-        "wind"
+    /// 品牌位图源：Bundle.module 加载 16/@1x + 32/@2x 两份 PNG，addRepresentation
+    /// 组成 16×16 point 图像（Retina 绘制自动取 32px 表示）。
+    /// WHY 两份表示同挂 16pt 逻辑尺寸：菜单栏按 point 取图，高分屏不失真。
+    static func brandImage() -> NSImage? {
+        let sources = [("tradewind-menubar-16", 16), ("tradewind-menubar-32", 32)]
+        let image = NSImage(size: NSSize(width: 16, height: 16))
+        image.accessibilityDescription = "Tradewind"
+        for (name, pixels) in sources {
+            // WHY 不带 subdirectory：SPM 将资源平铺进 bundle 的 Contents/Resources/ 根
+            guard let url = Bundle.module.url(forResource: name, withExtension: "png"),
+                let rep = NSImageRep(contentsOf: url),
+                rep.pixelsWide == pixels, rep.pixelsHigh == pixels else { return nil }
+            rep.size = NSSize(width: 16, height: 16) // 同一逻辑尺寸，像素数区分 @1x/@2x
+            image.addRepresentation(rep)
+        }
+        return image
     }
 
     /// 着色（appearance 感知）v0.4.6：运行态（active/idle）=品牌色，仅 stopped=muted 灰
@@ -53,19 +67,16 @@ enum StatusIcon {
         state == .stopped ? 0.5 : 1
     }
 
-    /// 17pt 主形 + 右下 6pt 代理绿点的合成状态栏图像（demo .tw-icon 17px 规范）。
+    /// 16×16 point 品牌主形 + 右下 6pt 代理绿点的合成状态栏图像。
     /// 纯函数：scheme 参数化、不读全局状态，双状态双主题可单测。
     static func image(_ state: StatusIconState, scheme: ColorScheme) -> NSImage? {
-        let config = NSImage.SymbolConfiguration(pointSize: 17, weight: .regular)
-        guard let glyph = NSImage(systemSymbolName: symbolName(state), accessibilityDescription: "Tradewind")?
-            .withSymbolConfiguration(config) else { return nil }
-        // 画布=主形实测尺寸（21×18 @17pt），不做额外扩带（code-reviewer P2：+6 扩带在
-        // 非翻转坐标里位于顶部且恒空，还令 24pt 高图被菜单栏等比缩小低于 17px 规范）；
-        // 主形左下对齐（非翻转坐标原点=左下），绿点落主形自身右下空白角（像素级实测无碰撞）
-        let canvasSize = NSSize(width: max(glyph.size.width, 21), height: glyph.size.height)
+        guard let glyph = brandImage() else { return nil }
+        // 画布=主形逻辑尺寸（16×16 point，位图资产 16/32px 双密度），不做额外扩带
+        // （code-reviewer P2 口径沿用：扩带令画布被菜单栏等比缩小）；非翻转坐标原点=左下
+        let canvasSize = glyph.size
         return NSImage(size: canvasSize, flipped: false) { _ in
-            glyph.draw(in: NSRect(origin: .zero, size: glyph.size))
-            // 模板符号无自带色（draw 出为黑剪影）：sourceAtop 只染已有像素，烘焙主形色
+            glyph.draw(in: NSRect(origin: .zero, size: canvasSize))
+            // sourceAtop 只染已有像素（按 alpha 保形覆色）：烘焙主形色，位图原色不透出
             tint(state, scheme: scheme).setFill()
             NSRect(origin: .zero, size: canvasSize).fill(using: .sourceAtop)
             guard showsProxyDot(state) else { return true }

@@ -32,8 +32,8 @@ import Testing
         #expect(StatusIcon.alpha(.stopped) == 0.5)
     }
 
-    /// 合成图像：三态双主题均可构造、画布即主形实测尺寸（无扩带，code-reviewer P2）、
-    /// 非模板（绿点色彩独立于染色）
+    /// 合成图像：三态双主题均可构造、画布 16×16 point（v0.4.10 品牌位图主形）、
+    /// 非模板（绿点色彩独立于染色）+ active 像素含代理绿点（idle 同位无绿）
     @Test func composedImageRendersAllStatesAndSchemes() throws {
         for scheme in [ColorScheme.light, .dark] {
             for state in [StatusIconState.active, .idle, .stopped] {
@@ -43,16 +43,53 @@ import Testing
         let active = try #require(StatusIcon.image(.active, scheme: .light))
         let idle = try #require(StatusIcon.image(.idle, scheme: .light))
         #expect(active.size == idle.size) // 画布统一：点区有无不影响尺寸（菜单栏不跳动）
-        // 画布=主形实测尺寸（17pt "wind" 实测 21×18）：无 +6 扩带——扩带在非翻转坐标
-        // 位于顶部且恒空，还会令画布被菜单栏等比缩小致主形低于 17px 规范
-        #expect(active.size.width >= 21)
-        #expect(active.size.height == 18)
+        // 画布=品牌位图逻辑尺寸（16×16 point；@1x 16px + @2x 32px 双密度表示）
+        #expect(active.size.width == 16)
+        #expect(active.size.height == 16)
         #expect(!active.isTemplate) // template 画布会被 contentTintColor 单色染色
+        // 像素验证：绿点落右下点区中心（点区 drawing 坐标 (9,1,6,6) 中心 (12,4)，
+        // 位图 top-left 原点 y=16-4=12）；idle 同位无绿（主形仅品牌/灰烘焙）
+        #expect(isProxyDotGreen(try pixelColor(of: active, x: 12, y: 12)))
+        #expect(!isProxyDotGreen(try pixelColor(of: idle, x: 12, y: 12)))
     }
 
-    @Test func symbolImageLoadsAndIsNamedWind() {
-        // SF Symbols "wind" 必须在本机可解析（macOS 12+）；缺失说明运行环境过旧
-        #expect(StatusIcon.symbolName(.active) == "wind")
+    /// v0.4.10 品牌资产：Bundle.module 两份 PNG 可加载（非 nil 且 16/32 像素尺寸），
+    /// 双表示合成 16pt 品牌图像可用
+    @Test func menubarBrandAssetsLoadAtBothScales() throws {
+        for (name, pixels) in [("tradewind-menubar-16", 16), ("tradewind-menubar-32", 32)] {
+            // WHY 不带 subdirectory：SPM 将资源平铺进 bundle 的 Contents/Resources/ 根
+            let url = try #require(Bundle.module.url(forResource: name, withExtension: "png"))
+            let rep = try #require(NSImageRep(contentsOf: url))
+            #expect(rep.pixelsWide == pixels)
+            #expect(rep.pixelsHigh == pixels)
+        }
+        #expect(StatusIcon.brandImage() != nil)
+    }
+
+    // MARK: 像素取样辅助
+
+    /// 合成图绘入 16×16 RGBA 位图后读指定点颜色（换算 sRGB 分量比对）。
+    /// WHY 像素级验证：绿点合成是绘制管线的输出语义，仅断言非 nil 不足以锁定。
+    private func pixelColor(of image: NSImage, x: Int, y: Int) throws -> NSColor {
+        let rep = try #require(NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: Int(image.size.width),
+            pixelsHigh: Int(image.size.height), bitsPerSample: 8, samplesPerPixel: 4,
+            hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+            bytesPerRow: 0, bitsPerPixel: 0))
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        image.draw(in: NSRect(origin: .zero, size: image.size))
+        NSGraphicsContext.restoreGraphicsState()
+        let color = try #require(rep.colorAt(x: x, y: y))
+        return try #require(color.usingColorSpace(.sRGB))
+    }
+
+    /// 绿点判定：Theme.ok sRGB(0.196,0.816,0.455) 绿主导且蓝显著低于绿——
+    /// 与品牌色区分（brand 双主题均蓝高于绿），避免主形青蓝误判为绿点。
+    private func isProxyDotGreen(_ color: NSColor) -> Bool {
+        color.alphaComponent > 0.9
+            && color.greenComponent > 0.6
+            && color.blueComponent < color.greenComponent - 0.15
     }
 }
 

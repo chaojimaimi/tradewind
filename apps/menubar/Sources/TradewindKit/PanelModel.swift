@@ -94,6 +94,42 @@ final class PanelModel: ObservableObject {
         return group.nodes.first { $0.name == node }?.delay
     }
 
+    /// 链式解析：当前节点是嵌套组时沿 now 逐层下探至尾节点（v0.4.10 方案 B）。
+    /// WHY 2026-11-19 用户拍板方案 B：Proxy(Selector).now 可能是嵌套组（如 Auto），
+    /// 真实链路 组A→Auto→香港节点；旧卡片在嵌套态显示「Auto [组] —」末端信息缺失。
+    /// 返回 names（首位为当前组名，其后自 activeGroup.currentNode 起依次为链上
+    /// 嵌套组名与尾节点名）与 tailDelay（尾节点延迟毫秒；链尾仍是组=深度截断/环、
+    /// 或全局查无该节点延迟记录时为 nil）。当前节点是普通节点时返回 nil（卡片维持
+    /// 单节点形态）。组名入链上限 3、尾节点另计（names 至多 4）+ names.contains
+    /// 防环（code-reviewer P3：注释精度修正），保证有界终止。
+    func exitChain() -> (names: [String], tailDelay: Int?)? {
+        guard let group = activeGroup, let start = group.currentNode,
+              groups.contains(where: { $0.id == start }) else { return nil }
+        var names = [group.name]
+        var current = start
+        // 自指防护（code-reviewer P3）：now==自身名时直接收尾，避免 names 重复项
+        // 破坏 ForEach(id: \.self) 唯一性不变量（规整内核数据不可达，防御性收口）
+        if current == group.name {
+            return (names, nil)
+        }
+        while names.count < 3, let nested = groups.first(where: { $0.id == current }) {
+            names.append(nested.name)
+            guard let next = nested.currentNode, !names.contains(next) else { break }
+            current = next
+        }
+        // 尾节点入链：链尾落在普通节点才追加；仍是组（截断/环）保持组名收尾
+        if !names.contains(current), !groups.contains(where: { $0.id == current }) {
+            names.append(current)
+        }
+        let tail = names.last ?? group.name
+        if groups.contains(where: { $0.id == tail }) {
+            return (names, nil) // 链尾仍是组：无尾节点延迟语义
+        }
+        // 尾节点延迟：全局按名查找（遍历各组 nodes 找同名成员），查无记录为 nil
+        let tailDelay = groups.flatMap(\.nodes).first { $0.name == tail }?.delay
+        return (names, tailDelay)
+    }
+
     // MARK: 刷新与动作
 
     /// 拉取 status + 节点列表；失败不抛出（降级态呈现）。

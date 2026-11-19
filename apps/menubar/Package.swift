@@ -15,6 +15,11 @@ let package = Package(
         .target(
             name: "TradewindKit",
             path: "Sources/TradewindKit",
+            // 菜单栏品牌图标（v0.4.10 logo 资产接入，2026-11-19 拍板）：16=@1x、32=@2x
+            resources: [
+                .copy("Resources/tradewind-menubar-16.png"),
+                .copy("Resources/tradewind-menubar-32.png"),
+            ],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .executableTarget(
