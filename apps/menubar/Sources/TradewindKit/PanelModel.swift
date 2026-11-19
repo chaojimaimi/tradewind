@@ -88,7 +88,7 @@ final class PanelModel: ObservableObject {
     func refresh() async {
         guard let bridge else { return }
         do {
-            let report = try bridge.status()
+            let report = try await bridge.status()
             self.report = report
             gateway = GatewayClient(panelURL: report.panelURL, session: gatewaySession)
             traffic.attach(gateway: gateway)
@@ -110,7 +110,7 @@ final class PanelModel: ObservableObject {
                 try bridge.startCoreDetached()
                 showToast("Tradewind 已启动：内核就绪后自动刷新")
             } else {
-                try bridge.stopCore()
+                try await bridge.stopCore()
                 showToast("Tradewind 已停止：系统代理已按备份精确还原")
             }
         } catch {
@@ -123,7 +123,7 @@ final class PanelModel: ObservableObject {
     func setMode(_ mode: String) async {
         guard let bridge else { return }
         do {
-            try bridge.setMode(mode)
+            try await bridge.setMode(mode)
         } catch {
             showToast("模式切换失败")
         }
@@ -134,7 +134,7 @@ final class PanelModel: ObservableObject {
     func setSysProxy(on: Bool) async {
         guard let bridge else { return }
         do {
-            try bridge.sysProxy(on: on)
+            try await bridge.sysProxy(on: on)
         } catch {
             showToast(on ? "系统代理开启失败（内核未运行？）" : "系统代理关闭失败")
         }
@@ -145,7 +145,7 @@ final class PanelModel: ObservableObject {
     func selectNode(_ node: String) async {
         guard let group = activeGroup, let bridge else { return }
         do {
-            try bridge.select(group: group.id, node: node)
+            try await bridge.select(group: group.id, node: node)
         } catch {
             showToast("节点切换失败")
         }
@@ -158,7 +158,7 @@ final class PanelModel: ObservableObject {
         busy = true
         defer { busy = false }
         do {
-            try bridge.runDelay(group: group.id)
+            try await bridge.runDelay(group: group.id)
         } catch {
             showToast("测速失败")
         }
@@ -176,7 +176,7 @@ final class PanelModel: ObservableObject {
         Self.panelLog.notice("openPanel fired")
         guard let bridge else { return }
         do {
-            let url = try bridge.panelURL()
+            let url = try await bridge.panelURL()
             // 只记长度不记内容，足以区分"URL 空"与"URL 正常"
             Self.panelLog.notice("panelURL acquired (length=\(url.count, privacy: .public))")
             guard let u = URL(string: url), !url.isEmpty else {
@@ -210,7 +210,7 @@ final class PanelModel: ObservableObject {
     func stopCoreAndQuit() async {
         guard let bridge else { NSApp.terminate(nil); return }
         do {
-            try bridge.stopCore()
+            try await bridge.stopCore()
         } catch {
             showToast("停止失败，仅退出壳")
         }

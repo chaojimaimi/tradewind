@@ -33,12 +33,12 @@ final class StubURLProtocol: URLProtocol {
 
 /// WHY .serialized：共享的 URLProtocol 全局桩在并行用例间互踩，必须串行。
 @Suite(.serialized) @MainActor struct PanelModelTests {
-    private static let statusWithPanel = """
+    private nonisolated static let statusWithPanel = """
     {"core":{"running":true,"pid":2640,"version":"v1.19.34"},"mode":"rule","sys_proxy":{"applied":true,"services":1},"profile":{"uid":"u1","name":"sub"},"panel_url":"http://127.0.0.1:19097/ui/tok123/"}
     """
 
     /// v0.4.4 扩展：加 URLTest 嵌套组 "Auto" 并入 组A.all（真实订阅选择组内常嵌套组）
-    private static let proxiesJSON = """
+    private nonisolated static let proxiesJSON = """
     {"proxies":{
       "GLOBAL":{"name":"GLOBAL","type":"Selector","now":"组A"},
       "组A":{"name":"组A","type":"Selector","now":"HK-1","all":["HK-1","JP-1","US-1","Auto"]},

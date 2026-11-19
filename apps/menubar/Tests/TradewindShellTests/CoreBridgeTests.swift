@@ -22,15 +22,17 @@ final class FakeRunner: CommandLineRunning, @unchecked Sendable {
         script = replies
     }
 
-    func run(_ args: [String], tolerate: Set<Int32>) throws -> String {
-        lock.lock()
-        defer { lock.unlock() }
-        calls.append(args)
-        let reply = script.isEmpty ? Reply(output: "", exitCode: 0) : script.removeFirst()
-        if reply.exitCode != 0 && !tolerate.contains(reply.exitCode) {
-            throw CoreBridgeError.cliFailed(command: args.first ?? "tradewind")
+    func run(_ args: [String], tolerate: Set<Int32>) async throws -> String {
+        // WHY withLock 而非 lock/defer unlock：async 上下文禁用手动 lock/unlock
+        // （编译器警告 unavailable from asynchronous contexts），scoped 形态互斥语义不变。
+        try lock.withLock {
+            calls.append(args)
+            let reply = script.isEmpty ? Reply(output: "", exitCode: 0) : script.removeFirst()
+            if reply.exitCode != 0 && !tolerate.contains(reply.exitCode) {
+                throw CoreBridgeError.cliFailed(command: args.first ?? "tradewind")
+            }
+            return reply.output
         }
-        return reply.output
     }
 }
 
@@ -39,10 +41,10 @@ final class FakeRunner: CommandLineRunning, @unchecked Sendable {
     {"core":{"running":true,"pid":2640,"version":"v1.19.34"},"mode":"rule","sys_proxy":{"applied":true,"services":1},"profile":{"uid":"b89ed456","name":"TrojanFlare"},"panel_url":"http://127.0.0.1:39097/ui/abc123/"}
     """
 
-    @Test func statusDecodesFromStdoutEvenWithExitOne() throws {
+    @Test func statusDecodesFromStdoutEvenWithExitOne() async throws {
         // 退出码契约：exit 1（内核异常）不算进程错误，stdout JSON 仍解码（M2-plan §2.5）
         let fake = FakeRunner(FakeRunner.Reply(output: Self.statusJSON + "\n", exitCode: 1))
-        let report = try CoreBridge(runner: fake).status()
+        let report = try await CoreBridge(runner: fake).status()
         #expect(report.core.running)
         #expect(report.core.pid == 2640)
         #expect(report.mode == "rule")
@@ -52,24 +54,24 @@ final class FakeRunner: CommandLineRunning, @unchecked Sendable {
         #expect(fake.calls == [["status", "--json"]])
     }
 
-    @Test func statusRejectsNonContractExitCodes() {
+    @Test func statusRejectsNonContractExitCodes() async {
         let fake = FakeRunner(FakeRunner.Reply(output: "", exitCode: 2))
-        #expect(throws: CoreBridgeError.cliFailed(command: "status")) {
-            try CoreBridge(runner: fake).status()
+        await #expect(throws: CoreBridgeError.cliFailed(command: "status")) {
+            try await CoreBridge(runner: fake).status()
         }
     }
 
-    @Test func statusRejectsGarbageOutput() {
+    @Test func statusRejectsGarbageOutput() async {
         let fake = FakeRunner(FakeRunner.Reply(output: "core: not reachable\n", exitCode: 1))
-        #expect {
-            _ = try CoreBridge(runner: fake).status()
+        await #expect {
+            _ = try await CoreBridge(runner: fake).status()
         } throws: { error in
             if case CoreBridgeError.decode = error { return true }
             return false
         }
     }
 
-    @Test func controlPlaneOperationsPassExactArguments() throws {
+    @Test func controlPlaneOperationsPassExactArguments() async throws {
         let fake = FakeRunner(
             FakeRunner.Reply(output: "", exitCode: 0),
             FakeRunner.Reply(output: "", exitCode: 0),
@@ -78,11 +80,11 @@ final class FakeRunner: CommandLineRunning, @unchecked Sendable {
             FakeRunner.Reply(output: "", exitCode: 0)
         )
         let bridge = CoreBridge(runner: fake)
-        try bridge.select(group: "🚀 节点选择", node: "🇭🇰 HK-01")
-        try bridge.setMode("global")
-        try bridge.sysProxy(on: false)
-        try bridge.stopCore()
-        try bridge.panelURL()
+        try await bridge.select(group: "🚀 节点选择", node: "🇭🇰 HK-01")
+        try await bridge.setMode("global")
+        try await bridge.sysProxy(on: false)
+        try await bridge.stopCore()
+        _ = try await bridge.panelURL()
         #expect(fake.calls == [
             ["select", "🚀 节点选择", "🇭🇰 HK-01"],
             ["mode", "global"],

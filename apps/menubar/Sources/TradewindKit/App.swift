@@ -25,7 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 面板状态与 WS 速率（壳的数据中枢；菜单栏图标与 popover 速率卡同源于此）
     private lazy var model: PanelModel = .live()
     private var cancellables = Set<AnyCancellable>()
-    /// 周期刷新（M2-plan §8：壳每次操作前探测；5s 供图标保持新鲜）
+    /// 周期刷新（M2-plan §8：壳每次操作前探测；v0.4.6 起随 popover 开合变频）
     private var refreshTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -35,7 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.delegate = self
         setupStatusItem()
         observeModel()
-        startRefreshTimer()
+        rescheduleRefresh() // 初值 30s：启动时 popover 未展开
         Task { await model.refresh() }
     }
 
@@ -110,19 +110,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // RateText.statusItem 机制保留勿删：批②设置窗口将其转为 opt-in 设置项，届时在
     // 此处接设置开关恢复 title 刷新（曾用的 traffic.$down 订阅已随 updateRateText 移除）。
 
-    private func startRefreshTimer() {
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+    /// WHY v0.4.6（2026-11-19 拍板 A+C 的 C）随 popover 开合变频：async 化后主线程已不阻塞，
+    /// 降频进一步省 CPU 与子进程探测次数——展开态 5s 供面板/图标保持新鲜，收起态每 30s
+    /// 一次 status 探测足够维持图标新鲜（速率本就由 WS 推送，不依赖该 timer）。
+    private func rescheduleRefresh() {
+        refreshTimer?.invalidate()
+        let interval: TimeInterval = popover.isShown ? 5 : 30
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.model.refresh() }
         }
     }
 
-    // MARK: 图标三态
+    // MARK: 图标四态（v0.4.6）
 
+    /// 图标刷新唯一写入点：合成图像（含代理绿点）+ 淡化 + 三态可辨 tooltip。
+    /// WHY v0.4.6：色与形之外补 tooltip 文案兜底，悬停即可知运行/接入/停止。
+    /// 合成图为非 template（主形色已 sourceAtop 烘焙），不设 contentTintColor——
+    /// 对非 template 图是 no-op 死赋值（code-reviewer P3）；StatusIcon.tint 供烘焙使用。
     private func refreshIcon() {
         guard let button = statusItem?.button else { return }
         let scheme = Theme.currentScheme()
-        button.image = StatusIcon.image(model.iconState)
-        button.contentTintColor = StatusIcon.tint(model.iconState, scheme: scheme)
+        let state = model.iconState // 即 model.report 的推导（sysProxy.applied 决定接入）
+        button.image = StatusIcon.image(state, scheme: scheme)
+        button.alphaValue = StatusIcon.alpha(state)
+        button.toolTip = statusTooltip(state)
+    }
+
+    /// tooltip 三态文案：active=代理开 / idle=代理关 / stopped，悬停可辨（v0.4.6）。
+    private func statusTooltip(_ state: StatusIconState) -> String {
+        switch state {
+        case .active: return "Tradewind · 运行中（系统代理已开启）"
+        case .idle: return "Tradewind · 运行中（系统代理已关闭）"
+        case .stopped: return "Tradewind · 已停止"
+        }
     }
 }
 
@@ -141,10 +161,17 @@ extension AppDelegate: NSPopoverDelegate {
         }
     }
 
+    /// 展开态 5s 高频刷新挂此而非 willShow（code-reviewer P1 实测：willShow 时
+    /// popover.isShown 仍为 false，rescheduleRefresh 会误挂 30s——展开高频从未生效）
+    func popoverDidShow(_ notification: Notification) {
+        rescheduleRefresh()
+    }
+
     func popoverDidClose(_ notification: Notification) {
         if let monitor = outsideClickMonitor {
             NSEvent.removeMonitor(monitor)
             outsideClickMonitor = nil
         }
+        rescheduleRefresh() // 收起态 30s 低频
     }
 }

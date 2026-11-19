@@ -94,7 +94,7 @@ final class TrafficStore: ObservableObject {
     }
 
     private func scheduleReconnect() {
-        guard let gateway else { return }
+        guard gateway != nil else { return } // 仅存在性检查（绑定值未用，消 unused 警告）
         let delay = backoff
         reconnectTask = Task { [weak self] in
             let nanoseconds = UInt64(delay * 1_000_000_000)

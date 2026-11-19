@@ -4,12 +4,12 @@ import Foundation
 protocol CommandLineRunning {
     /// 执行 CLI 子命令并返回 stdout；tolerate 中的非零退出码不算失败
     /// （status 的退出码契约 0/1：1=内核异常但 JSON 仍有效，M2-plan §2.5）。
-    func run(_ args: [String], tolerate: Set<Int32>) throws -> String
+    func run(_ args: [String], tolerate: Set<Int32>) async throws -> String
 }
 
 extension CommandLineRunning {
-    func run(_ args: [String]) throws -> String {
-        try run(args, tolerate: [])
+    func run(_ args: [String]) async throws -> String {
+        try await run(args, tolerate: [])
     }
 }
 
@@ -36,7 +36,16 @@ struct CommandLineRunner: CommandLineRunning {
     /// 控制面操作的安全上限；status/select 等本机 socket 操作毫秒级即可
     static let defaultTimeout: TimeInterval = 10
 
-    func run(_ args: [String], tolerate: Set<Int32>) throws -> String {
+    /// async 包装：fork/exec + 忙等整体卸到后台线程（WHY v0.4.6，2026-11-19 用户反馈
+    /// 点开 popover/开关 sysproxy 明显卡顿根治——调用方全在 @MainActor，同步实现曾把
+    /// status 的 ~50-200ms 与 networksetup 的数百 ms 全压在主线程忙等）。
+    /// struct 值类型捕获进 @Sendable 闭包安全（仅含 String 常量）。
+    func run(_ args: [String], tolerate: Set<Int32>) async throws -> String {
+        try await Task.detached { try self.runBlocking(args, tolerate: tolerate) }.value
+    }
+
+    /// 同步实现体（仅经 `run` 的 detached 任务在后台线程执行，非隔离）。
+    private func runBlocking(_ args: [String], tolerate: Set<Int32>) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = args
@@ -105,42 +114,44 @@ final class CoreBridge {
     }
 
     /// status --json；exit 1（内核异常）不视为进程错误——stdout JSON 仍是有效状态。
-    func status() throws -> StatusReport {
-        let output = try runner.run(["status", "--json"], tolerate: [1])
+    /// WHY async：CLI 子进程经 runner 卸后台，5s 周期探测不再阻塞主线程（v0.4.6）。
+    func status() async throws -> StatusReport {
+        let output = try await runner.run(["status", "--json"], tolerate: [1])
         return try StatusReport.decode(output.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     /// 网页面板入口 URL（panel --url 仅打印不开浏览器）。
-    func panelURL() throws -> String {
-        try runner.run(["panel", "--url"]).trimmingCharacters(in: .whitespacesAndNewlines)
+    func panelURL() async throws -> String {
+        try await runner.run(["panel", "--url"]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// 切换节点（组名/节点名含 emoji 由 CLI 侧 PathEscape 处理，原样传参即可）。
-    func select(group: String, node: String) throws {
-        try runner.run(["select", group, node])
+    func select(group: String, node: String) async throws {
+        _ = try await runner.run(["select", group, node])
     }
 
     /// 出站模式热切换（rule|global|direct；非法值由 CLI 校验并报错）。
-    func setMode(_ mode: String) throws {
-        try runner.run(["mode", mode])
+    func setMode(_ mode: String) async throws {
+        _ = try await runner.run(["mode", mode])
     }
 
-    /// 系统代理开关（幂等语义由 CLI 保证）。
-    func sysProxy(on: Bool) throws {
-        try runner.run(["sysproxy", on ? "on" : "off"])
+    /// 系统代理开关（幂等语义由 CLI 保证；networksetup 可达数百 ms，async 化主因之一）。
+    func sysProxy(on: Bool) async throws {
+        _ = try await runner.run(["sysproxy", on ? "on" : "off"])
     }
 
     /// 停止内核（优雅管线含系统代理精确还原）。
-    func stopCore() throws {
-        try runner.run(["stop"])
+    func stopCore() async throws {
+        _ = try await runner.run(["stop"])
     }
 
     /// 组延迟测试（CLI delay [group]；有界并发 ≤8 由 CLI 保证，M1-plan §9）。
-    func runDelay(group: String) throws {
-        try runner.run(["delay", group])
+    func runDelay(group: String) async throws {
+        _ = try await runner.run(["delay", group])
     }
 
     /// 前台拉起内核（detached 子进程：壳退出不影响内核，M2-plan §2.1）。
+    /// WHY 保持同步：纯 spawn 不等待子进程（毫秒级返回），无主线程阻塞问题。
     func startCoreDetached() throws {
         let process = Process()
         guard let path = CLIPath.resolve() else {
