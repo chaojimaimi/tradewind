@@ -14,13 +14,25 @@ APP="$DIR/dist/Tradewind.app"
 
 cd "$DIR"
 swift build -c "$CONFIG"
-BIN="$(swift build -c "$CONFIG" --show-bin-path)/TradewindShell"
+BINDIR="$(swift build -c "$CONFIG" --show-bin-path)"
+BIN="$BINDIR/TradewindShell"
 
+# 先停运行中的旧实例（code-reviewer P3）：删除运行中 bundle 不终止进程（inode 存续），
+# 重建后 LaunchServices 按 bundle id 激活旧实例 → 热修验证被误导为"修复无效"或双图标
+pkill -x Tradewind 2>/dev/null || true
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/Tradewind"
 # 品牌图标（v0.4.10 logo 资产接入，2026-11-19 拍板）：仓内 assets/ 拷入 Resources
 cp "$DIR/assets/Tradewind.icns" "$APP/Contents/Resources/Tradewind.icns"
+# SPM 资源包（v0.4.11 热修）：TradewindKit 有 .copy 资源后 SPM 生成 TradewindShell_TradewindKit.bundle，
+# Bundle.module 运行时按「可执行文件同目录 Resources」约定查找；缺失即启动 fatal error 闪退
+# （v0.4.10 真机 open 静默失败的根因）。守卫存在性：资源清空回退时不阻塞构建。
+if [ -d "$BINDIR/TradewindShell_TradewindKit.bundle" ]; then
+  cp -R "$BINDIR/TradewindShell_TradewindKit.bundle" "$APP/Contents/Resources/"
+else
+  echo "warning: SPM resource bundle not found; app would crash at startup if TradewindKit uses Bundle.module" >&2
+fi
 cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
