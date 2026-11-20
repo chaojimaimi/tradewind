@@ -4,14 +4,20 @@ import Foundation
 
 // MARK: - 壳偏好键（M3-plan §11.2-1 双轨制：壳偏好走 UserDefaults tradewind.shell.*，壳不写 YAML）
 
-/// 壳偏好键集中声明：设置窗口 GeneralPane 的 @AppStorage 与 App 层 KVO/读取同源，
+/// 壳偏好键集中声明：设置窗口 GeneralPane 的 @AppStorage 与 App 层通知/读取同源，
 /// 防字面量漂移。值语义：hotkey_enabled 缺省 true（开）、menubar_rate 缺省 false
 /// （opt-in，v0.4.5 用户反馈速率文本占宽抖动故默认关闭）、appearance 缺省 system
-/// （跟随系统，§12 c2）。
+/// （跟随系统，§12 c2）。热变更经 prefChangedNotification 投递（键含点，KVO 不送达）。
 enum ShellPrefs {
     static let hotkeyEnabledKey = "tradewind.shell.hotkey_enabled"
     static let menubarRateKey = "tradewind.shell.menubar_rate"
     static let appearanceKey = "tradewind.shell.appearance"
+
+    /// 壳偏好变更通知（m3b2 返修：UserDefaults KVO 对含点 key 不送达——
+    /// AppearanceMechanismTests.kvoDeliversDottedKeyWrites 实锤，"tradewind.shell.*"
+    /// 被 KVO 解析成嵌套 keyPath 致 observeValue 永不触发）。GeneralPane 写入偏好后
+    /// post 本通知（userInfo 带变更键名→true），App 层据此刷新对应行为。
+    static let prefChangedNotification = Notification.Name("tradewind.shell.pref-changed")
 
     /// 快捷键开关：object 为 nil 即未写入 → true（与 bool(forKey:) 的 false 缺省区分）
     static func hotkeyEnabled(defaults: UserDefaults = .standard) -> Bool {

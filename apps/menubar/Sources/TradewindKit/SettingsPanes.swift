@@ -64,10 +64,12 @@ struct GeneralPane: View {
     @Environment(\.colorScheme) private var scheme
     @State private var confirmReset = false
     /// 壳偏好（增强 #1，M3-plan §11.7）：@AppStorage 直写 UserDefaults 即时生效，
-    /// App 层 KVO 察觉后刷新/清空菜单栏速率 title——不走 SettingsModel/CLI 写链路
+    /// 写后 post prefChangedNotification——App 层察觉后刷新/清空菜单栏速率 title
+    /// （不走 SettingsModel/CLI 写链路；m3b2 返修：键含点 KVO 不送达，通知见
+    /// ShellPrefs.prefChangedNotification 注释）
     @AppStorage(ShellPrefs.menubarRateKey) private var menubarRate = false
-    /// 界面主题（§12 c2）：@AppStorage 写 tradewind.shell.appearance，App 层 KVO
-    /// 察觉后 applyAppearance 即时切换 popover/设置窗口 NSAppearance
+    /// 界面主题（§12 c2）：@AppStorage 写 tradewind.shell.appearance，写后 post
+    /// 通知，App 层 applyAppearance 即时切换 popover/设置窗口 NSAppearance
     @AppStorage(ShellPrefs.appearanceKey) private var appearanceRaw = ShellPrefs.ShellAppearance.system.rawValue
 
     var body: some View {
@@ -95,6 +97,16 @@ struct GeneralPane: View {
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.muted(scheme))
             }
+        }
+        // 壳偏好热变更投递（m3b2 返修）：@AppStorage 落盘后 App 层无 KVO 可依赖
+        // （键含点），由本页唯一写入点 post 通知携带变更键名
+        .onChange(of: appearanceRaw) { _ in
+            NotificationCenter.default.post(name: ShellPrefs.prefChangedNotification,
+                                            object: nil, userInfo: [ShellPrefs.appearanceKey: true])
+        }
+        .onChange(of: menubarRate) { _ in
+            NotificationCenter.default.post(name: ShellPrefs.prefChangedNotification,
+                                            object: nil, userInfo: [ShellPrefs.menubarRateKey: true])
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 20)

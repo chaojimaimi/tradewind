@@ -88,10 +88,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     deinit {
-        // 壳偏好 KVO 解除（observeShellPrefs 注册对；进程退出才 deinit，惯例防御）
-        for key in [ShellPrefs.hotkeyEnabledKey, ShellPrefs.menubarRateKey, ShellPrefs.appearanceKey] {
-            UserDefaults.standard.removeObserver(self, forKeyPath: key)
-        }
+        // 壳偏好通知解除（observeShellPrefs 注册对；进程退出才 deinit，惯例防御）
+        NotificationCenter.default.removeObserver(self)
     }
 
     // MARK: 状态栏装配
@@ -213,13 +211,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: 界面主题（M3-plan §12 c2，评审 P1-1 AppKit appearance 机制）
 
-    /// 主题偏好应用到 popover 与设置窗口：显式 NSAppearance 覆盖含窗口标题栏铬，
-    /// 添加订阅 sheet 宿主随窗口继承；nil=跟随系统（清除覆盖）。
-    /// WHY Optional 链：窗口未创建时直接短路，不因切主题误触发懒创建。
-    /// 菜单栏图标为烘焙品牌色不随主题（v0.4.13 既定）；状态项速率 title 文字色
-    /// 恒随系统外观（预期行为，目验注明）。
+    /// 主题偏好应用到应用根 + popover + 设置窗口。WHY NSApp 根（m3b2 返修）：
+    /// popover.appearance 单点赋值真机未见效（截图三 popover 仍浅色，macOS 26 对
+    /// NSPopover 外观覆盖的传播不可靠），NSApp.appearance 是外观继承链的根
+    /// （App→window/popover→view），popover 内容、sheet、窗口全部经继承跟随；
+    /// window 显式赋值保留（机制测试 T2 锁定：铬+宿主 SwiftUI 均即时跟随）。
+    /// nil=跟随系统（清除覆盖）。WHY Optional 链：窗口未创建时直接短路，不因切
+    /// 主题误触发懒创建。菜单栏图标为烘焙品牌色不随主题（v0.4.13 既定）；状态项
+    /// 速率 title 文字色恒随系统外观（预期行为，目验注明）。
     private func applyAppearance() {
         let resolved = ShellPrefs.ShellAppearance.appearance().nsAppearance
+        NSApp.appearance = resolved
         popover.appearance = resolved
         settingsWindow?.window?.appearance = resolved
     }
@@ -295,27 +297,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotKey = nil
     }
 
-    /// 壳偏好热开关观察（GeneralPane 经 @AppStorage 写 UserDefaults，KVO 即时送达）：
-    /// hotkey_enabled 关→热卸载快捷键；menubar_rate 开/关→立即刷新/清空速率 title；
-    /// appearance 切换→即时应用 popover/窗口主题（§12 c2，既有先例同形）。
-    private func observeShellPrefs() {
-        for key in [ShellPrefs.hotkeyEnabledKey, ShellPrefs.menubarRateKey, ShellPrefs.appearanceKey] {
-            UserDefaults.standard.addObserver(self, forKeyPath: key, options: [.new], context: nil)
+    /// 壳偏好热开关观察（GeneralPane 写 @AppStorage 后 post prefChangedNotification，
+    /// userInfo 带变更键名）。WHY 通知而非 UserDefaults KVO（m3b2 返修实锤）：
+    /// "tradewind.shell.*" 键含点，KVO 解析为嵌套 keyPath 致 observeValue 永不触发
+    /// （AppearanceMechanismTests.kvoDeliversDottedKeyWrites 锁定该机制事实）。
+    @objc private func shellPrefChanged(_ note: Notification) {
+        let changed = (note.userInfo?.keys.compactMap { $0 as? String }) ?? []
+        for key in changed {
+            switch key {
+            case ShellPrefs.hotkeyEnabledKey:
+                ShellPrefs.hotkeyEnabled() ? registerHotKey() : unregisterHotKey()
+            case ShellPrefs.menubarRateKey:
+                refreshRateTitle()
+            case ShellPrefs.appearanceKey:
+                applyAppearance()
+            default:
+                break
+            }
         }
     }
 
-    override func observeValue(forKeyPath keyPath: String?, of object: Any?,
-                               change: [NSKeyValueChangeKey: Any]?, context: UnsafeMutableRawPointer?) {
-        switch keyPath {
-        case ShellPrefs.hotkeyEnabledKey:
-            ShellPrefs.hotkeyEnabled() ? registerHotKey() : unregisterHotKey()
-        case ShellPrefs.menubarRateKey:
-            refreshRateTitle()
-        case ShellPrefs.appearanceKey:
-            applyAppearance()
-        default:
-            super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
-        }
+    /// 壳偏好通知注册（与 GeneralPane 写入点配对；选择器式观察随对象释放自动拆除，
+    /// deinit 防御性 removeObserver 兜底）
+    private func observeShellPrefs() {
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(shellPrefChanged(_:)),
+                                               name: ShellPrefs.prefChangedNotification,
+                                               object: nil)
     }
 
     /// WHY v0.4.6（2026-11-19 拍板 A+C 的 C）随 popover 开合变频：async 化后主线程已不阻塞，
