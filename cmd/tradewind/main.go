@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -34,6 +35,7 @@ Usage:
   tradewind subs interval <UID|NAME> <off|1|12|24>    per-subscription auto update interval (off disables it)
   tradewind subs rename <UID|NAME> <NEW_NAME>         rename a subscription alias
   tradewind settings [get [--json]]                   show app settings (--json single-line for shells)
+  tradewind enhance show|set|clear <slot> [--json]    enhance chain slots (global-merge|rules|proxies|groups)
   tradewind settings set <key> <value>                set mixed_port/gateway_port/panel_enabled/allow_lan/log_retention_days
   tradewind settings reset                            restore default settings (hot reload + sysproxy retarget)
   tradewind autostart on|off|status [--json]          manage the launchd LaunchAgent (starts on login, crash-restart)
@@ -92,6 +94,8 @@ func dispatch(home paths.Home, args []string) error {
 		err = cmdUse(home, args[1:])
 	case "subs":
 		err = cmdSubs(home, args[1:])
+	case "enhance":
+		err = cmdEnhance(home, args[1:])
 	case "settings":
 		err = cmdSettings(home, args[1:])
 	case "autostart":
@@ -339,6 +343,78 @@ func cmdSubs(home paths.Home, args []string) error {
 	default:
 		return fmt.Errorf("unknown subs command %q (valid: delete|interval|rename)", args[0])
 	}
+}
+
+// cmdEnhance 分发 `enhance show|set|clear`（槽名在前、flag 在后分段解析——
+// Go flag 在首个非 flag 参数处停止，同 subs delete 先例）。
+// --json 契约（batch3 红线 2）：set/clear/show 恒退出 0，stdout 仅最终一行 JSON。
+func cmdEnhance(home paths.Home, args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: tradewind enhance show <slot> [--uid <uid>] [--json] | " +
+			"enhance set <slot> --file <path|-> [--uid] [--json] | enhance clear <slot> [--json]")
+	}
+	slot, rest := args[1], args[2:]
+	ctx := context.Background()
+	switch args[0] {
+	case "show":
+		fs := flag.NewFlagSet("enhance show", flag.ContinueOnError)
+		uid := fs.String("uid", "", "target subscription uid (default: current)")
+		asJSON := fs.Bool("json", false, "machine-readable single-line JSON")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		if *asJSON {
+			fmt.Println(app.EnhanceShowJSONContractLine(home, slot, *uid))
+			return nil
+		}
+		return app.EnhanceShow(home, slot, *uid, os.Stdout)
+	case "set":
+		fs := flag.NewFlagSet("enhance set", flag.ContinueOnError)
+		file := fs.String("file", "", "content file path, or '-' for stdin")
+		uid := fs.String("uid", "", "target subscription uid (default: current)")
+		asJSON := fs.Bool("json", false, "machine-readable single-line JSON")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		if *file == "" {
+			return errors.New("usage: tradewind enhance set <slot> --file <path|-> [--uid] [--json]")
+		}
+		content, err := readEnhanceInput(*file)
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			fmt.Println(app.EnhanceSetJSONLine(ctx, home, slot, *uid, content))
+			return nil
+		}
+		return app.EnhanceSet(ctx, home, slot, *uid, content, os.Stdout)
+	case "clear":
+		fs := flag.NewFlagSet("enhance clear", flag.ContinueOnError)
+		uid := fs.String("uid", "", "target subscription uid (default: current)")
+		asJSON := fs.Bool("json", false, "machine-readable single-line JSON")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		if *asJSON {
+			fmt.Println(app.EnhanceClearJSONLine(ctx, home, slot, *uid))
+			return nil
+		}
+		return app.EnhanceClear(ctx, home, slot, *uid, os.Stdout)
+	default:
+		return fmt.Errorf("unknown enhance command %q (valid: show|set|clear)", args[0])
+	}
+}
+
+// readEnhanceInput 读取槽内容（'-' = stdin；envelope 由调用方校验语法）。
+func readEnhanceInput(path string) ([]byte, error) {
+	if path == "-" {
+		return io.ReadAll(os.Stdin)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	return data, nil
 }
 
 func cmdSettings(home paths.Home, args []string) error {

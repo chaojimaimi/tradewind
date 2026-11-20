@@ -22,12 +22,16 @@ var subscriptionKeys = []string{"proxies", "proxy-groups", "rules"}
 type Injection struct {
 	Settings store.Settings
 	Secret   string
+	// Warnings 非空指针时收集增强链跳过/撞名告警（纯函数不打印，调用方落 stderr；
+	// batch3 §3.2 未命中/撞名跳过不静默）。
+	Warnings *[]string
 }
 
 // Synth 合成 runtime.yaml 字节流。
 // 订阅缺失 proxies/proxy-groups/rules 中任一键时不报错——订阅合法性与 validate 层把关，
 // 这里只做"有则取之"（例如用户自定义的最小 rules 文件）。
-func Synth(subscription []byte, inj Injection) ([]byte, error) {
+// enh 为增强链各层原文（nil = 无增强；空槽零开销，输出与无增强逐字节一致——golden 锚）。
+func Synth(subscription []byte, inj Injection, enh *Enhance) ([]byte, error) {
 	if err := inj.Settings.Validate(); err != nil {
 		return nil, fmt.Errorf("synth: %w", err)
 	}
@@ -49,6 +53,13 @@ func Synth(subscription []byte, inj Injection) ([]byte, error) {
 				setMappingValue(root, key, val)
 			}
 		}
+	}
+	// 增强链（batch3 §3.2 顺序）：三槽在前、全局 merge 在后，settings 注入仍在链末最高优先
+	if err := applyEnhanceSlots(root, enh); err != nil {
+		return nil, err
+	}
+	if err := applyGlobalMerge(root, enhGlobalMerge(enh), inj.Warnings); err != nil {
+		return nil, err
 	}
 	// 注入顺序固定，保证输出键序确定性
 	setMappingValue(root, "mixed-port", scalarNode(inj.Settings.MixedPort))

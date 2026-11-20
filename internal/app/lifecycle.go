@@ -13,7 +13,9 @@ import (
 	"github.com/chaojimaimi/tradewind/internal/sysproxy"
 )
 
-// Synthesize 合成 runtime.yaml（模板 embed + 订阅 current + settings + secret 注入）。
+// Synthesize 合成 runtime.yaml（模板 embed + 订阅 current + 增强链 + settings + secret 注入）。
+// 增强链槽文件缺失=空转（零开销）；未命中/撞名告警经 stderr 输出（不进 runtime，
+// batch3 §3.2）。synth.Synth 保持纯函数——文件读取与告警打印都收口在本编排。
 func Synthesize(home paths.Home, secret string) error {
 	settings, err := store.LoadSettings(home)
 	if err != nil {
@@ -31,9 +33,17 @@ func Synthesize(home paths.Home, secret string) error {
 			return fmt.Errorf("app: read current profile %s: %w", item.File, err)
 		}
 	}
-	out, err := synth.Synth(sub, synth.Injection{Settings: settings, Secret: secret})
+	enh, err := loadEnhanceLayers(home, idx.Current)
 	if err != nil {
 		return err
+	}
+	var warnings []string
+	out, err := synth.Synth(sub, synth.Injection{Settings: settings, Secret: secret, Warnings: &warnings}, enh)
+	if err != nil {
+		return err
+	}
+	for _, w := range warnings {
+		fmt.Fprintln(os.Stderr, "warning:", w)
 	}
 	return store.WriteFileRaw(home.RuntimeFile(), out)
 }

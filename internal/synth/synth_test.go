@@ -30,7 +30,7 @@ func TestSynthGolden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read subscription fixture: %v", err)
 	}
-	got, err := Synth(sub, testInjection())
+	got, err := Synth(sub, testInjection(), nil)
 	if err != nil {
 		t.Fatalf("Synth: %v", err)
 	}
@@ -55,12 +55,12 @@ func TestSynthGolden(t *testing.T) {
 
 func TestSynthIsDeterministic(t *testing.T) {
 	sub, _ := os.ReadFile(filepath.Join("testdata", "subscription.yaml"))
-	first, err := Synth(sub, testInjection())
+	first, err := Synth(sub, testInjection(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for range 5 {
-		again, err := Synth(sub, testInjection())
+		again, err := Synth(sub, testInjection(), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -86,7 +86,7 @@ proxies:
 rules:
   - MATCH,DIRECT
 `)
-	got, err := Synth(sub, testInjection())
+	got, err := Synth(sub, testInjection(), nil)
 	if err != nil {
 		t.Fatalf("Synth: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestSynthSettingsOverrideTemplate(t *testing.T) {
 	sub, _ := os.ReadFile(filepath.Join("testdata", "subscription.yaml"))
 	inj := testInjection()
 	inj.Settings = store.Settings{MixedPort: 18888, GatewayPort: store.DefaultGatewayPort, Mode: "global", LogLevel: "debug"}
-	got, err := Synth(sub, inj)
+	got, err := Synth(sub, inj, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,10 +136,10 @@ func TestSynthSettingsOverrideTemplate(t *testing.T) {
 }
 
 func TestSynthInvalidSubscription(t *testing.T) {
-	if _, err := Synth([]byte("proxies: [broken"), testInjection()); err == nil {
+	if _, err := Synth([]byte("proxies: [broken"), testInjection(), nil); err == nil {
 		t.Fatal("invalid subscription yaml: want error")
 	}
-	if _, err := Synth([]byte("proxies: []"), Injection{Settings: store.Settings{MixedPort: 0}}); err == nil {
+	if _, err := Synth([]byte("proxies: []"), Injection{Settings: store.Settings{MixedPort: 0}}, nil); err == nil {
 		t.Fatal("invalid settings: want error")
 	}
 }
@@ -147,7 +147,7 @@ func TestSynthInvalidSubscription(t *testing.T) {
 func TestSynthSubscriptionWithoutRules(t *testing.T) {
 	// 只有 proxies 的最小订阅也应能合成（rules 缺失不报错，由内核默认 DIRECT 兜底）
 	sub := []byte("proxies:\n  - name: n1\n    type: socks5\n    server: 127.0.0.1\n    port: 1080\n")
-	got, err := Synth(sub, testInjection())
+	got, err := Synth(sub, testInjection(), nil)
 	if err != nil {
 		t.Fatalf("Synth: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestSynthSubscriptionWithoutRules(t *testing.T) {
 func TestSynthEmptySubscriptionIsBareTemplate(t *testing.T) {
 	// 裸内核场景（无 current 订阅）：Synthesize 注释声明的"纯模板"路径。
 	// 回归背景：空订阅此前因 parseMapping(空) 报 "top level is 0"，从未被覆盖。
-	got, err := Synth(nil, testInjection())
+	got, err := Synth(nil, testInjection(), nil)
 	if err != nil {
 		t.Fatalf("Synth(nil): %v", err)
 	}
@@ -181,7 +181,7 @@ func TestSynthInjectsAllowLan(t *testing.T) {
 	sub, _ := os.ReadFile(filepath.Join("testdata", "subscription.yaml"))
 	inj := testInjection()
 	inj.Settings.AllowLan = true
-	got, err := Synth(sub, inj)
+	got, err := Synth(sub, inj, nil)
 	if err != nil {
 		t.Fatalf("Synth: %v", err)
 	}

@@ -84,3 +84,14 @@ func (h Home) ReleaseTokenFile() string { return h.join("release_token") }
 
 // ProfileFile 返回某个订阅原文件路径（订阅文件本身只读）。
 func (h Home) ProfileFile(file string) string { return h.join("profiles", file) }
+
+// EnhanceDir 是增强链槽文件目录（batch3 §3.1；缺文件=槽空转，按需创建）。
+func (h Home) EnhanceDir() string { return h.join("enhance") }
+
+// EnhanceGlobalMerge 是全局 merge.yaml（槽名 global-merge，作用于所有订阅）。
+func (h Home) EnhanceGlobalMerge() string { return h.join("enhance", "merge.yaml") }
+
+// EnhanceSlotFile 是订阅三槽文件（<uid>.<slot>.yaml，作用于 current 或 --uid 指定订阅）。
+func (h Home) EnhanceSlotFile(uid, slot string) string {
+	return h.join("enhance", uid+"."+slot+".yaml")
+}
