@@ -10,6 +10,8 @@ final class FakeRunner: CommandLineRunning, @unchecked Sendable {
     }
 
     private(set) var calls: [[String]] = []
+    /// runWithTimeout 收到的超时档（批③：selfUpdate 180s 档断言；读/写档缺省转发不记录）
+    private(set) var timeouts: [TimeInterval] = []
     private var script: [Reply] = []
     private let lock = NSLock()
 
@@ -34,6 +36,25 @@ final class FakeRunner: CommandLineRunning, @unchecked Sendable {
             return reply.output
         }
     }
+
+    /// 记录超时档后转发常规 run（假执行器无进程可杀，超时值仅真实执行器有语义；
+    /// 记录供 selfUpdate/updateTimeout 契约断言）。
+    func runWithTimeout(_ args: [String], timeout: TimeInterval, tolerate: Set<Int32>) async throws -> String {
+        lock.withLock { timeouts.append(timeout) }
+        return try await run(args, tolerate: tolerate)
+    }
+
+    /// 记录 stdin 内容后转发（批③ c6：enhance set 内容经 stdin 传参断言）。
+    func runWithInput(_ args: [String], input: String, timeout: TimeInterval, tolerate: Set<Int32>) async throws -> String {
+        lock.withLock {
+            timeouts.append(timeout)
+            inputs.append(input)
+        }
+        return try await run(args, tolerate: tolerate)
+    }
+
+    /// runWithInput 收到的 stdin 内容（序与 calls 对齐）。
+    private(set) var inputs: [String] = []
 }
 
 @Suite struct CoreBridgeTests {

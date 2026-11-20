@@ -58,6 +58,9 @@ struct EnhancePane: View {
 /// 丢失）；Bundle.module.url + NSImage(contentsOf:) 是确定路径（AboutBrandTests 锁点）。
 struct AboutPane: View {
     @ObservedObject var model: SettingsModel
+    /// 更新区块模型（批③ B1：SettingsModel 不动约束下的并行 @StateObject；
+    /// 独立桥解析，与 SettingsModel 同源 CLIPath 语义）
+    @StateObject private var update = UpdateModel.live()
     @Environment(\.colorScheme) private var scheme
 
     /// 品牌位图（进程级单次加载；资源缺失时 nil 走兜底块，绝不静默空渲染）
@@ -94,8 +97,10 @@ struct AboutPane: View {
                 .font(.system(size: 12))
                 .foregroundStyle(Theme.muted(scheme))
                 .padding(.top, 2)
+            updateSection
+                .padding(.top, 14)
             VStack(spacing: 0) {
-                kv(label: "代理内核", value: "mihomo \(model.coreVersion ?? "—")（外挂 · 锁版本）")
+                kv(label: "代理内核", value: "mihomo \(model.coreVersion ?? "—")（外挂 · self-update --core 可升级，失败自动回滚）")
                 kv(label: "Bundle ID", value: bundleID, monospaced: true)
                 repoRow
                 kv(label: "开源许可", value: "MIT")
@@ -119,6 +124,88 @@ struct AboutPane: View {
     /// 壳版本（发版注入 CFBundleShortVersionString；swift build 开发态无值落 dev）
     private var shellVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+    }
+
+    // MARK: 更新区块（批③ §2.4：三态展示 + 立即更新；比对对象是 CLI 版本非壳版本）
+
+    /// 三态渲染：idle=检查按钮 / 已是最新（灰）/ 发现新版（brand）+ 立即更新 /
+    /// 失败（bad 色文案=error 字段，含 token 缺失引导）。dev 态壳仍可用
+    ///（注明"以 CLI 版本为准"）。
+    @ViewBuilder
+    private var updateSection: some View {
+        SettingsSection(title: "检查更新（以 CLI 版本为准）") {
+            switch update.checkState {
+            case .idle:
+                SettingsRow(label: "检查可用新版本",
+                            subtitle: "比对 GitHub 最新 release 与当前 CLI 构建") {
+                    updateButton("检查更新", disabled: update.busy) {
+                        Task { await update.checkForUpdate() }
+                    }
+                }
+            case .upToDate(let version):
+                SettingsRow(label: "已是最新 \(version)",
+                            subtitle: "与 GitHub 最新 release 一致") {
+                    updateButton("重新检查", disabled: update.busy) {
+                        Task { await update.checkForUpdate() }
+                    }
+                }
+            case .available(let version, _):
+                SettingsRow(label: "发现新版 \(version)",
+                            subtitle: "更新过程代理有数秒中断，内核自动重启") {
+                    HStack(spacing: 8) {
+                        updateButton("立即更新", disabled: update.busy) {
+                            Task { await update.applyUpdate() }
+                        }
+                        updateButton("重新检查", disabled: update.busy) {
+                            Task { await update.checkForUpdate() }
+                        }
+                    }
+                }
+            case .failed(let message):
+                SettingsRow(label: "检查失败", subtitle: nil) {
+                    EmptyView()
+                }
+                Divider().overlay(Theme.muted(scheme).opacity(0.2))
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(message)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.bad)
+                        .textSelection(.enabled)
+                    updateButton("重新检查", disabled: update.busy) {
+                        Task { await update.checkForUpdate() }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+            }
+            if let updatedTo = update.lastUpdatedTo {
+                Divider().overlay(Theme.muted(scheme).opacity(0.2))
+                SettingsRow(label: "已更新至 \(updatedTo)", subtitle: "重启 Tradewind app 后关于页版本号随之刷新") {
+                    EmptyView()
+                }
+            }
+        }
+    }
+
+    /// 区块按钮（.btn 语义的小号形态；禁用由 busy 防抖 + CLI 可用性双闸）
+    private func updateButton(_ title: String, disabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 12, weight: .medium))
+                .padding(.vertical, 4)
+                .padding(.horizontal, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
+                        .fill(Theme.controlBackground(scheme))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
+                        .strokeBorder(Color.primary.opacity(0.1), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled || !update.available)
+        .accessibilityLabel(title)
     }
 
     /// Bundle ID（真机 app bundle 由 Info.plist 提供；开发态落安装标识兜底）

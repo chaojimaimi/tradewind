@@ -58,4 +58,8 @@ enum CoreBridgeError: Error, Equatable {
     /// CLI 写编排超时被壳终止（c2 审查 P2）：settings.yaml 先于 reload 落盘，
     /// 超时=可能已部分生效——消费方不得按普通失败回退乐观回显
     case timedOut(command: String)
+    /// CLI --json 契约的 error 字段文案（批③：version --check / self-update /
+    /// enhance set|clear 恒退出 0，失败信息在 stdout JSON error 字段——直接透传
+    /// 给 toast/三态展示，不掺壳侧措辞）
+    case cliMessage(String)
 }
