@@ -55,4 +55,7 @@ enum CoreBridgeError: Error, Equatable {
     case badPanelURL(String)
     /// 无当前订阅（subsIntervalCurrent 的 current 定位落空；status --json profile.uid 为空）
     case noCurrentProfile
+    /// CLI 写编排超时被壳终止（c2 审查 P2）：settings.yaml 先于 reload 落盘，
+    /// 超时=可能已部分生效——消费方不得按普通失败回退乐观回显
+    case timedOut(command: String)
 }

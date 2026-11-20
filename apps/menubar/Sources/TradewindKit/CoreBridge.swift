@@ -79,7 +79,7 @@ struct CommandLineRunner: CommandLineRunning {
         }
         let output = readAll(stdout, timeout: timeout)
         let errText = readAll(stderr, timeout: timeout)
-        waitForExitOrKill(process, timeout: timeout)
+        try waitForExitOrKill(process, timeout: timeout, command: args.first ?? "tradewind")
         if process.terminationStatus != 0 && !tolerate.contains(process.terminationStatus) {
             throw CoreBridgeError.cliFailed(command: args.first ?? "tradewind")
         }
@@ -103,13 +103,19 @@ struct CommandLineRunner: CommandLineRunning {
         return String(data: data, encoding: .utf8) ?? ""
     }
 
-    private func waitForExitOrKill(_ process: Process, timeout: TimeInterval) {
+    /// terminate() 发 SIGTERM（注释修正，c2 审查 P2：旧注释误写 SIGKILL——SIGTERM
+    /// 对 CLI 的 mutation.lock flock 释放语义相同，进程死亡锁即解）。
+    /// 超时抛 timedOut：写编排可能已部分生效（settings.yaml 先落盘后 reload），
+    /// 消费方不得按普通失败回退乐观回显。
+    private func waitForExitOrKill(_ process: Process, timeout: TimeInterval, command: String) throws {
         let deadline = Date().addingTimeInterval(timeout)
         while process.isRunning && Date() < deadline {
             usleep(20_000)
         }
         if process.isRunning {
             process.terminate()
+            process.waitUntilExit()
+            throw CoreBridgeError.timedOut(command: command)
         }
         process.waitUntilExit()
     }
@@ -201,9 +207,10 @@ final class CoreBridge {
 
     // MARK: 设置窗口桥（M3-plan §11.2-10：全部经 CLI 机器可读输出，壳不写 YAML）
 
-    /// 写编排操作的加长超时（M3-plan §11.2-4 评审 P1-3）：CLI 持 mutation.lock
-    /// 最长 35s + reload 失败降级重启 15s，默认 10s SIGKILL 会制造半完成态。
-    static let writeTimeout: TimeInterval = 45
+    /// 写编排操作的加长超时（M3-plan §11.2-4 评审 P1-3/c2 审查 P2）：最坏路径
+    /// 串行段 = 等锁 35s + 探测 2s + PUT 2s + 降级重启 15s + retarget 数秒 ≈ 60s+，
+    /// 取 65s 留裕量（45s 会把壳 SIGTERM 在 retarget 前——半完成态正是本设计要消灭的）。
+    static let writeTimeout: TimeInterval = 65
 
     /// `settings get --json`：通用页初始值数据源（读操作，常规 10s 足够）。
     func settingsGetJSON() async throws -> SettingsSnapshot {
@@ -211,7 +218,7 @@ final class CoreBridge {
         return try SettingsSnapshot.decode(output.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
-    /// `settings set <key> <value>`：45s 加长超时（写编排含热重载/降级重启链）。
+    /// `settings set <key> <value>`：65s 加长超时（写编排含热重载/降级重启链）。
     func settingsSet(key: String, value: String) async throws {
         _ = try await runner.runWithTimeout(["settings", "set", key, value], timeout: Self.writeTimeout)
     }
@@ -221,7 +228,7 @@ final class CoreBridge {
         _ = try await runner.runWithTimeout(["settings", "reset"], timeout: Self.writeTimeout)
     }
 
-    /// `subs interval <target> <mode>`（c3 订阅页同用）；45s（持 mutation.lock）。
+    /// `subs interval <target> <mode>`（c3 订阅页同用）；65s（持 mutation.lock）。
     func subsInterval(target: String, mode: String) async throws {
         _ = try await runner.runWithTimeout(["subs", "interval", target, mode], timeout: Self.writeTimeout)
     }
@@ -250,9 +257,49 @@ final class CoreBridge {
     }
 
     /// `list --json`：间隔 select 初值数据源（当前条目定位）。
-    /// 完整订阅卡解码模型归 c3 SubsModel，届时替换/扩展本条目结构。
+    /// 完整订阅卡解码模型见 subsListJSON（c3）。
     func listJSON() async throws -> [ProfileIntervalEntry] {
         let output = try await runner.run(["list", "--json"])
         return try ProfileIntervalEntry.decodeArray(output.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    // MARK: 订阅管理页桥（M3-plan §11.3 页 1，c3；写操作全部走 65s writeTimeout）
+
+    /// `list --json`（订阅卡全量数据源）：与 listJSON 同 CLI 读，解码模型不同
+    /// （完整订阅卡 vs 通用页间隔初值裁剪——两模型并存系 SettingsModel 不动的约束）。
+    func subsListJSON() async throws -> [SubsCardEntry] {
+        let output = try await runner.run(["list", "--json"])
+        return try SubsCardEntry.decodeArray(output.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// `add <url> [--name <name>]`：URL 导入（file 型导入不做 UI，仅 URL 路径）。
+    /// WHY flags 前置（cmdAdd 实况核对）：Go flag 在首个非 flag 参数处停止解析——
+    /// `add <url> --name X` 的 `--name X` 会被吞为位置参数，名称静默丢失。
+    /// 名称空白则省略 --name（Go 默认取 URL host）。
+    func subsAdd(url: String, name: String) async throws {
+        var args = ["add"]
+        if !name.isEmpty { args += ["--name", name] }
+        args.append(url)
+        _ = try await runner.runWithTimeout(args, timeout: Self.writeTimeout)
+    }
+
+    /// `update <target>`：拉取更新 + 合成 + 热重载（target=uid|name）。
+    func subsUpdate(target: String) async throws {
+        _ = try await runner.runWithTimeout(["update", target], timeout: Self.writeTimeout)
+    }
+
+    /// `use <target>`：切换当前订阅 + 合成 + 热重载。
+    func subsUse(target: String) async throws {
+        _ = try await runner.runWithTimeout(["use", target], timeout: Self.writeTimeout)
+    }
+
+    /// `subs delete <target> [--force]`：删除订阅；current 需 force（Go 侧保护，
+    /// 删除后裸内核态语义与提示文案归 SubsModel）。WHY 位置参数在前（cmdSubs
+    /// 实况核对）：fs.Parse(args[2:]) 先取 target 再解析余下 flag，`--force`
+    /// 置于 target 前会因多余位置参数报错。
+    func subsDelete(target: String, force: Bool) async throws {
+        var args = ["subs", "delete", target]
+        if force { args.append("--force") }
+        _ = try await runner.runWithTimeout(args, timeout: Self.writeTimeout)
     }
 }

@@ -48,6 +48,9 @@ type ProfileJSON struct {
 	UID     string `json:"uid"`
 	Name    string `json:"name"`
 	Type    string `json:"type"`
+	// URL 订阅源地址（remote 型；file 型为空。批② c3 订阅卡 host 展示——
+	// demo 元信息行即 URL host；omitempty 对 file 型输出无 url 键，壳侧容缺）
+	URL string `json:"url,omitempty"`
 	// Updated 最近导入/更新的 unix 秒
 	Updated int64           `json:"updated"`
 	Extra   store.ExtraInfo `json:"extra"`
@@ -68,6 +71,7 @@ func listReport(idx store.Index) []ProfileJSON {
 			UID:             item.UID,
 			Name:            item.Name,
 			Type:            item.Type,
+			URL:             item.URL,
 			Updated:         item.Updated,
 			Extra:           item.Extra,
 			AllowAutoUpdate: item.AllowAutoUpdate,

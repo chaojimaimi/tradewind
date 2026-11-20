@@ -32,10 +32,11 @@ enum GeneralPaneLogic {
 
     /// interval select 初值（纯函数）：allow=false → "off"（评审 P1-2：off 是真实
     /// 关闭开关 AllowAutoUpdate=false）；interval 秒值 /3600 命中 1/12/24；
-    /// nil（未设置）与 0（Go NormalizeUpdateInterval 归一为 86400）落默认 24。
-    static func intervalMode(allowAutoUpdate: Bool?, updateInterval: Int) -> String {
+    /// updateInterval 为 nil（Go omitempty 缺省键：off 档写 0/新订阅恒 0，c2 审查
+    /// P1）或已归一的 86400 落默认 24。
+    static func intervalMode(allowAutoUpdate: Bool?, updateInterval: Int?) -> String {
         if allowAutoUpdate == false { return "off" }
-        switch updateInterval / 3600 {
+        switch (updateInterval ?? 86_400) / 3600 {
         case 1: return "1"
         case 12: return "12"
         default: return defaultIntervalMode
@@ -94,6 +95,8 @@ final class SettingsModel: ObservableObject {
     var available: Bool { bridge != nil }
     /// 主数据（settings get --json）读取失败标记（区分"加载中"与失败态）
     @Published private(set) var loadFailed = false
+    /// 测试钩子：置 busy 模拟在途（busy 防抖断言；生产路径写 performWrite 内部置位）
+    func testHooksSetBusy(_ value: Bool) { busy = value }
 
     init(bridge: CoreBridge?) {
         self.bridge = bridge
@@ -103,6 +106,7 @@ final class SettingsModel: ObservableObject {
     /// 次级数据（自启态/间隔档/内核版本）失败落默认展示不阻塞窗口（口径见各分支注释）。
     func load() async {
         guard let bridge else { return }
+        guard !busy else { return } // 45s 写在途：过时权威读不得覆盖乐观回显（审查 P3-3）
         loadFailed = false
         do {
             settings = try await bridge.settingsGetJSON()
@@ -132,6 +136,13 @@ final class SettingsModel: ObservableObject {
         let current = field.currentValue(in: settings)
         guard case .write(let value) = GeneralPaneLogic.classifyNumberEntry(
             raw, current: current, validRange: field.validRange) else {
+            return false
+        }
+        // 跨字段互斥壳侧预检（审查 P3-1）：mixed_port==gateway_port 被 Go Validate
+        // 拒绝但 stderr 不回显——前置拦截给出有因由的 toast
+        let other: Int? = field == .mixedPort ? settings.gatewayPort : (field == .gatewayPort ? settings.mixedPort : nil)
+        if let other, value == other {
+            showToast("保存失败：混合端口与面板网关端口不能相同")
             return false
         }
         let old = current
@@ -208,6 +219,10 @@ final class SettingsModel: ObservableObject {
         do {
             try await mutation()
             showToast(success)
+        } catch CoreBridgeError.timedOut {
+            // 超时=可能已部分生效（settings.yaml 先于 reload 落盘，审查 P2）：
+            // 不回退乐观回显（UI 与磁盘可能相反），提示重开确认权威态
+            showToast("保存超时：可能已部分生效，请重开设置窗口确认")
         } catch {
             onRevert?() // 失败 toast 不改本地（§11.2-10）——乐观回显显式回退
             showToast(failure)

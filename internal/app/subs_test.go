@@ -313,7 +313,7 @@ func TestListJSONDecodable(t *testing.T) {
 	// 字段契约：current 标记 / uid / name / type / updated / extra / allow_auto_update / update_interval
 	off := false
 	idx := store.Index{Current: "r1", Items: []store.ProfileItem{
-		{UID: "r1", Type: store.ProfileTypeRemote, Name: "机场", Updated: 1763400000,
+		{UID: "r1", Type: store.ProfileTypeRemote, Name: "机场", URL: "https://sub.example.com/api", Updated: 1763400000,
 			AllowAutoUpdate: &off, UpdateInterval: 43200,
 			Extra: store.ExtraInfo{Upload: 1024, Download: 2048, Total: 10240, Expire: 1767225600}},
 		{UID: "f2", Type: store.ProfileTypeFile, Name: "本地"},
@@ -331,6 +331,13 @@ func TestListJSONDecodable(t *testing.T) {
 	}
 	if got[0].UID != "r1" || got[0].Name != "机场" || got[0].Type != "remote" || got[0].Updated != 1763400000 {
 		t.Fatalf("item0 fields = %+v", got[0])
+	}
+	// c3 订阅卡 host 展示的数据源：remote 带 url 键、file 型 omitempty 缺键
+	if got[0].URL != "https://sub.example.com/api" {
+		t.Fatalf("item0 url = %q", got[0].URL)
+	}
+	if !strings.Contains(line, `"url":"https://sub.example.com/api"`) || strings.Contains(line, `"url":""`) {
+		t.Fatalf("list --json url key wrong: %s", line)
 	}
 	if got[0].Extra.Total != 10240 || got[0].Extra.Expire != 1767225600 {
 		t.Fatalf("item0 extra = %+v", got[0].Extra)

@@ -25,9 +25,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 面板状态与 WS 速率（壳的数据中枢；菜单栏图标与 popover 速率卡同源于此）
     private lazy var model: PanelModel = .live()
     /// 设置窗口懒创建单例（M3 批② c2 §11.2-2）：关闭=orderOut 保活，复开零重建。
-    /// WHY 自持独立桥：PanelModel.bridge 私有，设置页读写链路自成一体（c3/c4 复用）。
+    /// WHY 自持独立桥：PanelModel.bridge 私有，设置页读写链路自成一体；
+    /// c3 订阅页与通用页共用同一条桥（同一 CLI 路径解析，无状态）。
+    private lazy var settingsBridge = try? CoreBridge.live()
     private lazy var settingsWindow = SettingsWindowController(
-        model: SettingsModel(bridge: try? CoreBridge.live()))
+        model: SettingsModel(bridge: settingsBridge),
+        subsModel: SubsModel(bridge: settingsBridge))
     private var cancellables = Set<AnyCancellable>()
     /// 周期刷新（M2-plan §8：壳每次操作前探测；v0.4.6 起随 popover 开合变频）
     private var refreshTimer: Timer?

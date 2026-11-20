@@ -48,7 +48,10 @@ struct AutostartStatus: Codable, Equatable {
 struct ProfileIntervalEntry: Codable, Equatable {
     let current: Bool
     let allowAutoUpdate: Bool?
-    let updateInterval: Int
+    /// WHY 可选（c2 审查 P1）：Go ProfileJSON 的 update_interval 带 omitempty——
+    /// off 档写 0、新订阅恒 0，两种真实输出该键**缺省**而非为零值；非可选解码
+    /// keyNotFound → try? 吞掉 → off 档回读静默显示"每 24h"（与真实状态相反）
+    let updateInterval: Int?
 
     enum CodingKeys: String, CodingKey {
         case current
@@ -63,8 +66,8 @@ struct ProfileIntervalEntry: Codable, Equatable {
 }
 
 /// 单行 JSON 解码统一入口（StatusReport.decode 的去重形态；标签仅入错误文案，
-/// 不含任何本机路径/token）。
-private func decodeJSON<T: Decodable>(_ type: T.Type, line: String, label: String) throws -> T {
+/// 不含任何本机路径/token）。c3 起 SubsModel 的订阅卡解码共用本入口。
+func decodeJSON<T: Decodable>(_ type: T.Type, line: String, label: String) throws -> T {
     guard let data = line.data(using: .utf8) else {
         throw CoreBridgeError.decode("\(label): output is not UTF-8")
     }

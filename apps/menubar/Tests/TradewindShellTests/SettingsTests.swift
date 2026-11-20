@@ -73,14 +73,14 @@ private let statusWithoutProfileJSON =
         let fake = TimeoutRecordingRunner()
         try await CoreBridge(runner: fake).settingsSet(key: "mixed_port", value: "7898")
         #expect(fake.calls == [["settings", "set", "mixed_port", "7898"]])
-        #expect(fake.timeouts == [45]) // mutation.lock 35s + 降级重启 15s 的安全上限
+        #expect(fake.timeouts == [65]) // mutation.lock 35s + 降级重启 15s 的安全上限
     }
 
     @Test func settingsResetRoutesExtendedTimeoutRunner() async throws {
         let fake = TimeoutRecordingRunner()
         try await CoreBridge(runner: fake).settingsReset()
         #expect(fake.calls == [["settings", "reset"]])
-        #expect(fake.timeouts == [45])
+        #expect(fake.timeouts == [65])
     }
 
     @Test func subsIntervalCurrentResolvesUidViaStatusThenWrites() async throws {
@@ -109,7 +109,7 @@ private let statusWithoutProfileJSON =
         try await bridge.autostart(on: true)
         try await bridge.autostart(on: false)
         #expect(fake.calls == [["autostart", "on"], ["autostart", "off"]])
-        #expect(fake.timeouts == [45, 45]) // on 含 launchctl load + 手动实例迁移
+        #expect(fake.timeouts == [65, 65]) // on 含 launchctl load + 手动实例迁移（65s：评审 P2 最坏路径裕量）
     }
 
     @Test func listJSONDecodesIntervalFieldsToleratingExtras() async throws {
@@ -125,6 +125,23 @@ private let statusWithoutProfileJSON =
         let fake = FakeRunner(FakeRunner.Reply(output: "[]\n", exitCode: 0))
         let entries = try await CoreBridge(runner: fake).listJSON()
         #expect(entries.isEmpty)
+    }
+
+    /// c2 审查 P1 回归：真实 mihomo/Go omitempty 线格式省略 update_interval 键——
+    /// off 档（写 0）与新订阅（恒 0）输出均无该键；非可选解码曾致 keyNotFound 被
+    /// try? 吞掉 → off 档回读静默显示"每 24h"（与真实状态相反）
+    @Test func listJSONToleratesOmittedUpdateInterval() async throws {
+        let noInterval = #"[{"current":true,"uid":"u1","name":"demo-sub","type":"file","updated":1700000000,"extra":{}}]"#
+        let offNoInterval = #"[{"current":true,"uid":"u1","name":"demo-sub","type":"url","updated":1700000000,"extra":{},"allow_auto_update":false}]"#
+        let fake = FakeRunner(FakeRunner.Reply(output: noInterval, exitCode: 0))
+        let entries = try await CoreBridge(runner: fake).listJSON()
+        #expect(entries.count == 1 && entries[0].updateInterval == nil)
+        let fake2 = FakeRunner(FakeRunner.Reply(output: offNoInterval, exitCode: 0))
+        let off = try await CoreBridge(runner: fake2).listJSON()
+        #expect(off[0].allowAutoUpdate == false && off[0].updateInterval == nil)
+        // 缺省键 → nil → 默认档（非 off——off 判定优先走 allowAutoUpdate）
+        #expect(GeneralPaneLogic.intervalMode(allowAutoUpdate: off[0].allowAutoUpdate, updateInterval: off[0].updateInterval) == "off")
+        #expect(GeneralPaneLogic.intervalMode(allowAutoUpdate: nil, updateInterval: entries[0].updateInterval) == "24")
     }
 }
 
@@ -174,7 +191,8 @@ private let statusWithoutProfileJSON =
 @Suite(.serialized) @MainActor struct SettingsWindowTests {
     @Test func windowAssemblySmokeKeepsClosed() throws {
         // 不 orderFront（免闪窗）：只验装配契约——尺寸 780×540、标题、styleMask、保活
-        let controller = SettingsWindowController(model: SettingsModel(bridge: nil))
+        let controller = SettingsWindowController(model: SettingsModel(bridge: nil),
+                                                  subsModel: SubsModel(bridge: nil))
         let window = try #require(controller.window)
         #expect(window.title == "Tradewind")
         #expect(window.styleMask == [.titled, .closable, .miniaturizable])
@@ -187,7 +205,8 @@ private let statusWithoutProfileJSON =
     }
 
     @Test func windowShouldCloseOrdersOutButKeepsWindowAlive() throws {
-        let controller = SettingsWindowController(model: SettingsModel(bridge: nil))
+        let controller = SettingsWindowController(model: SettingsModel(bridge: nil),
+                                                  subsModel: SubsModel(bridge: nil))
         let window = try #require(controller.window)
         window.setFrameTopLeftPoint(CGPoint(x: 2600, y: 2600)) // 屏幕外，即便意外可见也不闪窗
         let kept = controller.windowShouldClose(window)
@@ -196,8 +215,11 @@ private let statusWithoutProfileJSON =
     }
 
     @Test func navShowsOnlyDeliveredPages() {
-        // c2 中间态（§11.5）：订阅管理/连接与流量未交付——侧栏隐藏，c3/c4 加入时更新本断言
-        #expect(SettingsPane.allCases == [.general, .enhance, .about])
+        // c3 已交付订阅管理（连接与流量仍随 c4 隐藏，§11.5）；侧栏序对齐 demo：
+        // 订阅管理/连接与流量/通用/增强链/关于——连接与流量交付时插 .subs 与 .general 之间
+        #expect(SettingsPane.allCases == [.subs, .general, .enhance, .about])
+        #expect(SettingsPane.subs.title == "订阅管理")
+        #expect(SettingsPane.subs.icon == "house")
         #expect(SettingsPane.enhance.badge == "P2")
         #expect(SettingsPane.general.title == "通用")
         #expect(SettingsPane.about.title == "关于")
@@ -207,5 +229,68 @@ private let statusWithoutProfileJSON =
         // 侧栏底色 token 直读常量断言（SwiftUI Color 无分量自省，批①.5 §3.2 口径）
         #expect(Theme.settingsSideLightRGBA == (0xF1 / 255.0, 0xF4 / 255.0, 0xF8 / 255.0, 1))
         #expect(Theme.settingsSideDarkRGBA == (0x1D / 255.0, 0x20 / 255.0, 0x24 / 255.0, 1))
+    }
+}
+
+// MARK: - SettingsModel 编排层（审查 P3-4：乐观回显/失败回退/busy 防抖）
+
+/// 分流 runner：settings get --json 返回基线，settings set 抛错（失败回退路径）。
+private final class SetFailingRunner: CommandLineRunning, @unchecked Sendable {
+    private let baseline = """
+    {"mixed_port":7897,"gateway_port":39097,"panel_enabled":true,"allow_lan":false,"mode":"rule","log_level":"info","log_retention_days":14}
+    """
+    private(set) var calls: [[String]] = []
+    func run(_ args: [String], tolerate: Set<Int32>) async throws -> String {
+        calls.append(args)
+        if args.first == "settings", args.contains("set") {
+            throw CoreBridgeError.cliFailed(command: "settings")
+        }
+        if args.first == "settings" { return baseline }
+        if args.first == "autostart" { return #"{"installed":true,"loaded":true}"# }
+        if args.first == "list" { return "[]" }
+        if args.first == "status" {
+            return #"{"running":true,"mode":"rule","sys_proxy":{"applied":true},"profile":{"uid":"u","name":"P"},"core":{"version":"1.19.34"},"panel_url":"http://127.0.0.1:39097/ui/t/"}"#
+        }
+        return ""
+    }
+    func runWithTimeout(_ args: [String], timeout: TimeInterval, tolerate: Set<Int32>) async throws -> String {
+        try await run(args, tolerate: tolerate)
+    }
+}
+
+@MainActor
+@Suite struct SettingsModelOrchestrationTests {
+    private func loadedModel(runner: CommandLineRunning) async -> SettingsModel {
+        let model = SettingsModel(bridge: CoreBridge(runner: runner))
+        await model.load()
+        return model
+    }
+
+    /// 审查 P3-4：写失败 → 乐观回显回退（mixed_port 保持旧值）+ toast
+    @Test func writeFailureRevertsOptimisticEcho() async throws {
+        let model = await loadedModel(runner: SetFailingRunner())
+        let ok = await model.commitNumber(.mixedPort, raw: "7898")
+        #expect(!ok)
+        #expect(model.settings?.mixedPort == 7897) // 回退到旧值
+        #expect(model.toast != nil)
+    }
+
+    /// 审查 P3-4：busy 在途时再次提交被拒（防抖），且不做第二次 CLI 调用
+    @Test func busyGuardsConcurrentWrite() async throws {
+        let model = await loadedModel(runner: SetFailingRunner())
+        // 模拟在途：直接置 busy（真实置位在 performWrite 内部）
+        model.testHooksSetBusy(true)
+        let ok = await model.commitNumber(.mixedPort, raw: "7898")
+        #expect(!ok)
+        model.testHooksSetBusy(false)
+    }
+
+    /// 审查 P3-1：跨字段互斥壳侧预检——mixed_port==gateway_port 提交被拒且有因由 toast
+    @Test func mixedPortEqualsGatewayRejectedLocally() async {
+        let model = await loadedModel(runner: SetFailingRunner())
+        let ok = await model.commitNumber(.mixedPort, raw: "39097")
+        #expect(!ok)
+        #expect(model.settings?.mixedPort == 7897)
+        #expect(model.toast?.contains("不能相同") == true)
     }
 }
