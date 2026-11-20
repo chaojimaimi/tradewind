@@ -66,10 +66,16 @@ struct GeneralPane: View {
     /// 壳偏好（增强 #1，M3-plan §11.7）：@AppStorage 直写 UserDefaults 即时生效，
     /// App 层 KVO 察觉后刷新/清空菜单栏速率 title——不走 SettingsModel/CLI 写链路
     @AppStorage(ShellPrefs.menubarRateKey) private var menubarRate = false
+    /// 界面主题（§12 c2）：@AppStorage 写 tradewind.shell.appearance，App 层 KVO
+    /// 察觉后 applyAppearance 即时切换 popover/设置窗口 NSAppearance
+    @AppStorage(ShellPrefs.appearanceKey) private var appearanceRaw = ShellPrefs.ShellAppearance.system.rawValue
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             header
+            // 外观小节无条件渲染（§12 c2 评审 P3）：纯壳偏好不依赖 CLI 快照，
+            // CLI 缺失/加载失败仍可切主题
+            appearanceSection
             if !model.available {
                 Text("tradewind CLI 未找到，设置不可用")
                     .font(.system(size: 12))
@@ -200,6 +206,23 @@ struct GeneralPane: View {
     }
 
     // MARK: 壳偏好（M3-plan §11.2-1 双轨制：UserDefaults 直写，不经 SettingsModel/CLI）
+
+    /// 外观小节（§12 c2）：界面主题三档 Picker，即写即生效（App 层 KVO→applyAppearance）。
+    /// 不受 model.busy 影响（壳偏好无 CLI 写编排）。
+    private var appearanceSection: some View {
+        SettingsSection(title: "外观") {
+            SettingsRow(label: "界面主题", subtitle: "跟随系统 / 浅色 / 深色（即时生效）") {
+                Picker("", selection: $appearanceRaw) {
+                    Text("跟随系统").tag(ShellPrefs.ShellAppearance.system.rawValue)
+                    Text("浅色").tag(ShellPrefs.ShellAppearance.light.rawValue)
+                    Text("深色").tag(ShellPrefs.ShellAppearance.dark.rawValue)
+                }
+                .pickerStyle(.menu)
+                .frame(width: 116)
+                .accessibilityLabel("界面主题")
+            }
+        }
+    }
 
     /// 增强 #1/#2（M3-plan §11.7，demo 均无此字段）：菜单栏速率 opt-in 开关 +
     /// 启停快捷键只读展示。两行不受 model.busy 影响（壳偏好无 CLI 写编排）。

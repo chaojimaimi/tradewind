@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 @testable import TradewindKit
@@ -82,5 +83,31 @@ import Testing
     @Test func shellPrefsKeysFollowShellConvention() {
         #expect(ShellPrefs.hotkeyEnabledKey == "tradewind.shell.hotkey_enabled")
         #expect(ShellPrefs.menubarRateKey == "tradewind.shell.menubar_rate")
+        #expect(ShellPrefs.appearanceKey == "tradewind.shell.appearance")
+    }
+
+    /// 界面主题解析（§12 c2）：三合法 raw 原样解析；非法 raw 与未写入均回退 .system
+    /// （跟随系统）。WHY 自建 suite：测试进程 .standard 可能残留偏好键，隔离防串扰
+    /// （同文件 shellPrefsDefaultsAndRoundTrip 先例）。
+    @Test func shellAppearanceParsesLegalValuesAndFallsBackToSystem() {
+        let suite = "test-appearance-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        for raw in ["system", "light", "dark"] {
+            defaults.set(raw, forKey: ShellPrefs.appearanceKey)
+            #expect(ShellPrefs.ShellAppearance.appearance(defaults: defaults).rawValue == raw)
+        }
+        defaults.set("neon", forKey: ShellPrefs.appearanceKey)
+        #expect(ShellPrefs.ShellAppearance.appearance(defaults: defaults) == .system) // 非法 raw 回退
+        defaults.removeObject(forKey: ShellPrefs.appearanceKey)
+        #expect(ShellPrefs.ShellAppearance.appearance(defaults: defaults) == .system) // 未写缺省
+        defaults.removePersistentDomain(forName: suite)
+    }
+
+    /// 界面主题 → NSAppearance 映射（评审 P1-1 AppKit appearance 机制）：system→nil
+    /// （缺省即随系统）、light→aqua、dark→darkAqua（窗口/popover 外观覆盖供 App 层用）
+    @Test func shellAppearanceMapsToNSAppearances() {
+        #expect(ShellPrefs.ShellAppearance.system.nsAppearance == nil)
+        #expect(ShellPrefs.ShellAppearance.light.nsAppearance?.name == .aqua)
+        #expect(ShellPrefs.ShellAppearance.dark.nsAppearance?.name == .darkAqua)
     }
 }

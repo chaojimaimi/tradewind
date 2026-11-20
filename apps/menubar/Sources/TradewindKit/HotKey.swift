@@ -1,3 +1,4 @@
+import AppKit
 import Carbon.HIToolbox
 import Foundation
 
@@ -5,10 +6,12 @@ import Foundation
 
 /// 壳偏好键集中声明：设置窗口 GeneralPane 的 @AppStorage 与 App 层 KVO/读取同源，
 /// 防字面量漂移。值语义：hotkey_enabled 缺省 true（开）、menubar_rate 缺省 false
-/// （opt-in，v0.4.5 用户反馈速率文本占宽抖动故默认关闭）。
+/// （opt-in，v0.4.5 用户反馈速率文本占宽抖动故默认关闭）、appearance 缺省 system
+/// （跟随系统，§12 c2）。
 enum ShellPrefs {
     static let hotkeyEnabledKey = "tradewind.shell.hotkey_enabled"
     static let menubarRateKey = "tradewind.shell.menubar_rate"
+    static let appearanceKey = "tradewind.shell.appearance"
 
     /// 快捷键开关：object 为 nil 即未写入 → true（与 bool(forKey:) 的 false 缺省区分）
     static func hotkeyEnabled(defaults: UserDefaults = .standard) -> Bool {
@@ -18,6 +21,25 @@ enum ShellPrefs {
     /// 菜单栏速率开关：opt-in，未写入即 false
     static func menubarRate(defaults: UserDefaults = .standard) -> Bool {
         defaults.bool(forKey: menubarRateKey)
+    }
+
+    /// 界面主题（评审 P1-1：AppKit appearance 机制而非 preferredColorScheme——
+    /// NSHostingView/NSPopover 宿主下后者有效性随 macOS 版本不一且不改窗口/popover 铬）
+    enum ShellAppearance: String, CaseIterable {
+        case system, light, dark
+
+        /// 跟随系统 → nil（NSAppearance 缺省即随系统）；解析失败/未写 → .system
+        static func appearance(defaults: UserDefaults = .standard) -> ShellAppearance {
+            ShellAppearance(rawValue: defaults.string(forKey: ShellPrefs.appearanceKey) ?? "") ?? .system
+        }
+
+        var nsAppearance: NSAppearance? {
+            switch self {
+            case .system: return nil
+            case .light: return NSAppearance(named: .aqua)
+            case .dark: return NSAppearance(named: .darkAqua)
+            }
+        }
     }
 }
 
