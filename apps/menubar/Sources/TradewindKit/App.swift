@@ -31,6 +31,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 连接页数据中枢（c4 §11.2-3）：独立 WS /connections，与 TrafficStore 的
     /// /traffic 并行无冲突；网关地址经同一条桥的 panelURL 解析。
     private lazy var connectionsStore = ConnectionsStore(bridge: settingsBridge)
+    /// 代理守护 toast 模型（批④ §2.3）：窗口打开期轮询 HijackEvents 变化（settingsBridge
+    /// 同源注入；窗口层 start/stop，壳不做常驻轮询）
+    private lazy var guardModel = GuardModel(bridge: settingsBridge)
+    /// tradewind:// 导入协调器（批④ §2.3）：URL 事件 → 订阅页确认 alert（宿主与落点
+    /// 对齐——handleIncomingURL 先 openSettings 落订阅管理页）。WHY 非 private：
+    /// URLScheme.swift 扩展访问（同模块 internal 即可）。
+    let importCoordinator = ImportCoordinator()
+    /// NSAppleEventManager kAEGetURL 装配注入缝（单测 stub 捕获 (target, selector)，
+    /// 不真注册全局 Apple 事件面；生产默认实现为真装配）。
+    var installGetURLHandler: (_ target: AnyObject, _ selector: Selector) -> Void = { target, selector in
+        NSAppleEventManager.shared().setEventHandler(
+            target,
+            andSelector: selector,
+            forEventClass: AEEventClass(kAEGetURL),
+            andEventID: AEEventID(kInternetEventClass))
+    }
     /// WHY 显式 Optional 懒创建而非 lazy var（§12 c2 评审 P3 定案）：保懒创建语义
     /// 且 applyAppearance 的 KVO 路径可安全触碰——Optional 链在窗口未创建时直接
     /// 短路，不会因切主题误触发整窗构建。
@@ -43,7 +59,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             model: SettingsModel(bridge: settingsBridge),
             subsModel: SubsModel(bridge: settingsBridge),
             traffic: model.traffic,
-            connectionsStore: connectionsStore)
+            connectionsStore: connectionsStore,
+            guardModel: guardModel,
+            importCoordinator: importCoordinator)
     }
     private var cancellables = Set<AnyCancellable>()
     /// 周期刷新（M2-plan §8：壳每次操作前探测；v0.4.6 起随 popover 开合变频）
@@ -64,6 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupStatusItem()
         observeModel()
         observeShellPrefs()
+        installURLSchemeHandler() // tradewind://import（批④ §2.3；注册面在 build.sh plist）
         applyAppearance() // 启动即应用主题偏好（§12 c2；窗口未建时仅 popover 生效）
         installMainMenu() // §12 c3 最小主菜单（.regular 期编辑快捷键依赖）
         rescheduleRefresh() // 初值 30s：启动时 popover 未展开
@@ -154,7 +173,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 打开设置窗口（M3-plan §11.2-2）：**先收 popover** —— outsideClickMonitor 是
     /// 全局监视器不接收本进程事件（popoverDidClose 注释），不收起则 popover 悬挂在
     /// 设置窗口之上；再 key 化窗口并激活应用（accessory 应用惯例）。
-    private func openSettings() {
+    /// WHY 非 private：URLScheme.swift 的 handleIncomingURL 扩展调用（同模块 internal）。
+    func openSettings() {
         if popover.isShown {
             popover.performClose(nil)
         }

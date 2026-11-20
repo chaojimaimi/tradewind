@@ -12,6 +12,18 @@ struct StatusReport: Codable, Equatable {
     struct SysProxy: Codable, Equatable {
         let applied: Bool
         let services: Int
+        /// 会话写入形态（"manual"/"pac"；批④ §2.1 新键，旧 CLI 缺键 → nil）。
+        let form: String?
+        /// 代理守护抢改事件计数（批④ §2.1；nil=旧 CLI 缺键 → 按 0 处理）。
+        let hijackEvents: Int?
+        /// 最近还原时间戳（unix 秒；nil=旧 CLI 缺键）。
+        let lastRestore: Int64?
+
+        enum CodingKeys: String, CodingKey {
+            case applied, services, form
+            case hijackEvents = "hijack_events"
+            case lastRestore = "last_restore"
+        }
     }
 
     struct Profile: Codable, Equatable {

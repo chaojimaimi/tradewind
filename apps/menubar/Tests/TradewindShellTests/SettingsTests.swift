@@ -256,7 +256,9 @@ private let statusWithoutProfileJSON =
         SettingsWindowController(model: SettingsModel(bridge: nil),
                                  subsModel: SubsModel(bridge: nil),
                                  traffic: TrafficStore(defaults: nil),
-                                 connectionsStore: ConnectionsStore(bridge: nil))
+                                 connectionsStore: ConnectionsStore(bridge: nil),
+                                 guardModel: GuardModel(bridge: nil),
+                                 importCoordinator: ImportCoordinator())
     }
 
     @Test func settingsSideTokensMatchDemoComposite() {

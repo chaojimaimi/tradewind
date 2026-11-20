@@ -212,8 +212,10 @@ final class CoreBridge {
     }
 
     /// 系统代理开关（幂等语义由 CLI 保证；networksetup 可达数百 ms，async 化主因之一）。
+    /// WHY 65s write 档（批④终审 P2）：SysProxyOn/Off 已纳 mutation.lock（最坏等锁
+    /// 35s），10s 档会把正常等待误判超时抛"可能已部分生效"。
     func sysProxy(on: Bool) async throws {
-        _ = try await runner.run(["sysproxy", on ? "on" : "off"])
+        _ = try await runner.runWithTimeout(["sysproxy", on ? "on" : "off"], timeout: Self.writeTimeout)
     }
 
     /// 停止内核（优雅管线含系统代理精确还原）。

@@ -65,16 +65,23 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let traffic: TrafficStore
     /// 连接页数据中枢（c4，独立 WS /connections）；生命周期挂 showSettings/orderOut
     private let connectionsStore: ConnectionsStore
+    /// 代理守护 toast 模型（批④ §2.3）：窗口打开期轮询 HijackEvents，关闭即停
+    private let guardModel: GuardModel
+    /// tradewind:// 导入协调器（批④ §2.3）：pendingURL 驱动订阅页确认 alert
+    private let importCoordinator: ImportCoordinator
 
     /// 生产由 App 层注入与 SettingsModel 同源的桥（§11.2-10 架构契约"壳只消费
     /// 机器可读输出"不变）+ 壳级 TrafficStore；单测显式装配（WHY 无默认值：
     /// @MainActor init 的默认参数在非隔离调用点求值，v5 模式下直接编译错误）。
     init(model: SettingsModel, subsModel: SubsModel, traffic: TrafficStore,
-         connectionsStore: ConnectionsStore) {
+         connectionsStore: ConnectionsStore, guardModel: GuardModel,
+         importCoordinator: ImportCoordinator) {
         self.model = model
         self.subsModel = subsModel
         self.traffic = traffic
         self.connectionsStore = connectionsStore
+        self.guardModel = guardModel
+        self.importCoordinator = importCoordinator
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: Self.windowSize),
             styleMask: [.titled, .closable, .miniaturizable],
@@ -89,7 +96,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         // 尺寸，与 780×540 固定非 resizable 窗口冲突（fixed 尺寸应只由 styleMask+初始
         // contentRect 决定；SwiftUI 根视图同帧值双保险）
         window.contentView = NSHostingView(rootView: ShellSettingsView(
-            model: model, subsModel: subsModel, traffic: traffic, connectionsStore: connectionsStore))
+            model: model, subsModel: subsModel, traffic: traffic,
+            connectionsStore: connectionsStore, guardModel: guardModel,
+            importCoordinator: importCoordinator))
         super.init(window: window)
         window.delegate = self
     }
@@ -120,6 +129,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         Task { await model.load() }
         Task { await subsModel.load() } // c3 订阅页数据（list --json）
         Task { await connectionsStore.start() } // c4 连接页 WS（关闭窗口时 stop，§11.2-3）
+        guardModel.startPolling() // 批④守护 toast：窗口打开期轮询，关闭即停（窗口层兜底）
     }
 
     // MARK: 关闭 = orderOut 保活（§11.2-2）
@@ -131,6 +141,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     /// isMiniaturized 残留 true，showSettings 的 deminiaturize 兜底覆盖。
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         connectionsStore.stop()
+        guardModel.stopPolling()
         sender.orderOut(nil)
         NSApp.setActivationPolicy(Self.targetActivationPolicy(windowVisible: false))
         return false
@@ -146,6 +157,10 @@ struct ShellSettingsView: View {
     /// @ObservedObject 观察），壳层不订阅可避免整窗 1Hz 重渲染
     let traffic: TrafficStore
     let connectionsStore: ConnectionsStore
+    /// 代理守护 toast 模型（批④ §2.3；App 注入与窗口层生命周期配对）
+    let guardModel: GuardModel
+    /// tradewind:// 导入协调器（批④ §2.3；App 注入，订阅页据此挂确认 alert）
+    let importCoordinator: ImportCoordinator
     /// 增强链页模型（批③ B2 转正：@StateObject 本页装配，App 层装配面不变）
     @StateObject private var enhanceModel = EnhanceModel.live()
     @State private var selection: SettingsPane = .subs // demo 初态：订阅管理高亮（ui-demo.html side-item.on；审查 P3-6 对齐）
@@ -170,7 +185,7 @@ struct ShellSettingsView: View {
     private var paneContent: some View {
         ScrollView(showsIndicators: true) {
             switch selection {
-            case .subs: SubscriptionsPane(model: subsModel)
+            case .subs: SubscriptionsPane(model: subsModel, importCoordinator: importCoordinator)
             case .conns: ConnectionsPane(store: connectionsStore, traffic: traffic)
             case .general: GeneralPane(model: model)
             case .enhance: EnhancePane(profileName: model.currentProfileName, model: enhanceModel)
@@ -228,7 +243,7 @@ struct ShellSettingsView: View {
     @ViewBuilder
     private var toastLayer: some View {
         // 批③ B2：增强链页 toast 并入窗口层（enhanceModel 由本页装配）
-        if let toast = model.toast ?? subsModel.toast ?? enhanceModel.toast {
+        if let toast = model.toast ?? subsModel.toast ?? enhanceModel.toast ?? guardModel.toast {
             ToastView(text: toast)
         }
     }

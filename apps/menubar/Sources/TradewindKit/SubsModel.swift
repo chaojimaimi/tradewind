@@ -160,16 +160,39 @@ final class SubsModel: ObservableObject {
     /// 返回是否成功（视图据此收起 sheet；URL 空为壳侧前置校验，不落 CLI）。
     @discardableResult
     func add(url: String, name: String) async -> Bool {
+        await add(url: url, name: name, success: "订阅已导入")
+    }
+
+    /// 实现体（成功文案可注入：URL scheme 导入补"可订阅管理页改名"落点提示）。
+    @discardableResult
+    private func add(url: String, name: String, success: String) async -> Bool {
         let trimmedURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedURL.isEmpty else {
             showToast("请输入订阅链接")
             return false
         }
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        return await performWrite(success: "订阅已导入", failure: "订阅导入失败") {
+        return await performWrite(success: success, failure: "订阅导入失败") {
             try await self.bridge?.subsAdd(url: trimmedURL, name: trimmedName)
             await self.reloadList()
         }
+    }
+
+    /// tradewind://import 导入（批④ §2.3 确认后的执行入口）：
+    /// busy 在途 = 拒绝 + toast（performWrite 真实语义为在途拒绝，评审 P3 对齐——
+    /// performWrite 静默 false，此处显式 toast 有因由）；成功 toast 补落点提示；
+    /// CLI 缺失 → 既有降级 toast。
+    @discardableResult
+    func importFromURLScheme(_ url: String) async -> Bool {
+        guard available else {
+            showToast("tradewind CLI 未找到，无法导入订阅")
+            return false
+        }
+        guard !busy else {
+            showToast("有操作在途，请稍后再试")
+            return false
+        }
+        return await add(url: url, name: "", success: "订阅已导入（可订阅管理页改名）")
     }
 
     /// 单订阅更新（卡片 ↻ 更新）。

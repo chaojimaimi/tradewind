@@ -92,6 +92,15 @@ final class FakeRunner: CommandLineRunning, @unchecked Sendable {
         }
     }
 
+    /// 批④终审 P2：sysProxy 升 65s write 档——CLI on/off 纳 mutation.lock（最坏等锁
+    /// 35s），10s 档会把正常等待误判超时抛"可能已部分生效"。
+    @Test func sysProxyRoutesExtendedTimeout() async throws {
+        let fake = TimeoutRecordingRunner()
+        try await CoreBridge(runner: fake).sysProxy(on: true)
+        #expect(fake.calls == [["sysproxy", "on"]])
+        #expect(fake.timeouts == [65])
+    }
+
     @Test func controlPlaneOperationsPassExactArguments() async throws {
         let fake = FakeRunner(
             FakeRunner.Reply(output: "", exitCode: 0),

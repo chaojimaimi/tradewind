@@ -12,6 +12,8 @@ import SwiftUI
 
 struct SubscriptionsPane: View {
     @ObservedObject var model: SubsModel
+    /// tradewind:// 导入协调器（批④ §2.3；App → 窗口层注入，pendingURL 驱动确认 alert）
+    let importCoordinator: ImportCoordinator
     @Environment(\.colorScheme) private var scheme
     @State private var showAddSheet = false
     /// 删除确认目标（nil=无；SwiftUI .alert 的 isPresented 由其派生）
@@ -61,6 +63,34 @@ struct SubscriptionsPane: View {
         } message: {
             Text(deleteMessage)
         }
+        // tradewind://import 确认（批④ §2.3 评审 P1-4，恢复确认）：URL 事件先经
+        // handleIncomingURL openSettings 落本页（宿主 + 导入后落点对齐），再由
+        // pendingURL 挂本 alert。正文仅显示 URL host（token 不显示）；"导入"为
+        // 首按钮 = 默认聚焦（一键成本不变），恶意网页无法绕过确认接管流量路由。
+        .alert("导入订阅？", isPresented: Binding(
+            get: { importCoordinator.pendingURL != nil },
+            set: { if !$0 { importCoordinator.clear() } }
+        )) {
+            Button("导入") {
+                if let url = importCoordinator.pendingURL {
+                    Task { await model.importFromURLScheme(url) }
+                }
+                importCoordinator.clear()
+            }
+            Button("取消", role: .cancel) { importCoordinator.clear() }
+        } message: {
+            Text(importMessage)
+        }
+    }
+
+    /// 确认正文（host-only）：host 缺失（不可解析形态）退通用文案，绝不回显
+    /// URL/token/路径/查询串。
+    private var importMessage: String {
+        let host = importCoordinator.pendingHost
+        if host.isEmpty {
+            return "该订阅链接将被导入并设为当前订阅（配置会立即热重载生效）。"
+        }
+        return "来自 \(host) 的订阅链接将被导入并设为当前订阅（配置会立即热重载生效）。"
     }
 
     // MARK: 头部与按钮行

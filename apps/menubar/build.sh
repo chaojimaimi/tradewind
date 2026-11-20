@@ -62,6 +62,17 @@ cat > "$APP/Contents/Info.plist" <<EOF
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>MIT License</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>tradewind</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>tradewind</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>
 EOF
