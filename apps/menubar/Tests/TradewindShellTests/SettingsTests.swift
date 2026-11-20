@@ -191,8 +191,7 @@ private let statusWithoutProfileJSON =
 @Suite(.serialized) @MainActor struct SettingsWindowTests {
     @Test func windowAssemblySmokeKeepsClosed() throws {
         // 不 orderFront（免闪窗）：只验装配契约——尺寸 780×540、标题、styleMask、保活
-        let controller = SettingsWindowController(model: SettingsModel(bridge: nil),
-                                                  subsModel: SubsModel(bridge: nil))
+        let controller = Self.makeController()
         let window = try #require(controller.window)
         #expect(window.title == "Tradewind")
         #expect(window.styleMask == [.titled, .closable, .miniaturizable])
@@ -205,8 +204,7 @@ private let statusWithoutProfileJSON =
     }
 
     @Test func windowShouldCloseOrdersOutButKeepsWindowAlive() throws {
-        let controller = SettingsWindowController(model: SettingsModel(bridge: nil),
-                                                  subsModel: SubsModel(bridge: nil))
+        let controller = Self.makeController()
         let window = try #require(controller.window)
         window.setFrameTopLeftPoint(CGPoint(x: 2600, y: 2600)) // 屏幕外，即便意外可见也不闪窗
         let kept = controller.windowShouldClose(window)
@@ -214,15 +212,27 @@ private let statusWithoutProfileJSON =
         #expect(controller.window != nil) // 控制器与窗口仍存活（复开零重建）
     }
 
-    @Test func navShowsOnlyDeliveredPages() {
-        // c3 已交付订阅管理（连接与流量仍随 c4 隐藏，§11.5）；侧栏序对齐 demo：
-        // 订阅管理/连接与流量/通用/增强链/关于——连接与流量交付时插 .subs 与 .general 之间
-        #expect(SettingsPane.allCases == [.subs, .general, .enhance, .about])
+    @Test func navShowsAllDeliveredPages() {
+        // c4 已交付连接与流量（§11.5）；侧栏序对齐 demo：
+        // 订阅管理/连接与流量/通用/增强链/关于
+        #expect(SettingsPane.allCases == [.subs, .conns, .general, .enhance, .about])
         #expect(SettingsPane.subs.title == "订阅管理")
         #expect(SettingsPane.subs.icon == "house")
+        #expect(SettingsPane.conns.title == "连接与流量")
+        #expect(SettingsPane.conns.icon == "antenna.radiowaves.left.and.right")
+        #expect(SettingsPane.conns.badge == nil) // 正式功能页，无 P2 徽标
         #expect(SettingsPane.enhance.badge == "P2")
         #expect(SettingsPane.general.title == "通用")
         #expect(SettingsPane.about.title == "关于")
+    }
+
+    /// 装配单测公共入口（降级桥 + 壳级 TrafficStore/ConnectionsStore 显式注入；
+    /// WHY 无默认参数：@MainActor init 默认值在非隔离调用点求值会编译错误）
+    private static func makeController() -> SettingsWindowController {
+        SettingsWindowController(model: SettingsModel(bridge: nil),
+                                 subsModel: SubsModel(bridge: nil),
+                                 traffic: TrafficStore(defaults: nil),
+                                 connectionsStore: ConnectionsStore(bridge: nil))
     }
 
     @Test func settingsSideTokensMatchDemoComposite() {

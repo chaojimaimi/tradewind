@@ -2,10 +2,10 @@ import AppKit
 import SwiftUI
 
 /// 设置窗口页签（M3-plan §11.3 装配；demo side-item 语义：icon+文字+选中态 brand 底）。
-/// 侧栏序对齐 demo（订阅管理/连接与流量/通用/增强链/关于）；连接与流量随 c4
-/// 交付时插入 .subs 与 .general 之间（c2/c3 中间态隐藏，§11.5）。
+/// 侧栏序对齐 demo（订阅管理/连接与流量/通用/增强链/关于），五页随批② c2-c4 全量交付。
 enum SettingsPane: String, CaseIterable, Identifiable, Equatable {
     case subs
+    case conns
     case general
     case enhance
     case about
@@ -15,16 +15,18 @@ enum SettingsPane: String, CaseIterable, Identifiable, Equatable {
     var title: String {
         switch self {
         case .subs: return "订阅管理"
+        case .conns: return "连接与流量"
         case .general: return "通用"
         case .enhance: return "增强链"
         case .about: return "关于"
         }
     }
 
-    /// SF Symbol 近似 demo 内联 SVG（订阅=house 已启用；连接=wave 形 c4 启用时再补）
+    /// SF Symbol 近似 demo 内联 SVG（连接=天线电波，近似 demo 弧+点形态）
     var icon: String {
         switch self {
         case .subs: return "house"
+        case .conns: return "antenna.radiowaves.left.and.right"
         case .general: return "gearshape"
         case .enhance: return "link"
         case .about: return "info.circle"
@@ -50,13 +52,20 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let model: SettingsModel
     private var hasCenteredOnce = false
     private let subsModel: SubsModel
+    /// 速率/今日流量源（壳唯一 TrafficStore 实例由 App 注入，面板 popover 与设置页同源）
+    private let traffic: TrafficStore
+    /// 连接页数据中枢（c4，独立 WS /connections）；生命周期挂 showSettings/orderOut
+    private let connectionsStore: ConnectionsStore
 
     /// 生产由 App 层注入与 SettingsModel 同源的桥（§11.2-10 架构契约"壳只消费
-    /// 机器可读输出"不变）；单测以 SubsModel(bridge: nil) 显式装配（WHY 无默认值：
+    /// 机器可读输出"不变）+ 壳级 TrafficStore；单测显式装配（WHY 无默认值：
     /// @MainActor init 的默认参数在非隔离调用点求值，v5 模式下直接编译错误）。
-    init(model: SettingsModel, subsModel: SubsModel) {
+    init(model: SettingsModel, subsModel: SubsModel, traffic: TrafficStore,
+         connectionsStore: ConnectionsStore) {
         self.model = model
         self.subsModel = subsModel
+        self.traffic = traffic
+        self.connectionsStore = connectionsStore
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: Self.windowSize),
             styleMask: [.titled, .closable, .miniaturizable],
@@ -70,7 +79,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         // WHY NSHostingView 而非 NSHostingController：后者按 fittingSize 级联改写窗口
         // 尺寸，与 780×540 固定非 resizable 窗口冲突（fixed 尺寸应只由 styleMask+初始
         // contentRect 决定；SwiftUI 根视图同帧值双保险）
-        window.contentView = NSHostingView(rootView: ShellSettingsView(model: model, subsModel: subsModel))
+        window.contentView = NSHostingView(rootView: ShellSettingsView(
+            model: model, subsModel: subsModel, traffic: traffic, connectionsStore: connectionsStore))
         super.init(window: window)
         window.delegate = self
     }
@@ -91,12 +101,16 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
         Task { await model.load() }
         Task { await subsModel.load() } // c3 订阅页数据（list --json）
+        Task { await connectionsStore.start() } // c4 连接页 WS（关闭窗口时 stop，§11.2-3）
     }
 
     // MARK: 关闭 = orderOut 保活（§11.2-2）
 
     /// 拦截真正 close：仅 orderOut 隐藏，窗口与控制器保持存活（复开零重建）。
+    /// WHY 先 stop 连接 WS：orderOut 不触发 SwiftUI onDisappear，窗口层兜底断流
+    /// （避免常驻连接开销，M3-plan §11.6 风险条目；start/stop 幂等，双挂无冲突）。
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        connectionsStore.stop()
         sender.orderOut(nil)
         return false
     }
@@ -107,6 +121,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 struct ShellSettingsView: View {
     @ObservedObject var model: SettingsModel
     @ObservedObject var subsModel: SubsModel
+    /// WHY plain let：速率每秒更新只需驱动连接页自身（ConnectionsPane 内
+    /// @ObservedObject 观察），壳层不订阅可避免整窗 1Hz 重渲染
+    let traffic: TrafficStore
+    let connectionsStore: ConnectionsStore
     @State private var selection: SettingsPane = .subs // demo 初态：订阅管理高亮（ui-demo.html side-item.on；审查 P3-6 对齐）
     @Environment(\.colorScheme) private var scheme
 
@@ -130,6 +148,7 @@ struct ShellSettingsView: View {
         ScrollView(showsIndicators: true) {
             switch selection {
             case .subs: SubscriptionsPane(model: subsModel)
+            case .conns: ConnectionsPane(store: connectionsStore, traffic: traffic)
             case .general: GeneralPane(model: model)
             case .enhance: EnhancePane(profileName: model.currentProfileName)
             case .about: AboutPane(model: model)

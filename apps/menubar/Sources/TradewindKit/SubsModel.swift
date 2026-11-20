@@ -64,6 +64,19 @@ enum SubsPaneLogic {
         return percent > trafficWarnPercent
     }
 
+    /// 今日流量卡数值/单位分离（demo :433 `18.2 <small>GB ↓</small>` 排版，
+    /// 审查 P3-4；TB 上限同 trafficBytes）
+    static func todayBytesParts(_ value: Double) -> (valueText: String, unitText: String) {
+        let v = max(value, 0)
+        switch v {
+        case 1e12...: return (String(format: "%.1f", v / 1e12), "TB ↓")
+        case 1e9...: return (String(format: "%.1f", v / 1e9), "GB ↓")
+        case 1e6...: return (String(format: "%.1f", v / 1e6), "MB ↓")
+        case 1e3...: return (String(format: "%.0f", v / 1e3), "KB ↓")
+        default: return (String(format: "%.0f", v), "B ↓")
+        }
+    }
+
     /// 流量字节格式化（demo 单位面 TB/GB/MB/KB/B；RateText.bytes 不含 TB，
     /// 总额动辄数十 TB 会溢出为 GB 长串，故不复用）
     static func trafficBytes(_ value: Int64) -> String {

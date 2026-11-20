@@ -26,11 +26,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var model: PanelModel = .live()
     /// 设置窗口懒创建单例（M3 批② c2 §11.2-2）：关闭=orderOut 保活，复开零重建。
     /// WHY 自持独立桥：PanelModel.bridge 私有，设置页读写链路自成一体；
-    /// c3 订阅页与通用页共用同一条桥（同一 CLI 路径解析，无状态）。
+    /// c3 订阅页/通用页与 c4 连接页共用同一条桥（同一 CLI 路径解析，无状态）。
     private lazy var settingsBridge = try? CoreBridge.live()
+    /// 连接页数据中枢（c4 §11.2-3）：独立 WS /connections，与 TrafficStore 的
+    /// /traffic 并行无冲突；网关地址经同一条桥的 panelURL 解析。
+    private lazy var connectionsStore = ConnectionsStore(bridge: settingsBridge)
     private lazy var settingsWindow = SettingsWindowController(
         model: SettingsModel(bridge: settingsBridge),
-        subsModel: SubsModel(bridge: settingsBridge))
+        subsModel: SubsModel(bridge: settingsBridge),
+        traffic: model.traffic,
+        connectionsStore: connectionsStore)
     private var cancellables = Set<AnyCancellable>()
     /// 周期刷新（M2-plan §8：壳每次操作前探测；v0.4.6 起随 popover 开合变频）
     private var refreshTimer: Timer?
