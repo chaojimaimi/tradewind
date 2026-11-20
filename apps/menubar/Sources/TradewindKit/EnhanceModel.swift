@@ -90,9 +90,11 @@ final class EnhanceModel: ObservableObject {
         await refreshSlots()
     }
 
-    /// 槽是否已启用（enhanceShow 探测的 exists）。
+    /// 槽是否已启用（文件存在且内容非空白——clear 语义=写 0 字节文件，
+    /// 空转态不得显示"已启用"，批③发版冒烟实测修正）。
     func isEnabled(_ slot: EnhanceSlot) -> Bool {
-        slots[slot]?.exists ?? false
+        guard let entry = slots[slot], entry.exists else { return false }
+        return !entry.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     /// sheet 预填原文（未探测过=空串）。

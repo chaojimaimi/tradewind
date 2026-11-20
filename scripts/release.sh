@@ -103,11 +103,11 @@ if [ "$UPLOAD" -eq 1 ]; then
       --repo chaojimaimi/tradewind \
       --prerelease \
       --title "Tradewind $VERSION" \
-      --notes "Pre-release $VERSION。
+      --notes "Pre-release ${VERSION}。
 
 资产：
-  tradewind-$VERSION-darwin-arm64.tar.gz（整包：CLI + Tradewind.app + bin/mihomo + ui/ + NOTICE）
-  $TARBALL_NAME.sha256（sha256 sidecar；self-update 消费）
+  tradewind-${VERSION}-darwin-arm64.tar.gz（整包：CLI + Tradewind.app + bin/mihomo + ui/ + NOTICE）
+  ${TARBALL_NAME}.sha256（sha256 sidecar；self-update 消费）
 
 升级：\`tradewind version --check\` → \`tradewind self-update\`（CLI）；\`self-update --core\` 升级内核（失败自动回滚）。"
   fi

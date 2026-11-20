@@ -14,6 +14,9 @@ import Testing
     private let showGlobal = """
     {"slot":"global-merge","uid":"","exists":true,"content":"rules-prepend:\\n  - DOMAIN-SUFFIX,pre.example,DIRECT\\n"}
     """
+    private let showClearedResidue = """
+    {"slot":"rules","uid":"old01","exists":true,"content":""}
+    """
     private let setOK = #"{"ok":true}"#
     private let setError = #"{"error":"enhance 语义校验未通过（mihomo -t），槽已回滚: yaml error at line 9"}"#
     private let clearOK = #"{"ok":true}"#
@@ -76,6 +79,15 @@ import Testing
         #expect(!model.isEnabled(.proxies))
         #expect(model.content(of: .globalMerge).contains("rules-prepend"))
         #expect(fake.calls.count == 4)
+    }
+
+    @Test func clearedResidueFileIsNotEnabled() async {
+        // clear 语义=写 0 字节文件（batch3 §3.1）：exists=true 但内容空白属空转态，
+        // 徽标不得"已启用"（批③发版冒烟实测修正）
+        let fake = FakeRunner(FakeRunner.Reply(output: showClearedResidue, exitCode: 0))
+        let model = EnhanceModel(bridge: CoreBridge(runner: fake))
+        await model.load()
+        #expect(!model.isEnabled(.rules))
     }
 
     @Test func loadSkippedWhileBusy() async {
