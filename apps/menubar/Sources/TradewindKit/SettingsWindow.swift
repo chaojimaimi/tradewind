@@ -33,9 +33,9 @@ enum SettingsPane: String, CaseIterable, Identifiable, Equatable {
         }
     }
 
-    /// 增强链为 P2 占位页（demo 侧栏同款徽标）
+    /// 侧栏徽标（批③ B2 转正后增强链不再是占位页——P2 徽标退役）
     var badge: String? {
-        self == .enhance ? "P2" : nil
+        nil
     }
 }
 
@@ -146,6 +146,8 @@ struct ShellSettingsView: View {
     /// @ObservedObject 观察），壳层不订阅可避免整窗 1Hz 重渲染
     let traffic: TrafficStore
     let connectionsStore: ConnectionsStore
+    /// 增强链页模型（批③ B2 转正：@StateObject 本页装配，App 层装配面不变）
+    @StateObject private var enhanceModel = EnhanceModel.live()
     @State private var selection: SettingsPane = .subs // demo 初态：订阅管理高亮（ui-demo.html side-item.on；审查 P3-6 对齐）
     @Environment(\.colorScheme) private var scheme
 
@@ -171,7 +173,7 @@ struct ShellSettingsView: View {
             case .subs: SubscriptionsPane(model: subsModel)
             case .conns: ConnectionsPane(store: connectionsStore, traffic: traffic)
             case .general: GeneralPane(model: model)
-            case .enhance: EnhancePane(profileName: model.currentProfileName)
+            case .enhance: EnhancePane(profileName: model.currentProfileName, model: enhanceModel)
             case .about: AboutPane(model: model)
             }
         }
@@ -225,7 +227,8 @@ struct ShellSettingsView: View {
 
     @ViewBuilder
     private var toastLayer: some View {
-        if let toast = model.toast ?? subsModel.toast { // P1：订阅页操作反馈接线（审查 BLOCK）
+        // 批③ B2：增强链页 toast 并入窗口层（enhanceModel 由本页装配）
+        if let toast = model.toast ?? subsModel.toast ?? enhanceModel.toast {
             ToastView(text: toast)
         }
     }

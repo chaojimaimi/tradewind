@@ -228,7 +228,8 @@ private let statusWithoutProfileJSON =
         #expect(SettingsPane.conns.title == "连接与流量")
         #expect(SettingsPane.conns.icon == "antenna.radiowaves.left.and.right")
         #expect(SettingsPane.conns.badge == nil) // 正式功能页，无 P2 徽标
-        #expect(SettingsPane.enhance.badge == "P2")
+        // 批③ B2 转正：增强链四槽做实编辑，占位徽标退役（SettingsPane.badge 全 nil）
+        #expect(SettingsPane.enhance.badge == nil)
         #expect(SettingsPane.general.title == "通用")
         #expect(SettingsPane.about.title == "关于")
     }

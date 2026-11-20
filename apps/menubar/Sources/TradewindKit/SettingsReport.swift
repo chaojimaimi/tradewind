@@ -78,15 +78,21 @@ func decodeJSON<T: Decodable>(_ type: T.Type, line: String, label: String) throw
     }
 }
 
-// MARK: - 壳版本展示（M3-plan §12 c1：关于页版本号修复）
+// MARK: - 壳版本展示（批③ B3 v1.2 P2-3 全形契约：display 返回含 v 展示形态）
 
-/// 壳版本展示清洗（F1a：build.sh 注入 git describe 值含 v 前缀，AboutPane 再手写
-/// "v" 前缀导致 "vv0.5.0-m3b1" 双写）。剥单个前导 "v" 后 AboutPane 统一加 "v"。
+/// 壳版本展示（契约改写）：返回**含 "v" 前缀的全形**——"v0.5.0-m3c1"；
+/// dev 原样返回；已带 v 前缀不动；裸版本号（数字开头）补 v。空串原样
+///（兜底值由调用方决定）。AboutPane 直用、不再手写 "v" 前缀
+///（vdev 缺陷根源=手写插值，v1.2 评审 P2-3）。
 enum ShellVersion {
-    /// 剥单个前导 "v"——仅当 v 后随数字（git describe 注入值）；"dev"/纯哈希原样返回
-    /// （评审 P3：非版本语义的注入值不做假设性改写）
     static func display(_ raw: String) -> String {
-        guard raw.count > 1, raw.first == "v", let d = raw.dropFirst().first, d.isNumber else { return raw }
-        return String(raw.dropFirst())
+        guard !raw.isEmpty, raw != "dev" else { return raw }
+        if let first = raw.first, first == "v" {
+            return raw // 已含前缀：原样（不做双写防御性改写）
+        }
+        guard let first = raw.first, first.isNumber else {
+            return raw // 非版本语义的注入值（纯哈希等）：不做假设性改写
+        }
+        return "v" + raw
     }
 }

@@ -206,6 +206,59 @@ final class StubURLProtocol: URLProtocol {
         #expect(fake.calls.count == before)
     }
 
+    // MARK: 批③ B3 toast 正路径补口（m3b4 备忘）
+
+    /// testLatency 成功路径：URLTest 组带 fixed → delay 成功 + unpin 实际清除
+    /// → toast 文案发出（m3b4 备忘的正路径断言）
+    @Test func testLatencySuccessEmitsAutoResumeToast() async {
+        let pinnedJSON = """
+        {"proxies":{
+          "GLOBAL":{"name":"GLOBAL","type":"Selector","now":"Auto"},
+          "Auto":{"name":"Auto","type":"URLTest","now":"HK-1","all":["HK-1"],"fixed":"HK-1"},
+          "HK-1":{"name":"HK-1","type":"Socks5","history":[{"delay":42}]}
+        }}
+        """
+        let freeJSON = pinnedJSON.replacingOccurrences(
+            of: "\"fixed\":\"HK-1\"", with: "\"fixed\":\"\"")
+        // 网关侧按 /proxies 调用序应答：首拉 pinned（refresh）→ unpin 后 refreshGroups 拉 free
+        //（/traffic 等其余路径不计数——TrafficStore attach 期请求勿污染序号）
+        var proxiesCalls = 0
+        StubURLProtocol.handler = { request in
+            if request.url?.path.hasSuffix("/proxies") == true {
+                proxiesCalls += 1
+                return (200, proxiesCalls == 1 ? pinnedJSON : freeJSON)
+            }
+            return (200, freeJSON)
+        }
+        let fake = FakeRunner([
+            FakeRunner.Reply(output: Self.statusWithPanel, exitCode: 0), // 初始 status
+            FakeRunner.Reply(output: "", exitCode: 0),                   // delay
+            FakeRunner.Reply(output: "", exitCode: 0),                   // unpin
+        ])
+        let model = PanelModel(bridge: CoreBridge(runner: fake), session: StubURLProtocol.install())
+        await model.refresh()
+        await model.testLatency()
+        #expect(model.toast == "已恢复自动切换，内核将在测速周期内选中最低延迟")
+        #expect(fake.calls.contains(["delay", "Auto"]))
+        #expect(fake.calls.contains(["unpin", "Auto"]))
+    }
+
+    /// testLatency 无 fixed（cleared=false 分支）：URLTest 未固定 → 不发 toast
+    ///（Fallback 清固定静默语义的镜像；状态变化经 refreshGroups 徽标呈现）
+    @Test func testLatencyWithoutFixedEmitsNoToast() async {
+        StubURLProtocol.handler = { _ in (200, Self.proxiesJSON) } // 共享 fixture 均无 fixed
+        let fake = FakeRunner([
+            FakeRunner.Reply(output: Self.statusWithPanel, exitCode: 0), // 初始 status
+            FakeRunner.Reply(output: "", exitCode: 0),                   // delay
+        ])
+        let model = PanelModel(bridge: CoreBridge(runner: fake), session: StubURLProtocol.install())
+        await model.refresh()
+        await model.testLatency()
+        #expect(model.toast == nil)
+        #expect(fake.calls.contains(["delay", "Auto"]))
+        #expect(!fake.calls.contains(["unpin", "Auto"])) // cleared=false：无 CLI 调用
+    }
+
     @Test func iconStateFollowsReportSemantics() async {
         StubURLProtocol.handler = { _ in (200, Self.proxiesJSON) }
         let model = makeModel([FakeRunner.Reply(output: Self.statusWithPanel, exitCode: 0)])

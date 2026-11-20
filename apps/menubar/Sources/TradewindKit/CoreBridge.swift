@@ -10,6 +10,9 @@ protocol CommandLineRunning {
     /// 会制造半完成态。默认实现转发常规 run（fake 无进程可杀，超时仅真实执行器
     /// 需要语义；单测以覆写本方法断言注入的超时值）。
     func runWithTimeout(_ args: [String], timeout: TimeInterval, tolerate: Set<Int32>) async throws -> String
+    /// stdin 携带内容变体（批③ c6 enhance set：内容经 stdin 传 CLI，不经 argv）。
+    /// 默认实现转发 runWithTimeout 并丢弃 input（fake 无进程；真实执行器覆写）。
+    func runWithInput(_ args: [String], input: String, timeout: TimeInterval, tolerate: Set<Int32>) async throws -> String
 }
 
 extension CommandLineRunning {
@@ -24,6 +27,15 @@ extension CommandLineRunning {
     /// 协议默认转发：调用方不感知实现差异（真实执行器覆写为有界等待）。
     func runWithTimeout(_ args: [String], timeout: TimeInterval, tolerate: Set<Int32>) async throws -> String {
         try await run(args, tolerate: tolerate)
+    }
+
+    /// stdin 变体默认转发（丢弃 input；真实执行器覆写为管道写入）。
+    func runWithInput(_ args: [String], input: String, timeout: TimeInterval, tolerate: Set<Int32>) async throws -> String {
+        try await runWithTimeout(args, timeout: timeout, tolerate: tolerate)
+    }
+
+    func runWithInput(_ args: [String], input: String, timeout: TimeInterval) async throws -> String {
+        try await runWithInput(args, input: input, timeout: timeout, tolerate: [])
     }
 }
 
@@ -63,8 +75,19 @@ struct CommandLineRunner: CommandLineRunning {
         try await Task.detached { try self.runBlocking(args, tolerate: tolerate, timeout: timeout) }.value
     }
 
+    /// stdin 携带内容变体（批③ c6 enhance set：内容经 stdin 传 CLI，不经 argv——
+    /// ps 可见面为零）。整体卸后台线程，与 run 同款有界等待。
+    func runWithInput(_ args: [String], input: String, timeout: TimeInterval,
+                      tolerate: Set<Int32>) async throws -> String {
+        try await Task.detached {
+            try self.runBlocking(args, tolerate: tolerate, timeout: timeout, stdin: input)
+        }.value
+    }
+
     /// 同步实现体（仅经 detached 任务在后台线程执行，非隔离）。
-    private func runBlocking(_ args: [String], tolerate: Set<Int32>, timeout: TimeInterval) throws -> String {
+    /// stdin 非空时经管道写入（异步派发写侧：大内容不阻塞读侧，防管道缓冲死锁）。
+    private func runBlocking(_ args: [String], tolerate: Set<Int32>, timeout: TimeInterval,
+                             stdin: String? = nil) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = args
@@ -72,10 +95,25 @@ struct CommandLineRunner: CommandLineRunning {
         let stderr = Pipe()
         process.standardOutput = stdout
         process.standardError = stderr
+        var inputHandle: FileHandle?
+        var stdinData: Data?
+        if let stdin, !stdin.isEmpty {
+            let inputPipe = Pipe()
+            process.standardInput = inputPipe
+            stdinData = Data(stdin.utf8)
+            inputHandle = inputPipe.fileHandleForWriting
+        }
         do {
             try process.run()
         } catch {
             throw CoreBridgeError.cliFailed(command: args.first ?? "tradewind")
+        }
+        if let inputHandle, let data = stdinData {
+            // 异步派发写侧：进程读侧未消费时大内容不阻塞主读循环（管道缓冲死锁防御）
+            DispatchQueue.global(qos: .userInitiated).async {
+                inputHandle.write(data)
+                inputHandle.closeFile()
+            }
         }
         let output = readAll(stdout, timeout: timeout)
         let errText = readAll(stderr, timeout: timeout)
@@ -331,5 +369,31 @@ final class CoreBridge {
             ["self-update", "--json"], timeout: Self.updateTimeout)
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
         return try SelfUpdateReport.decode(trimmed).updatedToOrThrow()
+    }
+
+    // MARK: 增强链桥（M3 批③ B2：双轨制 F11——壳一切经 CLI，绝不直接写槽文件）
+
+    /// `enhance show <slot> --json`（读档；恒退出 0 契约，exists=false 是空转态非错误）。
+    func enhanceShow(slot: String) async throws -> EnhanceSlotReport {
+        let output = try await runner.run(["enhance", "show", slot, "--json"])
+        return try EnhanceSlotReport.decode(output.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// `enhance set <slot> --file - --json`（65s 写档；内容经 stdin 传 CLI——
+    /// 绝不经 argv/壳直接写文件，batch3 §3.3）。失败抛 cliMessage（error 字段文案）。
+    func enhanceSet(slot: String, content: String) async throws {
+        let output = try await runner.runWithInput(
+            ["enhance", "set", slot, "--file", "-", "--json"],
+            input: content, timeout: Self.writeTimeout)
+        _ = try EnhanceOKReport.decode(output.trimmingCharacters(in: .whitespacesAndNewlines),
+                                       label: "enhance set")
+    }
+
+    /// `enhance clear <slot> --json`（65s 写档，契约同 set）。
+    func enhanceClear(slot: String) async throws {
+        let output = try await runner.runWithTimeout(
+            ["enhance", "clear", slot, "--json"], timeout: Self.writeTimeout)
+        _ = try EnhanceOKReport.decode(output.trimmingCharacters(in: .whitespacesAndNewlines),
+                                       label: "enhance clear")
     }
 }

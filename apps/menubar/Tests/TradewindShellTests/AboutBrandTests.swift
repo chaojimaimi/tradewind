@@ -16,12 +16,12 @@ import Testing
         #expect(rep.pixelsHigh == 256)
     }
 
-    /// ShellVersion.display 剥单个前导 "v"（F1a "vv0.5.0-m3b1" 双写根因）：
-    /// 版本值剥、dev/纯哈希原样（评审 P3：仅 v 后随数字才剥）
-    @Test func shellVersionDisplayStripsSingleLeadingVOnly() {
-        #expect(ShellVersion.display("v0.5.0-m3b1") == "0.5.0-m3b1")
+    /// ShellVersion.display 全形契约（批③ v1.2 P2-3 改写）：返回含 "v" 展示形态——
+    /// 裸版本号补 v、已带 v 原样、dev 原样、纯哈希原样、空串原样
+    @Test func shellVersionDisplayReturnsFullFormWithV() {
+        #expect(ShellVersion.display("v0.5.0-m3b1") == "v0.5.0-m3b1")
         #expect(ShellVersion.display("dev") == "dev")
         #expect(ShellVersion.display("") == "")
-        #expect(ShellVersion.display("v1.2.3") == "1.2.3")
+        #expect(ShellVersion.display("0.5.0") == "v0.5.0")
     }
 }
