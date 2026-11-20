@@ -23,6 +23,12 @@ enum StatusIconState: Equatable {
 /// 底板 + 亮青渐变标形（取色与方向均来自资产包 assets.py 的 bg/wing 渐变定义），
 /// 与 icns/Dock 图标完全同构。菜单栏项非模板图（自绘烘焙），双色成立。
 enum StatusIcon {
+    /// 画布边长（point）：20（v0.5.0，2026-11-20 用户复测拍板 20pt；v0.4.15 曾 18pt）。
+    /// 菜单栏内容区 ~24pt 上探安全；16/32px 资产插值 1.25x，渐变图形观感可接受
+    /// （=v0.4.15 审查 P3-4 先例）；绿点贴角为既有形态，出界幅度 20pt ≈0.3-0.7pt@2x
+    /// 接受（目验裁量项）。画布/底板内缩/圆角比不变式随边长比例自缩放。
+    static let canvasSide: CGFloat = 20
+
     /// demo 口径：停止 → stopped；运行且（系统代理 或 TUN）→ active；否则 idle。
     static func state(running: Bool, intake: Bool) -> StatusIconState {
         if !running {
@@ -103,16 +109,16 @@ enum StatusIcon {
         state == .stopped ? 0.5 : 1
     }
 
-    /// 18×18 point 品牌徽章 + 右下 6pt 代理绿点的合成状态栏图像。
-    /// WHY v0.4.15（用户反馈"整体略小，调大一个尺寸"）：16pt 是菜单栏图标的保守
-    /// 惯例值，macOS 菜单栏内容区 ~24pt，18pt 上探安全（SF Symbols 默认 17pt 常规）；
-    /// 位图资产 16/32px 插值放大 1.125x（轻微软化，渐变图形观感可接受；审查 P3-4）。
-    /// 纯函数：不读全局状态，双状态可单测。WHY scheme 参数保留但未用：设计资产为
-    /// 固定品牌色（不随系统外观切换，Dock 图标同样恒定）；参数留给未来深浅色变体。
+    /// canvasSide² point 品牌徽章 + 右下 6.5pt 代理绿点的合成状态栏图像。
+    /// WHY v0.5.0（2026-11-20 用户复测拍板 20pt，v0.4.15 曾 18pt）：菜单栏内容区
+    /// ~24pt 上探安全；16/32px 资产插值 1.25x，渐变图形观感可接受（=v0.4.15 审查
+    /// P3-4 先例）。纯函数：不读全局状态，双状态可单测。WHY scheme 参数保留但未用：
+    /// 设计资产为固定品牌色（不随系统外观切换，Dock 图标同样恒定）；参数留给未来
+    /// 深浅色变体。
     static func image(_ state: StatusIconState, scheme: ColorScheme) -> NSImage? {
         guard let glyph = brandImage() else { return nil }
-        // 画布=18×18 point（略大于资产逻辑尺寸 16pt，glyph 插值铺满）；非翻转坐标原点=左下
-        let canvasSize = NSSize(width: 18, height: 18)
+        // 画布=canvasSide² point（大于资产逻辑尺寸 16pt，glyph 插值铺满）；非翻转坐标原点=左下
+        let canvasSize = NSSize(width: canvasSide, height: canvasSide)
         let running = state != .stopped
         let plate = running ? plateGradient : stoppedPlateGradient
         let mark = running ? markGradient : stoppedMarkGradient
@@ -134,11 +140,12 @@ enum StatusIcon {
         }
     }
 
-    /// 右下 6pt 绿点：Theme.ok 填充 + 1pt primary 20% 描边环（深浅底色下与主形柔和解耦）。
+    /// 右下 6.5pt 绿点（20pt 画布下 6→6.5 比例同步，§12 c4）：Theme.ok 填充 +
+    /// 1pt primary 20% 描边环（深浅底色下与主形柔和解耦；描边环 inset -0.5 不变）。
     /// WHY v0.4.7（2026-11-19 用户反馈角标是"绿色小方点"）：NSRect.fill() 填充的是矩形，
     /// 仅描边环用 oval——实心点与圆环形状不一致；改 ovalIn 填充，点环同为圆形。
     private static func drawProxyDot(in canvasSize: NSSize) {
-        let dot = NSRect(x: canvasSize.width - 7, y: 1, width: 6, height: 6)
+        let dot = NSRect(x: canvasSize.width - 7.5, y: 1, width: 6.5, height: 6.5)
         NSColor(Theme.ok).setFill()
         NSBezierPath(ovalIn: dot).fill()
         let ring = NSBezierPath(ovalIn: dot.insetBy(dx: -0.5, dy: -0.5))
