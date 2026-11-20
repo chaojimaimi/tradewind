@@ -175,24 +175,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appItem = NSMenuItem()
         appItem.submenu = appMenu
         mainMenu.addItem(appItem)
-        // Edit 菜单：标准 responder-chain selector（Swift 需 Selector("undo:") 形式——
-        // undo/redo 无 #selector 可用暴露），修复 .regular 期全部输入框编辑快捷键
+        // Edit 菜单：标准 responder-chain selector。WHY NSSelectorFromString 而非
+        // #selector：undo/redo/cut/copy/paste 无 Swift 暴露的 @objc 声明
+        // （NSResponder 无同名成员，#selector 编译失败），Selector 字符串构造又触发
+        // "use #selector" 警告——运行时 selector API 是两条约束下的正规途径。
+        // 修复 .regular 期全部输入框编辑快捷键
         let editMenu = NSMenu(title: "编辑")
-        editMenu.addItem(Self.menuItem("撤销", Selector(("undo:")), "z"))
-        editMenu.addItem(Self.menuItem("重做", Selector(("redo:")), "z", modifiers: [.command, .shift]))
+        editMenu.addItem(Self.menuItem("撤销", NSSelectorFromString("undo:"), "z"))
+        editMenu.addItem(Self.menuItem("重做", NSSelectorFromString("redo:"), "z",
+                                       modifiers: [.command, .shift]))
         editMenu.addItem(NSMenuItem.separator())
-        editMenu.addItem(Self.menuItem("剪切", Selector(("cut:")), "x"))
-        editMenu.addItem(Self.menuItem("拷贝", Selector(("copy:")), "c"))
-        editMenu.addItem(Self.menuItem("粘贴", Selector(("paste:")), "v"))
-        editMenu.addItem(Self.menuItem("全选", Selector(("selectAll:")), "a"))
+        editMenu.addItem(Self.menuItem("剪切", NSSelectorFromString("cut:"), "x"))
+        editMenu.addItem(Self.menuItem("拷贝", NSSelectorFromString("copy:"), "c"))
+        editMenu.addItem(Self.menuItem("粘贴", NSSelectorFromString("paste:"), "v"))
+        editMenu.addItem(Self.menuItem("全选", NSSelectorFromString("selectAll:"), "a"))
         let editItem = NSMenuItem()
         editItem.submenu = editMenu
         mainMenu.addItem(editItem)
         // Window 菜单：设置窗口最小化/关闭快捷键（performMiniaturize:/performClose:
         // 经 responder chain 到 key window）
         let windowMenu = NSMenu(title: "窗口")
-        windowMenu.addItem(Self.menuItem("最小化", Selector(("performMiniaturize:")), "m"))
-        windowMenu.addItem(Self.menuItem("关闭", Selector(("performClose:")), "w"))
+        windowMenu.addItem(Self.menuItem("最小化", NSSelectorFromString("performMiniaturize:"), "m"))
+        windowMenu.addItem(Self.menuItem("关闭", NSSelectorFromString("performClose:"), "w"))
         let windowItem = NSMenuItem()
         windowItem.submenu = windowMenu
         mainMenu.addItem(windowItem)
