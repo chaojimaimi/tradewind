@@ -308,7 +308,7 @@ func TestSelfUpdateAutostartOffDetachedStartBranch(t *testing.T) {
 	}
 }
 
-func TestSelfUpdateCoreNotRunningOnlySwaps(t *testing.T) {
+func TestSelfUpdateMainNotRunningOnlySwaps(t *testing.T) {
 	f := newSelfUpdateFixture(t)
 	env := f.env()
 	tag, err := SelfUpdate(context.Background(), f.home, env)

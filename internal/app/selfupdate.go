@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -19,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/chaojimaimi/tradewind/internal/core"
 	"github.com/chaojimaimi/tradewind/internal/paths"
 	"github.com/chaojimaimi/tradewind/internal/release"
 	"github.com/chaojimaimi/tradewind/internal/store"
@@ -53,6 +53,8 @@ type selfUpdateEnv struct {
 	spawnStart func(exe string) error
 	// runBinaryVersion 执行二进制并返回输出（--core 回读/payload version 探针缝隙）。
 	runBinaryVersion func(binPath string, args ...string) (string, error)
+	// coreVersionProbe 运行中内核 /version 探针（--core 比对与握手专用缝隙）。
+	coreVersionProbe func(paths.Home) (string, bool)
 	// progress 步骤打印（人读模式 stdout / --json 模式 stderr，红线 2）。
 	progress io.Writer
 }
@@ -72,7 +74,19 @@ func ProductionEnv(ctx context.Context, home paths.Home, progress io.Writer) sel
 		kickstart:         kickstartAgentCore,
 		spawnStart:        spawnDetachedCoreStart,
 		runBinaryVersion:  runBinaryVersionOutput,
+		coreVersionProbe:  coreVersionProbeFor(ctx, home),
 		progress:          progress,
+	}
+}
+
+// coreVersionProbeFor 生产 /version 探针（reload.go 同款 sock 客户端，2s 档）。
+func coreVersionProbeFor(ctx context.Context, home paths.Home) func(paths.Home) (string, bool) {
+	return func(h paths.Home) (string, bool) {
+		client := core.NewClient(h.SockFile(), store.ReadSecret(h))
+		cctx, cancel := context.WithTimeout(ctx, reloadProbeTimeout)
+		defer cancel()
+		v, err := client.Version(cctx)
+		return v, err == nil
 	}
 }
 
@@ -177,7 +191,7 @@ func SelfUpdate(ctx context.Context, home paths.Home, env selfUpdateEnv) (string
 		fmt.Fprintln(env.progress, "binary replaced; takes effect on next start（下次启动生效）")
 	} else {
 		// 步 7：拉回内核（kickstart / detached start 分支）
-		if err := bringCoreBack(env, targets); err != nil {
+		if err := bringCoreBack(env, targets[0]); err != nil {
 			return "", err
 		}
 		// 步 8：轮询 /version 就绪（15s）
@@ -298,13 +312,13 @@ func extractAndVerifyPayload(tarball, payload, tag string, env selfUpdateEnv) er
 
 // bringCoreBack 拉回内核（评审 P2-2 分支）：autostartEnabled → kickstart（无 -k）；
 // 手动 start 场景无 agent → detached spawn 新二进制 `tradewind start`（Setpgid 脱管）。
-func bringCoreBack(env selfUpdateEnv, targets []string) error {
+func bringCoreBack(env selfUpdateEnv, exe string) error {
 	if env.autostartOn() {
 		fmt.Fprintln(env.progress, "core restarting via launchctl kickstart...")
 		return env.kickstart()
 	}
-	fmt.Fprintf(env.progress, "core restarting via detached `tradewind start` (%s)...\n", targets[0])
-	return env.spawnStart(targets[0])
+	fmt.Fprintf(env.progress, "core restarting via detached `tradewind start` (%s)...\n", exe)
+	return env.spawnStart(exe)
 }
 
 // downloadAssetToFile 按资产名定位并经 octet-stream 通道下载到 dest（0600 落盘）。
@@ -433,22 +447,12 @@ type selfUpdateOKJSON struct {
 	UpdatedTo string `json:"updated_to"`
 }
 
-// SelfUpdateJSONLine 是 `self-update --json` 的最终输出行（成功
-// {"ok":true,"updated_to":tag} / 失败 {"error":...}；进度/步骤一律 stderr）。
-func SelfUpdateJSONLine(ctx context.Context, home paths.Home) string {
-	return selfUpdateJSONLine(ctx, home, ProductionEnv(ctx, home, os.Stderr))
-}
-
-// selfUpdateJSONLine 是 JSON 行的可注入编排形态（测试以假 env 构造——self-update
-// 是破坏性编排，测试绝不可经 ProductionEnv 触碰真实可执行文件/launchd）。
+// selfUpdateJSONLine 是主体流程 JSON 行的可注入编排形态（测试以假 env 构造——
+// self-update 是破坏性编排，测试绝不可经 ProductionEnv 触碰真实可执行文件/launchd）。
 func selfUpdateJSONLine(ctx context.Context, home paths.Home, env selfUpdateEnv) string {
 	tag, err := SelfUpdate(ctx, home, env)
 	if err != nil {
 		return jsonErrorLine(err)
 	}
-	data, merr := json.Marshal(selfUpdateOKJSON{OK: true, UpdatedTo: tag})
-	if merr != nil {
-		return jsonErrorLine(merr)
-	}
-	return string(data)
+	return marshalSelfUpdateOK(tag)
 }

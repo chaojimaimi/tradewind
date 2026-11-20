@@ -40,7 +40,7 @@ Usage:
   tradewind panel [--url]                             open metacubexd via the panel gateway (--url prints URL only)
   tradewind version                                   show app and core version
   tradewind version --check [--json]                  compare with the latest GitHub release
-  tradewind self-update [--json]                      self-upgrade the CLI from the latest release
+  tradewind self-update [--core] [--json]             self-upgrade the CLI (--core: bundled mihomo, auto-rollback)
 
 Data directory defaults to ~/Library/Application Support/tradewind,
 override with ` + paths.EnvHome + ` (used by tests and smoke).
@@ -205,20 +205,27 @@ func cmdVersion(home paths.Home, args []string) error {
 
 func cmdSelfUpdate(home paths.Home, args []string) error {
 	fs := flag.NewFlagSet("self-update", flag.ContinueOnError)
+	withCore := fs.Bool("core", false, "also upgrade the bundled mihomo core from upstream latest (auto-rollback on failed handshake)")
 	asJSON := fs.Bool("json", false, "machine-readable single-line JSON (about pane self-update source)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return errors.New("usage: tradewind self-update [--json]")
+		return errors.New("usage: tradewind self-update [--core] [--json]")
 	}
 	ctx := context.Background()
 	if *asJSON {
 		// --json 恒退出 0 契约（batch3 红线 2）：结果/错误均为 stdout 单行 JSON，进度走 stderr
-		fmt.Println(app.SelfUpdateJSONLine(ctx, home))
+		fmt.Println(app.SelfUpdateJSONLine(ctx, home, *withCore))
 		return nil
 	}
-	_, err := app.SelfUpdate(ctx, home, app.ProductionEnv(ctx, home, os.Stdout))
+	env := app.ProductionEnv(ctx, home, os.Stdout)
+	var err error
+	if *withCore {
+		_, err = app.SelfUpdateCore(ctx, home, env)
+	} else {
+		_, err = app.SelfUpdate(ctx, home, env)
+	}
 	return err
 }
 
