@@ -69,6 +69,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rescheduleRefresh() // 初值 30s：启动时 popover 未展开
         Task { await model.refresh() }
         if ShellPrefs.hotkeyEnabled() { registerHotKey() } // 缺省 true（§11.2-7）
+        // 静默启动（§13 R1 用户拍板）：缺省开=恒静默现状；关=启动后自动打开设置窗口。
+        // WHY async：推迟到 launch 完成后再建窗/激活，避免 didFinishLaunching 期
+        // .accessory→.regular 策略切换与窗口首建竞态
+        DispatchQueue.main.async { [weak self] in
+            if !ShellPrefs.silentLaunch() { self?.openSettings() }
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -311,6 +317,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 refreshRateTitle()
             case ShellPrefs.appearanceKey:
                 applyAppearance()
+            case ShellPrefs.silentLaunchKey: break // 下次启动生效，运行期无动作
             default:
                 break
             }

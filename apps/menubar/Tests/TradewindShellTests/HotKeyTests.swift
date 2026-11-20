@@ -84,6 +84,7 @@ import Testing
         #expect(ShellPrefs.hotkeyEnabledKey == "tradewind.shell.hotkey_enabled")
         #expect(ShellPrefs.menubarRateKey == "tradewind.shell.menubar_rate")
         #expect(ShellPrefs.appearanceKey == "tradewind.shell.appearance")
+        #expect(ShellPrefs.silentLaunchKey == "tradewind.shell.silent_launch")
     }
 
     /// 界面主题解析（§12 c2）：三合法 raw 原样解析；非法 raw 与未写入均回退 .system
@@ -100,6 +101,21 @@ import Testing
         #expect(ShellPrefs.ShellAppearance.appearance(defaults: defaults) == .system) // 非法 raw 回退
         defaults.removeObject(forKey: ShellPrefs.appearanceKey)
         #expect(ShellPrefs.ShellAppearance.appearance(defaults: defaults) == .system) // 未写缺省
+        defaults.removePersistentDomain(forName: suite)
+    }
+
+    /// 静默启动解析（§13 R1）：未写入 → true（缺省开=恒静默现状）、显式 true/false
+    /// 原样。非法形态不适用：Bool 存储（@AppStorage Bool 写链）无非 Bool 落盘形态，
+    /// 无需 appearance 那样的回退分支。WHY 自建 suite：测试进程 .standard 可能残留
+    /// 偏好键，隔离防串扰（同 shellAppearanceParses 先例）。
+    @Test func silentLaunchDefaultsTrueAndRoundTrips() {
+        let suite = "test-silentlaunch-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        #expect(ShellPrefs.silentLaunch(defaults: defaults)) // 未写 → true 缺省开
+        defaults.set(false, forKey: ShellPrefs.silentLaunchKey)
+        #expect(!ShellPrefs.silentLaunch(defaults: defaults))
+        defaults.set(true, forKey: ShellPrefs.silentLaunchKey)
+        #expect(ShellPrefs.silentLaunch(defaults: defaults))
         defaults.removePersistentDomain(forName: suite)
     }
 

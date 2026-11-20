@@ -71,6 +71,9 @@ struct GeneralPane: View {
     /// 界面主题（§12 c2）：@AppStorage 写 tradewind.shell.appearance，写后 post
     /// 通知，App 层 applyAppearance 即时切换 popover/设置窗口 NSAppearance
     @AppStorage(ShellPrefs.appearanceKey) private var appearanceRaw = ShellPrefs.ShellAppearance.system.rawValue
+    /// 静默启动（§13 R1 用户拍板做实）：@AppStorage 写 tradewind.shell.silent_launch，
+    /// 写后 post 通知（App 层运行期无动作，语义=下次启动生效）
+    @AppStorage(ShellPrefs.silentLaunchKey) private var silentLaunch = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -107,6 +110,10 @@ struct GeneralPane: View {
         .onChange(of: menubarRate) { _ in
             NotificationCenter.default.post(name: ShellPrefs.prefChangedNotification,
                                             object: nil, userInfo: [ShellPrefs.menubarRateKey: true])
+        }
+        .onChange(of: silentLaunch) { _ in
+            NotificationCenter.default.post(name: ShellPrefs.prefChangedNotification,
+                                            object: nil, userInfo: [ShellPrefs.silentLaunchKey: true])
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 20)
@@ -202,13 +209,11 @@ struct GeneralPane: View {
                 .disabled(model.busy)
             }
             rowDivider
-            // 偏差 #2（M3-plan §11.7）：禁用占位——壳 LSUIElement 恒静默，无对应开关语义；
-            // 文案对齐 demo，禁用缘由入 tooltip 不入行副文
-            SettingsRow(label: "静默启动", subtitle: "启动时不弹出任何窗口") {
-                SwitchPill(isOn: .constant(false), small: true,
-                           accessibilityLabel: "静默启动")
-                    .disabled(true)
-                    .help("壳为菜单栏常驻应用（LSUIElement），恒静默启动")
+            // 静默启动（§13 R1 用户拍板做实，废止原禁用占位偏差 #2）：关=启动后
+            // 自动打开设置窗口；行归属 launchSection（仅 settings 快照分支渲染）
+            // 为有意取舍——语义属"启动"分组，M3-plan §13.3 注明
+            SettingsRow(label: "静默启动", subtitle: "关闭后每次启动 Tradewind 自动打开设置窗口") {
+                SwitchPill(isOn: $silentLaunch, small: true, accessibilityLabel: "静默启动")
             }
             rowDivider
             SettingsRow(label: "日志保留", subtitle: "按天数自动清理滚动日志") {

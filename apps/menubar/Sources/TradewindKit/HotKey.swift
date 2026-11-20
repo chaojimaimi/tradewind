@@ -7,11 +7,13 @@ import Foundation
 /// 壳偏好键集中声明：设置窗口 GeneralPane 的 @AppStorage 与 App 层通知/读取同源，
 /// 防字面量漂移。值语义：hotkey_enabled 缺省 true（开）、menubar_rate 缺省 false
 /// （opt-in，v0.4.5 用户反馈速率文本占宽抖动故默认关闭）、appearance 缺省 system
-/// （跟随系统，§12 c2）。热变更经 prefChangedNotification 投递（键含点，KVO 不送达）。
+/// （跟随系统，§12 c2）、silent_launch 缺省 true（恒静默现状，§13 R1）。热变更经
+/// prefChangedNotification 投递（键含点，KVO 不送达）。
 enum ShellPrefs {
     static let hotkeyEnabledKey = "tradewind.shell.hotkey_enabled"
     static let menubarRateKey = "tradewind.shell.menubar_rate"
     static let appearanceKey = "tradewind.shell.appearance"
+    static let silentLaunchKey = "tradewind.shell.silent_launch"
 
     /// 壳偏好变更通知（m3b2 返修：UserDefaults KVO 对含点 key 不送达——取证测试
     /// 曾实锤 "tradewind.shell.*" 被 KVO 解析成嵌套 keyPath 致 observeValue 永不
@@ -22,6 +24,11 @@ enum ShellPrefs {
     /// 快捷键开关：object 为 nil 即未写入 → true（与 bool(forKey:) 的 false 缺省区分）
     static func hotkeyEnabled(defaults: UserDefaults = .standard) -> Bool {
         defaults.object(forKey: hotkeyEnabledKey) == nil ? true : defaults.bool(forKey: hotkeyEnabledKey)
+    }
+
+    /// 静默启动：object 为 nil 即未写入 → true（缺省开=恒静默现状，§13 R1）
+    static func silentLaunch(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: silentLaunchKey) == nil ? true : defaults.bool(forKey: silentLaunchKey)
     }
 
     /// 菜单栏速率开关：opt-in，未写入即 false
