@@ -192,6 +192,10 @@ func coreRollback(ctx context.Context, env selfUpdateEnv, home paths.Home, hasPr
 	if err := bringBack(); err != nil {
 		return fmt.Errorf("app: 回滚后拉回失败: %w; run `tradewind start` manually", err)
 	}
+	// 无 .prev（落位前 bin 缺失的竞态）没有可恢复物，分叉文案防误导（code-reviewer P3-1）
+	if !hasPrev {
+		return fmt.Errorf("app: 无 prev 内核可回滚，新内核 %s 已保留在盘；请手动 start 确认可用", ver)
+	}
 	return fmt.Errorf("app: 已回滚到 %s（新内核握手失败/版本不符）", ver)
 }
 

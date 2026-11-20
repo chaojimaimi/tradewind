@@ -109,9 +109,12 @@ struct CommandLineRunner: CommandLineRunning {
             throw CoreBridgeError.cliFailed(command: args.first ?? "tradewind")
         }
         if let inputHandle, let data = stdinData {
-            // 异步派发写侧：进程读侧未消费时大内容不阻塞主读循环（管道缓冲死锁防御）
+            // 异步派发写侧：进程读侧未消费时大内容不阻塞主读循环（管道缓冲死锁防御）。
+            // WHY try?：非 throwing write(_:) 遇 EPIPE（进程早退已关读侧，典型=
+            // 65s 超时被 terminate）抛 NSFileHandleOperationException，GCD 闭包内
+            // 未捕获 ObjC 异常直接终止 app（code-reviewer P2-3）
             DispatchQueue.global(qos: .userInitiated).async {
-                inputHandle.write(data)
+                try? inputHandle.write(contentsOf: data)
                 inputHandle.closeFile()
             }
         }

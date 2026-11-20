@@ -142,15 +142,16 @@ var runMihomoCheck = func(binPath, configPath, dataDir string) (string, error) {
 }
 
 // verifyEnhanceCandidate 语义校验（评审 P1-2，仅挂 enhance set/clear 编排）：
-// 合成候选字节 → 写候选到数据目录内临时文件（0600，内容含 secret 与节点，
-// 不依赖 TMPDIR 权限假设）→ `mihomo -t`；二进制缺失（裸机/未安装）跳过不阻断
-// （best-effort）。mihomo 输出中的候选路径脱敏为 <candidate>（不泄露内部路径）。
-func verifyEnhanceCandidate(ctx context.Context, home paths.Home, progress io.Writer) error {
+// 合成候选字节（uid=校验目标订阅，code-reviewer P2-2）→ 写候选到数据目录内临时文件
+// （0600，内容含 secret 与节点，不依赖 TMPDIR 权限假设）→ `mihomo -t`；二进制缺失
+// （裸机/未安装）跳过不阻断（best-effort）。mihomo 输出中的候选路径脱敏为
+// <candidate>（不泄露内部路径）。
+func verifyEnhanceCandidate(ctx context.Context, home paths.Home, progress io.Writer, uid string) error {
 	if _, err := os.Stat(home.Bin()); errors.Is(err, os.ErrNotExist) {
 		fmt.Fprintln(progress, "mihomo binary missing; skip semantic validation (best-effort)")
 		return nil
 	}
-	candidate, err := synthesizeCandidate(ctx, home)
+	candidate, err := synthesizeCandidate(ctx, home, uid)
 	if err != nil {
 		return err
 	}
@@ -170,8 +171,10 @@ func verifyEnhanceCandidate(ctx context.Context, home paths.Home, progress io.Wr
 	return nil
 }
 
-// synthesizeCandidate 合成候选字节（当前订阅 + 增强链 + 注入；校验专用，不落 runtime）。
-func synthesizeCandidate(ctx context.Context, home paths.Home) ([]byte, error) {
+// synthesizeCandidate 合成候选字节（uid 订阅 + 该 uid 增强层 + 注入；校验专用，
+// 不落 runtime）。uid 空（global-merge 槽无解析目标）退 current 订阅+仅全局层——
+// 全局层作用于所有订阅，对 current 合成即代表校验其全局效果。
+func synthesizeCandidate(ctx context.Context, home paths.Home, uid string) ([]byte, error) {
 	settings, err := store.LoadSettings(home)
 	if err != nil {
 		return nil, err
@@ -180,14 +183,18 @@ func synthesizeCandidate(ctx context.Context, home paths.Home) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	profileUID := uid
+	if profileUID == "" {
+		profileUID = idx.Current
+	}
 	var sub []byte
-	if item, ok := idx.CurrentItem(); ok {
+	if item, ok := idx.ByUID(profileUID); ok {
 		sub, err = os.ReadFile(home.ProfileFile(item.File))
 		if err != nil {
-			return nil, fmt.Errorf("app: read current profile %s: %w", item.File, err)
+			return nil, fmt.Errorf("app: read profile %s: %w", item.File, err)
 		}
 	}
-	enh, err := loadEnhanceLayers(home, idx.Current)
+	enh, err := loadEnhanceLayers(home, profileUID)
 	if err != nil {
 		return nil, err
 	}
@@ -258,7 +265,7 @@ func EnhanceSet(ctx context.Context, home paths.Home, slot, uid string, content 
 	if err := enhancePrecheck(slot, content); err != nil {
 		return err
 	}
-	path, _, err := enhanceSlotPath(home, slot, uid)
+	path, resolvedUID, err := enhanceSlotPath(home, slot, uid)
 	if err != nil {
 		return err
 	}
@@ -267,7 +274,9 @@ func EnhanceSet(ctx context.Context, home paths.Home, slot, uid string, content 
 		return err
 	}
 	fmt.Fprintf(progress, "enhance %s written (%d bytes); validating with mihomo -t...\n", slot, len(content))
-	if err := verifyEnhanceCandidate(ctx, home, progress); err != nil {
+	// 校验对象=目标 uid 的订阅+增强层（code-reviewer P2-2：--uid 指向非当前订阅时
+	// 验 current 会漏验刚写入的槽，且可能被 current 的坏层误拦回滚）
+	if err := verifyEnhanceCandidate(ctx, home, progress, resolvedUID); err != nil {
 		restoreSlot(path, old, hasOld) // 校验失败：本次编排回滚槽文件旧内容
 		return err
 	}
@@ -282,7 +291,7 @@ func EnhanceClear(ctx context.Context, home paths.Home, slot, uid string, progre
 		return err
 	}
 	defer lock.Release()
-	path, _, err := enhanceSlotPath(home, slot, uid)
+	path, resolvedUID, err := enhanceSlotPath(home, slot, uid)
 	if err != nil {
 		return err
 	}
@@ -291,7 +300,7 @@ func EnhanceClear(ctx context.Context, home paths.Home, slot, uid string, progre
 		return err
 	}
 	fmt.Fprintf(progress, "enhance %s cleared; validating with mihomo -t...\n", slot)
-	if err := verifyEnhanceCandidate(ctx, home, progress); err != nil {
+	if err := verifyEnhanceCandidate(ctx, home, progress, resolvedUID); err != nil {
 		restoreSlot(path, old, hasOld)
 		return err
 	}
@@ -307,7 +316,7 @@ func reloadAfterEnhance(ctx context.Context, home paths.Home, progress io.Writer
 	if err := Synthesize(home, secret); err != nil {
 		return err
 	}
-	if err := ReloadIfRunning(ctx, home); err != nil {
+	if err := ReloadIfRunningW(ctx, home, progress); err != nil {
 		return err
 	}
 	fmt.Fprintf(progress, "enhance %s %s; config reloaded\n", slot, action)

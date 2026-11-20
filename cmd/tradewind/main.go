@@ -353,6 +353,10 @@ func cmdEnhance(home paths.Home, args []string) error {
 		return errors.New("usage: tradewind enhance show <slot> [--uid <uid>] [--json] | " +
 			"enhance set <slot> --file <path|-> [--uid] [--json] | enhance clear <slot> [--json]")
 	}
+	if len(args) < 2 {
+		return errors.New("usage: tradewind enhance show <slot> [--uid <uid>] [--json] | " +
+			"enhance set <slot> --file <path|-> [--uid] [--json] | enhance clear <slot> [--json]")
+	}
 	slot, rest := args[1], args[2:]
 	ctx := context.Background()
 	switch args[0] {

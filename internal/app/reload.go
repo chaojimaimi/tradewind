@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -35,6 +36,14 @@ func CoreReachable(home paths.Home) bool {
 // 热重载失败 → 降级重启：回收内核进程，由 start 进程的崩溃重启逻辑以新配置拉起
 // （M0-plan §7.1 降级路径的最简形态）。
 func ReloadIfRunning(ctx context.Context, home paths.Home) error {
+	return ReloadIfRunningW(ctx, home, os.Stdout)
+}
+
+// ReloadIfRunningW 同 ReloadIfRunning，过程输出走注入 writer。WHY（批③ code-reviewer
+// P1-1）：enhance set/clear --json 的单行 stdout 契约会被打进 reload.go 的既有
+// fmt.Println 破坏（内核运行中 stdout 变两行，壳端解码失败=保存成功却报失败），
+// enhance 编排传 progress（stderr）保持 stdout 纯净；其余调用点维持 stdout 不变。
+func ReloadIfRunningW(ctx context.Context, home paths.Home, progress io.Writer) error {
 	if !CoreReachable(home) {
 		return nil // 未运行：仅落盘
 	}
@@ -50,17 +59,21 @@ func ReloadIfRunning(ctx context.Context, home paths.Home) error {
 	err = client.PutConfigs(reloadCtx, home.RuntimeFile())
 	cancel()
 	if err == nil {
-		fmt.Println("core hot-reloaded")
+		fmt.Fprintln(progress, "core hot-reloaded")
 		return nil
 	}
-	fmt.Printf("hot reload failed (%v); degrading to core restart\n", err)
-	return degradeRestart(home, secret)
+	fmt.Fprintf(progress, "hot reload failed (%v); degrading to core restart\n", err)
+	return degradeRestartW(home, secret, progress)
 }
 
 // degradeRestart SIGTERM 内核并等待新内核就绪。
 // 内核由持锁的 start 进程守护：它监测到退出后会以已更新的 runtime.yaml 重启。
 // 若没有 start 进程（孤儿内核场景），等待会超时并明确报错建议手动 start。
 func degradeRestart(home paths.Home, secret string) error {
+	return degradeRestartW(home, secret, os.Stdout)
+}
+
+func degradeRestartW(home paths.Home, secret string, progress io.Writer) error {
 	st, err := store.LoadState(home)
 	if err != nil {
 		return err
@@ -72,7 +85,7 @@ func degradeRestart(home paths.Home, secret string) error {
 		return fmt.Errorf("app: degrade restart: %w", err)
 	}
 	if waitCoreReady(home, secret, degradeWaitTimeout) {
-		fmt.Println("core restarted with new config")
+		fmt.Fprintln(progress, "core restarted with new config")
 		return nil
 	}
 	return errors.New("app: core did not come back after degrade restart; run `tradewind start`")

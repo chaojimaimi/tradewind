@@ -83,7 +83,13 @@ tar -czf "$TARBALL" -C "$STAGE" .
 HEX="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"
 printf '%s  %s\n' "$HEX" "$TARBALL_NAME" > "$SIDECAR"
 echo "==> sidecar $SIDECAR"
-shasum -a 256 -c <<< "$(cat "$SIDECAR")" > /dev/null
+# 自检不经 shasum -c（其按 CWD 解析内容里的裸文件名，dist/ 以外调用必败——
+# code-reviewer P1-2）：直接复算比对十六进制值
+ACTUAL_HEX="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"
+if [ "$ACTUAL_HEX" != "$HEX" ]; then
+  echo "error: sidecar checksum mismatch (expected $HEX, got $ACTUAL_HEX)" >&2
+  exit 1
+fi
 echo "    sidecar verified ($HEX)"
 
 # --- 4. --upload：查重（已存在只补资产 --clobber）→ create --prerelease ----------

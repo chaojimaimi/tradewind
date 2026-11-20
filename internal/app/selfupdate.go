@@ -242,6 +242,10 @@ func launchdProgramPath(plistPath string) (string, error) {
 		return "", fmt.Errorf("app: read plist %s: %w", plistPath, err)
 	}
 	var parsed struct {
+		// 选择符假设（code-reviewer P3-2）：`dict>array>string` 收编任意深度的
+		// 同构组合——仅对本仓 launchdPlist 自产的"dict 下仅一个 array（ProgramArguments）"
+		// 形态正确；用户手改 plist 若在 ProgramArguments 之前另有字符串数组
+		// （如 WatchPaths）会取错目标。防误换：解析出的路径必须含 "tradewind" 才接受。
 		ProgramArguments []string `xml:"dict>array>string"`
 	}
 	if err := xml.Unmarshal(data, &parsed); err != nil {
@@ -249,6 +253,9 @@ func launchdProgramPath(plistPath string) (string, error) {
 	}
 	if len(parsed.ProgramArguments) == 0 || parsed.ProgramArguments[0] == "" {
 		return "", fmt.Errorf("app: plist %s 无 ProgramArguments[0]，中止不猜", plistPath)
+	}
+	if !strings.Contains(parsed.ProgramArguments[0], "tradewind") {
+		return "", fmt.Errorf("app: plist ProgramArguments[0]=%q 不含 tradewind，疑似取错数组，中止不猜", parsed.ProgramArguments[0])
 	}
 	return parsed.ProgramArguments[0], nil
 }

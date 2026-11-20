@@ -3,6 +3,10 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -86,6 +90,77 @@ func TestEnhanceSetWritesValidatesAndSynthesizes(t *testing.T) {
 		t.Fatalf("runtime missing slot rule: %v", err)
 	}
 	// 内核未运行：ReloadIfRunning 无操作（不报错即语义成立）
+}
+
+// TestEnhanceSetKeepsStdoutPureWithCoreRunning（批③ code-reviewer P1-1）：内核运行中
+// reload.go 既有 stdout 打印不得混入 enhance 编排——全程 progress 承载，os.Stdout
+// 编排期零字节（CLI 层 stdout 仅最终一行 JSON，壳 decodeJSON 才不会假失败）。
+func TestEnhanceSetKeepsStdoutPureWithCoreRunning(t *testing.T) {
+	// WHY 短路径 home（评审折入实测）：macOS unix socket bind 有 104 字符路径上限，
+	// testing.T.TempDir（/var/folders/...）超限 bind: invalid argument——socket 必须
+	// 落在 /tmp 短前缀下
+	base, err := os.MkdirTemp("/tmp", "tw-enhcore-")
+	if err != nil {
+		t.Fatalf("short tmp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(base) })
+	home := paths.Home(filepath.Join(base, "data"))
+	seedTwoProfiles(t, home)
+	if err := store.SaveSettings(home, store.DefaultSettings()); err != nil {
+		t.Fatal(err)
+	}
+	fakeCoreBinary(t, home)
+	withMihomoCheckStub(t, false)
+
+	// 假内核：unix socket 上 /version、/configs 全 200（CoreReachable+PutConfigs 通过）
+	listener, err := net.Listen("unix", home.SockFile())
+	if err != nil {
+		t.Fatalf("listen fake core sock: %v", err)
+	}
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/version":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"version":"v1.19.34"}`))
+		case "/configs":
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	server.Listener = listener
+	server.Start()
+	t.Cleanup(server.Close)
+
+	// 劫持 os.Stdout 捕获编排期泄漏
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	stdoutCh := make(chan string, 1)
+	go func() {
+		data, _ := io.ReadAll(r)
+		stdoutCh <- string(data)
+	}()
+	t.Cleanup(func() {
+		os.Stdout = oldStdout
+		r.Close()
+	})
+
+	var progress strings.Builder
+	content := []byte("- DOMAIN-SUFFIX,example.com,DIRECT\n")
+	if err := EnhanceSet(context.Background(), home, EnhanceSlotRules, "", content, &progress); err != nil {
+		t.Fatalf("EnhanceSet with core running: %v", err)
+	}
+	w.Close() // 关写侧让读 goroutine 收尾（编排已结束，无后续写入）
+	if got := <-stdoutCh; got != "" {
+		t.Fatalf("编排期 stdout 泄漏 %q（--json 契约：stdout 仅 CLI 层最终一行）", got)
+	}
+	if !strings.Contains(progress.String(), "core hot-reloaded") {
+		t.Fatalf("progress 缺少热重载回执: %q", progress.String())
+	}
 }
 
 func TestEnhanceSetSyntaxErrorNotWritten(t *testing.T) {
