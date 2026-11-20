@@ -12,7 +12,7 @@ import Testing
 /// 真机 `list --json` 输出形态采样：双条目——remote 当前订阅（全字段）+ file 型
 /// 本地订阅（omitempty 缺 allow_auto_update/update_interval 键，expire=0 未知）。
 private let subsListFixture =
-    #"[{"current":true,"uid":"b89ed456","name":"TrojanFlare","type":"url","url":"https://sub.trojanflare.one/api/v1/client/subscribe","updated":1763600000,"extra":{"upload":1073741824,"download":5368709120,"total":107374182400,"expire":1798761600},"allow_auto_update":true,"update_interval":43200},"#
+    #"[{"current":true,"uid":"b89ed456","name":"TrojanFlare","type":"remote","url":"https://sub.trojanflare.one/api/v1/client/subscribe","updated":1763600000,"extra":{"upload":1073741824,"download":5368709120,"total":107374182400,"expire":1798761600},"allow_auto_update":true,"update_interval":43200},"#
     + #"{"current":false,"uid":"a1b2c3d4","name":"本地备份","type":"file","updated":1763500000,"extra":{"upload":0,"download":0,"total":0,"expire":0}}]"#
 
 /// 删除/切换后重拉的权威态（单条 file 型订阅，与 fixture 首条 uid 不同可证重拉生效）
@@ -79,7 +79,7 @@ private let subsListAfterMutation =
         #expect(entries.count == 2)
         let current = try #require(entries.first)
         #expect(current == SubsCardEntry(
-            current: true, uid: "b89ed456", name: "TrojanFlare", type: "url",
+            current: true, uid: "b89ed456", name: "TrojanFlare", type: "remote",
             url: "https://sub.trojanflare.one/api/v1/client/subscribe",
             updated: 1763600000,
             extra: SubsExtraTraffic(upload: 1073741824, download: 5368709120,
@@ -91,7 +91,7 @@ private let subsListAfterMutation =
     /// c2 审查 P1 同款回归：off 档/新订阅输出缺 update_interval 键、
     /// allow_auto_update 指针 nil 亦缺键——非可选解码会 keyNotFound 被 try? 吞掉
     @Test func decodeToleratesOmittedOptionalKeys() async throws {
-        let sparse = #"[{"current":false,"uid":"u1","name":"新订阅","type":"url","updated":1700000000,"extra":{"upload":0,"download":0,"total":0,"expire":0}}]"#
+        let sparse = #"[{"current":false,"uid":"u1","name":"新订阅","type":"remote","updated":1700000000,"extra":{"upload":0,"download":0,"total":0,"expire":0}}]"#
         let fake = FakeRunner(FakeRunner.Reply(output: sparse, exitCode: 0))
         let entries = try await CoreBridge(runner: fake).subsListJSON()
         #expect(entries.count == 1)
@@ -213,7 +213,7 @@ private let subsListAfterMutation =
     /// 裸内核态提示（对齐 Go CLI 输出文案，M3-plan §11.2-5）
     @Test func deleteCurrentSendsForceReloadsAndWarnsBareCore() async {
         let entry = SubsCardEntry(
-            current: true, uid: "b89ed456", name: "TrojanFlare", type: "url",
+            current: true, uid: "b89ed456", name: "TrojanFlare", type: "remote",
             url: "https://sub.trojanflare.one/api/v1/client/subscribe", updated: 1,
             extra: SubsExtraTraffic(upload: 0, download: 0, total: 0, expire: 0),
             allowAutoUpdate: nil, updateInterval: nil)
@@ -283,11 +283,11 @@ private let subsListAfterMutation =
         #expect(model.toast == "已重命名为 新名字")
     }
 
-    /// 全部更新仅触 remote（type=url）订阅；file 型无远端可拉跳过；整组一个
+    /// 全部更新仅触 remote（type=remote）订阅；file 型无远端可拉跳过；整组一个
     /// busy 周期结尾统一重拉 + 汇总 toast
     @Test func updateAllTouchesOnlyRemoteEntries() async {
         let (model, fake) = await loadedModel([
-            .init(output: subsListFixture, exitCode: 0), // load（两条：url+file）
+            .init(output: subsListFixture, exitCode: 0), // load（两条：remote+file）
             .init(output: "", exitCode: 0), // update b89ed456
             .init(output: subsListAfterMutation, exitCode: 0), // 重拉
         ])
@@ -296,5 +296,16 @@ private let subsListAfterMutation =
         #expect(writes == [["update", "b89ed456"]]) // file 型 a1b2c3d4 不更新
         #expect(fake.calls.last == ["list", "--json"])
         #expect(model.toast == "全部订阅已更新")
+    }
+
+    /// 全部更新分支②（M3-plan §14 R2）：全 file 型列表无可更新目标——提示且
+    /// 不落任何写调用（分支①由 updateAllTouchesOnlyRemoteEntries 随夹具修正复效）
+    @Test func updateAllWithOnlyFileEntriesShowsToastWithoutWrites() async {
+        let fileOnly =
+            #"[{"current":false,"uid":"a1b2c3d4","name":"本地备份","type":"file","updated":1763500000,"extra":{"upload":0,"download":0,"total":0,"expire":0}}]"#
+        let (model, fake) = await loadedModel([.init(output: fileOnly, exitCode: 0)])
+        await model.updateAll()
+        #expect(fake.calls == [["list", "--json"]]) // 零写调用（无 update、无重拉）
+        #expect(model.toast == "没有可更新的订阅")
     }
 }

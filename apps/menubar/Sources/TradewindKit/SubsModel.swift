@@ -133,8 +133,9 @@ final class SubsModel: ObservableObject {
     private let bridge: CoreBridge?
     var available: Bool { bridge != nil }
 
-    /// remote 订阅的 type 标记（Go ProfileItem.Type：url=远端可拉取，file=本地导入）
-    private static let remoteType = "url"
+    /// remote 订阅的 type 标记（Go ProfileItem.Type：remote=远端可拉取、file=本地导入
+    /// ——store/profiles.go ProfileTypeRemote/ProfileTypeFile；§14 R2 常量漂移修正）
+    private static let remoteType = "remote"
 
     init(bridge: CoreBridge?) {
         self.bridge = bridge
@@ -179,7 +180,7 @@ final class SubsModel: ObservableObject {
         }
     }
 
-    /// 全部更新（↻ 全部更新）：逐个 remote（type=url）订阅 update——file 型订阅
+    /// 全部更新（↻ 全部更新）：逐个 remote（type=remote）订阅 update——file 型订阅
     /// 无远端可拉，跳过。整组一个 busy 周期，结尾统一重拉 + 汇总 toast。
     func updateAll() async {
         guard let bridge else { return }

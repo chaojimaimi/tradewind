@@ -114,7 +114,7 @@ private let statusWithoutProfileJSON =
 
     @Test func listJSONDecodesIntervalFieldsToleratingExtras() async throws {
         // 间隔初值裁剪解码：容忍 extra 字段（uid/name 等 c3 SubsModel 才全量消费）
-        let line = #"[{"uid":"u1","name":"云雾航线 Pro","type":"url","updated":1700000000,"extra":{},"current":true,"allow_auto_update":false,"update_interval":43200}]"#
+        let line = #"[{"uid":"u1","name":"云雾航线 Pro","type":"remote","updated":1700000000,"extra":{},"current":true,"allow_auto_update":false,"update_interval":43200}]"#
         let fake = FakeRunner(FakeRunner.Reply(output: line, exitCode: 0))
         let entries = try await CoreBridge(runner: fake).listJSON()
         #expect(entries == [ProfileIntervalEntry(current: true, allowAutoUpdate: false, updateInterval: 43200)])
@@ -132,7 +132,7 @@ private let statusWithoutProfileJSON =
     /// try? 吞掉 → off 档回读静默显示"每 24h"（与真实状态相反）
     @Test func listJSONToleratesOmittedUpdateInterval() async throws {
         let noInterval = #"[{"current":true,"uid":"u1","name":"demo-sub","type":"file","updated":1700000000,"extra":{}}]"#
-        let offNoInterval = #"[{"current":true,"uid":"u1","name":"demo-sub","type":"url","updated":1700000000,"extra":{},"allow_auto_update":false}]"#
+        let offNoInterval = #"[{"current":true,"uid":"u1","name":"demo-sub","type":"remote","updated":1700000000,"extra":{},"allow_auto_update":false}]"#
         let fake = FakeRunner(FakeRunner.Reply(output: noInterval, exitCode: 0))
         let entries = try await CoreBridge(runner: fake).listJSON()
         #expect(entries.count == 1 && entries[0].updateInterval == nil)
