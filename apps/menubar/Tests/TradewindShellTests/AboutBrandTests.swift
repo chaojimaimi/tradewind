@@ -6,7 +6,8 @@ import Testing
 /// 关于页品牌资产 + 版本号展示（M3-plan §12 c1）。
 @Suite struct AboutBrandTests {
     /// 品牌位图资源可寻址且为 256×256（icns icon_128x128@2x 派生，与 Dock 图标同构；
-    /// AboutPane 以 Image("tradewind-about-icon", bundle: .module) 加载）
+    /// AboutPane 以 Bundle.module.url + NSImage(contentsOf:) 显式加载——m3b2 返修：
+    /// SwiftUI Image(name, bundle:) 不解析散装 PNG）
     @Test func aboutIconAssetLoadsAt256Pixels() throws {
         // WHY 不带 subdirectory：SPM 将资源平铺进 bundle 的 Contents/Resources/ 根
         let url = try #require(Bundle.module.url(forResource: "tradewind-about-icon", withExtension: "png"))

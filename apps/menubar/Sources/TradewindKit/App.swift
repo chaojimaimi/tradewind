@@ -49,7 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 周期刷新（M2-plan §8：壳每次操作前探测；v0.4.6 起随 popover 开合变频）
     private var refreshTimer: Timer?
     /// 全局启停快捷键 ⌥⇧T（M3 批② c5，M3-plan §11.2-7）；nil=未注册
-    /// （hotkey_enabled 关或注册失败），热开关经 UserDefaults KVO 动态装卸
+    /// （hotkey_enabled 关或注册失败），热开关经 prefChangedNotification 动态装卸
     private var hotKey: GlobalHotKey?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -261,7 +261,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 宽度抖动，用户反馈干扰菜单栏。批② c5 起 opt-in（tradewind.shell.menubar_rate，
     /// 通用页开关 @AppStorage 即时生效）：开关开且运行态时 title = RateText.statusItem
     /// （停止态传 nil → nil 文本 → 清空，RateText 既有契约）；关时清空只留图标。
-    /// title 唯一写入点：WS 速率推送 + 图标刷新（运行态翻转即隐藏/显现）+ 偏好 KVO。
+    /// title 唯一写入点：WS 速率推送 + 图标刷新（运行态翻转即隐藏/显现）+ 壳偏好通知。
     private func refreshRateTitle() {
         guard let button = statusItem?.button else { return }
         guard ShellPrefs.menubarRate() else {
@@ -300,7 +300,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 壳偏好热开关观察（GeneralPane 写 @AppStorage 后 post prefChangedNotification，
     /// userInfo 带变更键名）。WHY 通知而非 UserDefaults KVO（m3b2 返修实锤）：
     /// "tradewind.shell.*" 键含点，KVO 解析为嵌套 keyPath 致 observeValue 永不触发
-    /// （AppearanceMechanismTests.kvoDeliversDottedKeyWrites 锁定该机制事实）。
+    /// （该机制事实曾由取证测试证实，测试本体后移除、证据见 commit 133330d）。
     @objc private func shellPrefChanged(_ note: Notification) {
         let changed = (note.userInfo?.keys.compactMap { $0 as? String }) ?? []
         for key in changed {

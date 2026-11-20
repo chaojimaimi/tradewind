@@ -64,8 +64,11 @@ import Testing
         window.contentView = NSHostingView(rootView: SchemeProbeView())
         window.orderFrontRegardless() // 已显示态（对齐真机：改外观时窗口可见）
         defer { window.orderOut(nil) }
-        #expect(window.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .aqua,
-                "前提：测试进程系统外观为浅色（深色系统上本测试无判别力）")
+        // 前提守卫：系统外观为浅色才有判别力（深色系统上守卫早退静默跳过，避免
+        // 无判别力的硬失败——T3 无此前提不受影响）
+        guard window.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .aqua else {
+            return
+        }
         window.appearance = NSAppearance(named: .darkAqua)
         Self.pumpUntilDark()
         #expect(window.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua,

@@ -13,9 +13,9 @@ enum ShellPrefs {
     static let menubarRateKey = "tradewind.shell.menubar_rate"
     static let appearanceKey = "tradewind.shell.appearance"
 
-    /// 壳偏好变更通知（m3b2 返修：UserDefaults KVO 对含点 key 不送达——
-    /// AppearanceMechanismTests.kvoDeliversDottedKeyWrites 实锤，"tradewind.shell.*"
-    /// 被 KVO 解析成嵌套 keyPath 致 observeValue 永不触发）。GeneralPane 写入偏好后
+    /// 壳偏好变更通知（m3b2 返修：UserDefaults KVO 对含点 key 不送达——取证测试
+    /// 曾实锤 "tradewind.shell.*" 被 KVO 解析成嵌套 keyPath 致 observeValue 永不
+    /// 触发，取证本体后移除、证据见 commit 133330d）。GeneralPane 写入偏好后
     /// post 本通知（userInfo 带变更键名→true），App 层据此刷新对应行为。
     static let prefChangedNotification = Notification.Name("tradewind.shell.pref-changed")
 
