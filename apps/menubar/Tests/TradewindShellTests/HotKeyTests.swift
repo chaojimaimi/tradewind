@@ -79,12 +79,15 @@ import Testing
         defaults.removePersistentDomain(forName: suite)
     }
 
-    /// 键名锁点（M3-plan §11.2-1：壳偏好统一 tradewind.shell.* 前缀）
+    /// 键名锁点（M3-plan §11.2-1：壳偏好统一 tradewind.shell.* 前缀；§14 R3 连接表三列）
     @Test func shellPrefsKeysFollowShellConvention() {
         #expect(ShellPrefs.hotkeyEnabledKey == "tradewind.shell.hotkey_enabled")
         #expect(ShellPrefs.menubarRateKey == "tradewind.shell.menubar_rate")
         #expect(ShellPrefs.appearanceKey == "tradewind.shell.appearance")
         #expect(ShellPrefs.silentLaunchKey == "tradewind.shell.silent_launch")
+        #expect(ShellPrefs.connColHostKey == "tradewind.shell.conn_col_host")
+        #expect(ShellPrefs.connColRuleKey == "tradewind.shell.conn_col_rule")
+        #expect(ShellPrefs.connColNodeKey == "tradewind.shell.conn_col_node")
     }
 
     /// 界面主题解析（§12 c2）：三合法 raw 原样解析；非法 raw 与未写入均回退 .system

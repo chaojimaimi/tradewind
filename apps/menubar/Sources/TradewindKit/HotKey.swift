@@ -14,6 +14,12 @@ enum ShellPrefs {
     static let menubarRateKey = "tradewind.shell.menubar_rate"
     static let appearanceKey = "tradewind.shell.appearance"
     static let silentLaunchKey = "tradewind.shell.silent_launch"
+    /// 连接表 host/rule/node 三列文本宽偏好（§14 R3；缺省 150/118/104，
+    /// ConnectionsPane @AppStorage 直接消费）。WHY 不走通知链：键生命周期限于
+    /// 连接页、无 App 层观察者，§12 KVO 陷阱不适用（不走 prefChangedNotification）。
+    static let connColHostKey = "tradewind.shell.conn_col_host"
+    static let connColRuleKey = "tradewind.shell.conn_col_rule"
+    static let connColNodeKey = "tradewind.shell.conn_col_node"
 
     /// 壳偏好变更通知（m3b2 返修：UserDefaults KVO 对含点 key 不送达——取证测试
     /// 曾实锤 "tradewind.shell.*" 被 KVO 解析成嵌套 keyPath 致 observeValue 永不
