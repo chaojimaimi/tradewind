@@ -44,10 +44,19 @@ enum SettingsPane: String, CaseIterable, Identifiable, Equatable {
 /// 不含 resizable/fullScreen；关闭 = orderOut 保活（复开快）。
 /// 打开动作 = makeKeyAndOrderFront + NSApp.activate(ignoringOtherApps:)（accessory
 /// 应用惯例）；收 popover 由 App 层先于本动作执行（§11.2-2，全局监视器不收本进程点击）。
+/// §12 c3：窗口可见期切 .regular（Dock 图标现身——黄钮最小化收 Dock + Cmd+Tab），
+/// 隐藏期回 .accessory；最小主菜单装配归 App 层（评审 P2-2）。
 @MainActor
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     /// 窗口内容尺寸（demo .window 780×540）
     static let windowSize = NSSize(width: 780, height: 540)
+
+    /// 激活策略翻转唯一承载（§12 c3）：窗口可见期 .regular（Dock 图标现身），
+    /// 隐藏期回 .accessory（Dock 图标消失、菜单栏壳如常）。LSUIElement 菜单栏
+    /// 工具的标准做法；状态项/popover 在 .regular 下行为不变。
+    static func targetActivationPolicy(windowVisible: Bool) -> NSApplication.ActivationPolicy {
+        windowVisible ? .regular : .accessory
+    }
 
     private let model: SettingsModel
     private var hasCenteredOnce = false
@@ -89,16 +98,25 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         fatalError("init(coder:) unsupported") // 仅程序化装配，无 nib 反序列化路径
     }
 
-    /// 打开设置窗口并刷新初始值。WHY 不在此收 popover：popover 归 App 层所有，
-    /// 由其 openSettings 先行收起（见 App.swift）。
+    /// 打开设置窗口并刷新初始值（§12 c3 六步序，统一入口——Dock 点击/菜单栏"设置…"
+    /// 两路径共用）。WHY 不在此收 popover：popover 归 App 层所有，由其 openSettings
+    /// 先行收起（见 App.swift）。
     func showSettings() {
         guard let window else { return }
-        if !hasCenteredOnce { // 仅首开居中（审查 P3-4：orderOut 保活复开应保留用户拖动位置）
+        // ① 窗口可见期切 .regular：Dock 图标现身（黄钮最小化可收进 Dock）
+        NSApp.setActivationPolicy(Self.targetActivationPolicy(windowVisible: true))
+        // ② makeKeyAndOrderFront 不还原 miniaturized 窗——Dock 收起后从菜单栏复开、
+        // Dock mini 窗红叉关闭后复开两路径同兜（评审 P1-2）
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        // ③ 仅首开居中（审查 P3-4：orderOut 保活复开应保留用户拖动位置）
+        if !hasCenteredOnce {
             window.center()
             hasCenteredOnce = true
         }
+        // ④ key 化置前 + ⑤ 激活应用
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        // ⑥ 三路数据刷新
         Task { await model.load() }
         Task { await subsModel.load() } // c3 订阅页数据（list --json）
         Task { await connectionsStore.start() } // c4 连接页 WS（关闭窗口时 stop，§11.2-3）
@@ -109,9 +127,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     /// 拦截真正 close：仅 orderOut 隐藏，窗口与控制器保持存活（复开零重建）。
     /// WHY 先 stop 连接 WS：orderOut 不触发 SwiftUI onDisappear，窗口层兜底断流
     /// （避免常驻连接开销，M3-plan §11.6 风险条目；start/stop 幂等，双挂无冲突）。
+    /// §12 c3：隐藏即回 .accessory（Dock 图标消失）——orderOut miniaturized 窗时
+    /// isMiniaturized 残留 true，showSettings 的 deminiaturize 兜底覆盖。
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         connectionsStore.stop()
         sender.orderOut(nil)
+        NSApp.setActivationPolicy(Self.targetActivationPolicy(windowVisible: false))
         return false
     }
 }

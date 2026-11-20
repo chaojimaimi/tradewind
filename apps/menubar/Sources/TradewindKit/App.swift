@@ -31,11 +31,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 连接页数据中枢（c4 §11.2-3）：独立 WS /connections，与 TrafficStore 的
     /// /traffic 并行无冲突；网关地址经同一条桥的 panelURL 解析。
     private lazy var connectionsStore = ConnectionsStore(bridge: settingsBridge)
-    private lazy var settingsWindow = SettingsWindowController(
-        model: SettingsModel(bridge: settingsBridge),
-        subsModel: SubsModel(bridge: settingsBridge),
-        traffic: model.traffic,
-        connectionsStore: connectionsStore)
+    /// WHY 显式 Optional 懒创建而非 lazy var（§12 c2 评审 P3 定案）：保懒创建语义
+    /// 且 applyAppearance 的 KVO 路径可安全触碰——Optional 链在窗口未创建时直接
+    /// 短路，不会因切主题误触发整窗构建。
+    private var settingsWindow: SettingsWindowController?
+
+    /// 按原 lazy 闭包同参构造设置窗口（openSettings 唯一触发点）。
+    private func makeSettingsWindowIfNeeded() {
+        guard settingsWindow == nil else { return }
+        settingsWindow = SettingsWindowController(
+            model: SettingsModel(bridge: settingsBridge),
+            subsModel: SubsModel(bridge: settingsBridge),
+            traffic: model.traffic,
+            connectionsStore: connectionsStore)
+    }
     private var cancellables = Set<AnyCancellable>()
     /// 周期刷新（M2-plan §8：壳每次操作前探测；v0.4.6 起随 popover 开合变频）
     private var refreshTimer: Timer?
@@ -55,6 +64,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupStatusItem()
         observeModel()
         observeShellPrefs()
+        applyAppearance() // 启动即应用主题偏好（§12 c2；窗口未建时仅 popover 生效）
+        installMainMenu() // §12 c3 最小主菜单（.regular 期编辑快捷键依赖）
         rescheduleRefresh() // 初值 30s：启动时 popover 未展开
         Task { await model.refresh() }
         if ShellPrefs.hotkeyEnabled() { registerHotKey() } // 缺省 true（§11.2-7）
@@ -64,13 +75,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         false // 仅状态栏驻留，无窗口
     }
 
+    /// Dock 图标点击 reopen（§12 c3）：设置窗口在 .regular 期收进 Dock 后，点击 Dock
+    /// 图标统一走 openSettings（deminiaturize 已内聚于 showSettings）；返回 false 声明
+    /// 已处理。.accessory 下无 Dock 图标 reopen 不可达；边缘路径触发时退化为开窗，无害。
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openSettings()
+        return false
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         model.traffic.persistNow() // 今日流量落盘（壳内累计的收尾）
     }
 
     deinit {
         // 壳偏好 KVO 解除（observeShellPrefs 注册对；进程退出才 deinit，惯例防御）
-        for key in [ShellPrefs.hotkeyEnabledKey, ShellPrefs.menubarRateKey] {
+        for key in [ShellPrefs.hotkeyEnabledKey, ShellPrefs.menubarRateKey, ShellPrefs.appearanceKey] {
             UserDefaults.standard.removeObserver(self, forKeyPath: key)
         }
     }
@@ -135,7 +154,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if popover.isShown {
             popover.performClose(nil)
         }
-        settingsWindow.showSettings()
+        makeSettingsWindowIfNeeded()
+        settingsWindow?.showSettings()
+    }
+
+    // MARK: 最小主菜单（M3-plan §12 c3，评审 P2-2）
+
+    /// LSUIElement 应用开窗经典缺陷：运行期切 .regular 后若无主菜单，⌘C/⌘V/⌘X/⌘A/
+    /// ⌘Z/⌘M/⌘W 全部失效（键位事件经主菜单匹配后走 responder chain）。启动装配一次；
+    /// .accessory 下主菜单不显示，无副作用。结构最小化：应用（退出壳）+ Edit（标准
+    /// 编辑 selector）+ Window（最小化/关闭）。菜单项不设 target——动作由 responder
+    /// chain 派发到 key window / first responder（Edit 落输入框、Window 落设置窗口）。
+    private func installMainMenu() {
+        let mainMenu = NSMenu()
+        // 应用菜单：首项空 item 惯例（系统以应用名注入首项标题）；⌘Q 退壳不停内核
+        let appMenu = NSMenu()
+        appMenu.addItem(NSMenuItem())
+        appMenu.addItem(NSMenuItem(title: "退出壳（内核继续运行）",
+                                   action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        let appItem = NSMenuItem()
+        appItem.submenu = appMenu
+        mainMenu.addItem(appItem)
+        // Edit 菜单：标准 responder-chain selector（Swift 需 Selector("undo:") 形式——
+        // undo/redo 无 #selector 可用暴露），修复 .regular 期全部输入框编辑快捷键
+        let editMenu = NSMenu(title: "编辑")
+        editMenu.addItem(Self.menuItem("撤销", Selector(("undo:")), "z"))
+        editMenu.addItem(Self.menuItem("重做", Selector(("redo:")), "z", modifiers: [.command, .shift]))
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(Self.menuItem("剪切", Selector(("cut:")), "x"))
+        editMenu.addItem(Self.menuItem("拷贝", Selector(("copy:")), "c"))
+        editMenu.addItem(Self.menuItem("粘贴", Selector(("paste:")), "v"))
+        editMenu.addItem(Self.menuItem("全选", Selector(("selectAll:")), "a"))
+        let editItem = NSMenuItem()
+        editItem.submenu = editMenu
+        mainMenu.addItem(editItem)
+        // Window 菜单：设置窗口最小化/关闭快捷键（performMiniaturize:/performClose:
+        // 经 responder chain 到 key window）
+        let windowMenu = NSMenu(title: "窗口")
+        windowMenu.addItem(Self.menuItem("最小化", Selector(("performMiniaturize:")), "m"))
+        windowMenu.addItem(Self.menuItem("关闭", Selector(("performClose:")), "w"))
+        let windowItem = NSMenuItem()
+        windowItem.submenu = windowMenu
+        mainMenu.addItem(windowItem)
+        NSApp.mainMenu = mainMenu
+    }
+
+    /// 标准 selector 菜单项（默认 ⌘ 键位；无 target 走 responder chain）
+    private static func menuItem(_ title: String, _ action: Selector, _ key: String,
+                                 modifiers: NSEvent.ModifierFlags = .command) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        item.keyEquivalentModifierMask = modifiers
+        return item
+    }
+
+    // MARK: 界面主题（M3-plan §12 c2，评审 P1-1 AppKit appearance 机制）
+
+    /// 主题偏好应用到 popover 与设置窗口：显式 NSAppearance 覆盖含窗口标题栏铬，
+    /// 添加订阅 sheet 宿主随窗口继承；nil=跟随系统（清除覆盖）。
+    /// WHY Optional 链：窗口未创建时直接短路，不因切主题误触发懒创建。
+    /// 菜单栏图标为烘焙品牌色不随主题（v0.4.13 既定）；状态项速率 title 文字色
+    /// 恒随系统外观（预期行为，目验注明）。
+    private func applyAppearance() {
+        let resolved = ShellPrefs.ShellAppearance.appearance().nsAppearance
+        popover.appearance = resolved
+        settingsWindow?.window?.appearance = resolved
     }
 
     // MARK: 状态观察（图标三态）
@@ -210,9 +292,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// 壳偏好热开关观察（GeneralPane 经 @AppStorage 写 UserDefaults，KVO 即时送达）：
-    /// hotkey_enabled 关→热卸载快捷键；menubar_rate 开/关→立即刷新/清空速率 title。
+    /// hotkey_enabled 关→热卸载快捷键；menubar_rate 开/关→立即刷新/清空速率 title；
+    /// appearance 切换→即时应用 popover/窗口主题（§12 c2，既有先例同形）。
     private func observeShellPrefs() {
-        for key in [ShellPrefs.hotkeyEnabledKey, ShellPrefs.menubarRateKey] {
+        for key in [ShellPrefs.hotkeyEnabledKey, ShellPrefs.menubarRateKey, ShellPrefs.appearanceKey] {
             UserDefaults.standard.addObserver(self, forKeyPath: key, options: [.new], context: nil)
         }
     }
@@ -224,6 +307,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ShellPrefs.hotkeyEnabled() ? registerHotKey() : unregisterHotKey()
         case ShellPrefs.menubarRateKey:
             refreshRateTitle()
+        case ShellPrefs.appearanceKey:
+            applyAppearance()
         default:
             super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
         }

@@ -212,6 +212,13 @@ private let statusWithoutProfileJSON =
         #expect(controller.window != nil) // 控制器与窗口仍存活（复开零重建）
     }
 
+    /// Dock 集成激活策略翻转唯一承载（§12 c3）：窗口可见期 .regular（Dock 图标现身、
+    /// 黄钮可收），隐藏期回 .accessory（菜单栏壳如常）。廉价守护；真机路径以目验覆盖。
+    @Test func targetActivationPolicyFollowsWindowVisibility() {
+        #expect(SettingsWindowController.targetActivationPolicy(windowVisible: true) == .regular)
+        #expect(SettingsWindowController.targetActivationPolicy(windowVisible: false) == .accessory)
+    }
+
     @Test func navShowsAllDeliveredPages() {
         // c4 已交付连接与流量（§11.5）；侧栏序对齐 demo：
         // 订阅管理/连接与流量/通用/增强链/关于
