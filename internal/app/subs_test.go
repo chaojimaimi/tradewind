@@ -251,6 +251,7 @@ func TestSubsIntervalOff(t *testing.T) {
 	// 评审 P1-2 语义：off → AllowAutoUpdate=false（真实关闭开关，非 interval=0）
 	home := paths.Home(stubSocketDir(t))
 	seedTwoProfiles(t, home)
+	seedRemoteProfileType(t, home, "new02")
 	if err := SubsInterval(context.Background(), home, "new02", "off"); err != nil {
 		t.Fatalf("SubsInterval(off): %v", err)
 	}
@@ -270,6 +271,7 @@ func TestSubsIntervalValidHours(t *testing.T) {
 	// 1/12/24 → UpdateInterval=3600/43200/86400 且 AllowAutoUpdate=true
 	home := paths.Home(stubSocketDir(t))
 	seedTwoProfiles(t, home)
+	seedRemoteProfileType(t, home, "old01")
 	for mode, want := range map[string]int{"1": 3600, "12": 43200, "24": 86400} {
 		if err := SubsInterval(context.Background(), home, "old01", mode); err != nil {
 			t.Fatalf("SubsInterval(%s): %v", mode, err)
@@ -475,4 +477,42 @@ func TestAutostartStatusJSONDecodable(t *testing.T) {
 	if !st.Installed || !st.Loaded {
 		t.Fatalf("enabled state = %+v, want installed=true loaded=true", st)
 	}
+}
+
+// seedRemoteProfileType 把指定条目标记为 remote 型（P3-6 file 型守卫后，interval
+// 语义测试需要 remote 目标——seedTwoProfiles 恒造 file 型）。
+func seedRemoteProfileType(t *testing.T, home paths.Home, uid string) {
+	t.Helper()
+	idx, err := store.LoadIndex(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, ok := idx.ByUID(uid)
+	if !ok {
+		t.Fatalf("uid %s not found", uid)
+	}
+	item.Type = store.ProfileTypeRemote
+	if err := store.SaveIndex(home, idx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSubsIntervalFileRejectedExplicitly P3-6（F13）：file 型设置 interval 显式报错
+// （此前落盘但 dueForUpdate 恒 false 静默无效），索引零改动。
+func TestSubsIntervalFileRejectedExplicitly(t *testing.T) {
+	home := paths.Home(stubSocketDir(t))
+	seedTwoProfiles(t, home) // 两条均 file 型
+	idxBefore, _ := store.LoadIndex(home)
+	for _, mode := range []string{"off", "24"} {
+		err := SubsInterval(context.Background(), home, "new02", mode)
+		if err == nil || !strings.Contains(err.Error(), "file-type subscription") {
+			t.Fatalf("SubsInterval(file, %s) err = %v, want explicit file-type error", mode, err)
+		}
+	}
+	idxAfter, _ := store.LoadIndex(home)
+	item, _ := idxAfter.ByUID("new02")
+	if item.AllowAutoUpdate != nil || item.UpdateInterval != 0 {
+		t.Fatalf("file-type interval must not mutate index: %+v", item)
+	}
+	_ = idxBefore
 }

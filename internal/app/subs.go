@@ -313,6 +313,13 @@ func SubsInterval(_ context.Context, home paths.Home, target, mode string) error
 	if err != nil {
 		return err
 	}
+	// P3-6（F13）：file 型订阅无自动更新语义（dueForUpdate 对 file 型恒 false）——
+	// interval/allow_auto_update 落盘即静默无效。显式报错替代静默吞掉（含 off 档：
+	// file 型本就永不被调度器拉取，写开关同样是无效操作）。
+	if item.Type != store.ProfileTypeRemote {
+		return fmt.Errorf("app: %q is a file-type subscription (local file); "+
+			"auto update only applies to remote subscriptions", item.Name)
+	}
 	item.AllowAutoUpdate = &allow
 	item.UpdateInterval = interval
 	if err := store.SaveIndex(home, idx); err != nil {

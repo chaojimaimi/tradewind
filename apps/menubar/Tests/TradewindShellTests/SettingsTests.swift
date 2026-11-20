@@ -330,3 +330,14 @@ private final class SetFailingRunner: CommandLineRunning, @unchecked Sendable {
         #expect(model.toast?.contains("不能相同") == true)
     }
 }
+
+// MARK: - 批④ P3-6（file 型 interval 下拉禁用判定）
+
+@Suite struct IntervalDisabledTests {
+    @Test func fileAndUnknownTypesDisable() {
+        #expect(GeneralPaneLogic.intervalDisabled(type: "file"))
+        #expect(GeneralPaneLogic.intervalDisabled(type: "weird")) // 非 remote 即禁（保守口径）
+        #expect(GeneralPaneLogic.intervalDisabled(type: "remote") == false)
+        #expect(GeneralPaneLogic.intervalDisabled(type: nil) == false) // 旧 CLI 缺键：保守可用
+    }
+}

@@ -69,6 +69,9 @@ enum ShellPrefs {
 /// Carbon 常量名不含 cmdKey）。注册失败经 onError 显式上报（壳 toast，不静默，§11.6）。
 /// WHY registrar 注入缝：单测不真注册全局热键（真注册会污染测试进程的全局事件面），
 /// 注入桩返回 noErr/错误码走同一判定路径；无真实句柄时 unregister/deinit 自然 no-op。
+/// P3-2（批④ §4）：eventUPP 校验 EventHotKeyID——回调从事件参数提取 ID，匹配本实例
+/// 注册的 signature+id 才 fire（application event target 上其他同类别键盘事件不再
+/// 误触发启停）。
 final class GlobalHotKey {
     /// 默认键位：T 键 + Option + Shift（⌥⇧T）
     static let defaultKeyCode = UInt32(kVK_ANSI_T)
@@ -83,6 +86,8 @@ final class GlobalHotKey {
     /// 事件签名（任意 OSType，取 'TRAD' 便于调试器辨识；ID 1 = 壳仅注册一枚热键）
     private static let hotKeySignature = OSType(0x54_52_41_44) // 'TRAD'
     private static let hotKeyID: UInt32 = 1
+    /// 本实例的注册 ID（eventUPP 匹配判据；注册前构造即锁定）
+    private let expectedID = EventHotKeyID(signature: OSType(0x54_52_41_44), id: 1)
 
     /// registrar 为 nil 走真 Carbon 注册；注入桩（单测）替换注册调用本身。
     init(keyCode: UInt32 = GlobalHotKey.defaultKeyCode,
@@ -117,15 +122,29 @@ final class GlobalHotKey {
     /// 壳的 UI 更新同处主线程，无需队列跳转（与 popover 点击同一线程语义）。
     func fire() { handler() }
 
+    /// 事件派发判定（internal：单测直调验证 P3-2 过滤；生产由 eventUPP 从 Carbon
+    /// 事件参数提取 EventHotKeyID 后调用）——signature+id 双匹配才 fire。
+    func dispatchIfMatches(_ received: EventHotKeyID) {
+        guard Self.shouldFire(received: received, expected: expectedID) else { return }
+        fire()
+    }
+
+    /// ID 匹配判定（纯函数：signature+id 双匹配）。
+    static func shouldFire(received: EventHotKeyID, expected: EventHotKeyID) -> Bool {
+        received.signature == expected.signature && received.id == expected.id
+    }
+
     // MARK: Carbon 装配（真机路径）
 
     /// 装 application 级事件处理器 + 注册热键；两步任一失败即中止并返回错误码。
+    /// userData 传 HotKeyContext（P3-2：回调需要实例引用 + 匹配 ID 两个数据）。
     private func installEventHandlerAndRegister(keyCode: UInt32, modifiers: UInt32) -> OSStatus {
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
                                       eventKind: UInt32(kEventHotKeyPressed))
-        // WHY passUnretained：实例由 AppDelegate 持有，事件面不持引用；deinit 中
-        // unregister 先拆除处理器再释放，回调不会触达已释放实例
-        let userData = Unmanaged.passUnretained(self).toOpaque()
+        // WHY passUnretained：context 由实例持有（unowned owner 不成环），事件面不持
+        // 引用；deinit 中 unregister 先拆除处理器再释放，回调不会触达已释放实例
+        let context = HotKeyContext(owner: self, expected: expectedID)
+        let userData = Unmanaged.passUnretained(context).toOpaque()
         var installed: EventHandlerRef?
         let installStatus = InstallEventHandler(
             GetApplicationEventTarget(), Self.eventUPP, 1, &eventType, userData, &installed)
@@ -145,10 +164,40 @@ final class GlobalHotKey {
         return noErr
     }
 
-    /// C 回调（@convention(c) 不能捕获上下文）：userData 取回实例后转发 fire()。
-    private static let eventUPP: EventHandlerUPP = { _, _, userData in
-        guard let userData else { return noErr }
-        Unmanaged<GlobalHotKey>.fromOpaque(userData).takeUnretainedValue().fire()
+    /// C 回调（@convention(c) 不能捕获上下文）：userData 取回 context，从事件参数
+    /// 提取 EventHotKeyID（kEventParamDirectObject / typeEventHotKeyID）匹配后转发。
+    /// 提取失败（无该参数的事件）不 fire——P3-2 过滤的保守面。
+    private static let eventUPP: EventHandlerUPP = { _, inEvent, userData in
+        guard let userData, let inEvent,
+              let received = GlobalHotKey.extractEventHotKeyID(inEvent) else { return noErr }
+        let context = Unmanaged<HotKeyContext>.fromOpaque(userData).takeUnretainedValue()
+        context.owner.dispatchIfMatches(received)
         return noErr
+    }
+
+    /// 从 Carbon 事件提取 kEventParamDirectObject 的 EventHotKeyID。
+    private static func extractEventHotKeyID(_ event: EventRef) -> EventHotKeyID? {
+        var id = EventHotKeyID()
+        let status = GetEventParameter(
+            event,
+            EventParamName(kEventParamDirectObject),
+            EventParamType(typeEventHotKeyID),
+            nil,
+            MemoryLayout<EventHotKeyID>.size,
+            nil,
+            &id)
+        return status == noErr ? id : nil
+    }
+}
+
+/// eventUPP 的 userData 载荷（实例引用 + 匹配 ID；unowned 防循环持用——实例由
+/// AppDelegate 持有，context 随实例生命周期）。
+private final class HotKeyContext {
+    unowned let owner: GlobalHotKey
+    let expected: EventHotKeyID
+
+    init(owner: GlobalHotKey, expected: EventHotKeyID) {
+        self.owner = owner
+        self.expected = expected
     }
 }

@@ -48,6 +48,18 @@ enum GeneralPaneLogic {
         guard let current = entries.first(where: { $0.current }) else { return defaultIntervalMode }
         return intervalMode(allowAutoUpdate: current.allowAutoUpdate, updateInterval: current.updateInterval)
     }
+
+    /// P3-6（批④ §4，F13）：file 型订阅无自动更新语义（Go dueForUpdate 对 file 型
+    /// 恒 false，interval 落盘即静默无效）→ interval 下拉禁用。type 缺省（旧 CLI）
+    /// 与查无当前条目 → 可用（保守口径，不误禁 remote 场景）。
+    /// WHY 字面量 "remote" 而非 SubsModel.remoteType：本函数 nonisolated（GeneralPane
+    /// Logic 非隔离纯函数），@MainActor 类的 static 属性不可从非隔离上下文引用
+    /// （release 构建零警告纪律）；字面量与 SubsModel.remoteType 同源（Go
+    /// ProfileTypeRemote），漂移面由两处注释互指封堵。
+    static func intervalDisabled(type: String?) -> Bool {
+        guard let type else { return false }
+        return type != "remote"
+    }
 }
 
 /// 通用页 number 字段元数据（键名与 Go settings set 白名单对齐，范围同 Validate）。

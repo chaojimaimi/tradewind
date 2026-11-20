@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import Foundation
 import Testing
 @testable import TradewindKit
@@ -128,5 +129,71 @@ import Testing
         #expect(ShellPrefs.ShellAppearance.system.nsAppearance == nil)
         #expect(ShellPrefs.ShellAppearance.light.nsAppearance?.name == .aqua)
         #expect(ShellPrefs.ShellAppearance.dark.nsAppearance?.name == .darkAqua)
+    }
+}
+
+// MARK: - 批④ D3（P3-2 EventHotKeyID 过滤 / P3-4 失败 toast 持久化）
+
+/// P3-2：dispatchIfMatches 过滤——signature+id 双匹配才 fire（application event
+/// target 上其他同类别键盘事件不再误触发启停）。
+@Suite @MainActor struct HotKeyIDFilterTests {
+    private let expected = EventHotKeyID(signature: OSType(0x54_52_41_44), id: 1)
+
+    @Test func matchingIDFires() {
+        var fired = false
+        let hotKey = GlobalHotKey(registrar: { _, _ in noErr }, handler: { fired = true })
+        hotKey.dispatchIfMatches(EventHotKeyID(signature: expected.signature, id: expected.id))
+        #expect(fired)
+    }
+
+    @Test func wrongSignatureDoesNotFire() {
+        var fired = false
+        let hotKey = GlobalHotKey(registrar: { _, _ in noErr }, handler: { fired = true })
+        hotKey.dispatchIfMatches(EventHotKeyID(signature: OSType(0x4F_54_48_45), id: expected.id)) // 'OTHE'
+        #expect(!fired)
+    }
+
+    @Test func wrongIDDoesNotFire() {
+        var fired = false
+        let hotKey = GlobalHotKey(registrar: { _, _ in noErr }, handler: { fired = true })
+        hotKey.dispatchIfMatches(EventHotKeyID(signature: expected.signature, id: 999))
+        #expect(!fired)
+    }
+
+    @Test func shouldFireIsPureSignatureAndIDMatch() {
+        #expect(GlobalHotKey.shouldFire(
+            received: EventHotKeyID(signature: 7, id: 8),
+            expected: EventHotKeyID(signature: 7, id: 8)))
+        #expect(!GlobalHotKey.shouldFire(
+            received: EventHotKeyID(signature: 7, id: 9),
+            expected: EventHotKeyID(signature: 7, id: 8)))
+    }
+
+    /// fire() 既有接线回归：匹配路径经 dispatchIfMatches 与直调 fire 同效。
+    @Test func directFireStillWorks() {
+        var fired = false
+        let hotKey = GlobalHotKey(registrar: { _, _ in noErr }, handler: { fired = true })
+        hotKey.fire()
+        #expect(fired)
+    }
+}
+
+/// P3-4：注册失败 toast 持久化口径（失败不自清；下次注册成功清除既有失败 toast，
+/// 其他消息不动；失败覆盖任何在显消息）。
+@Suite struct HotKeyToastTests {
+    @Test func failureOverwritesAndPersists() {
+        // 失败：无论此前是什么消息，终态=失败文案（不自清语义由直赋值保证）
+        #expect(HotKeyToast.resolve(afterSuccess: false, current: nil)
+            == HotKeyToast.failureMessage)
+        #expect(HotKeyToast.resolve(afterSuccess: false, current: "其他提示")
+            == HotKeyToast.failureMessage)
+        #expect(HotKeyToast.resolve(afterSuccess: false, current: HotKeyToast.failureMessage)
+            == HotKeyToast.failureMessage)
+    }
+
+    @Test func successClearsOnlyFailureToast() {
+        #expect(HotKeyToast.resolve(afterSuccess: true, current: HotKeyToast.failureMessage) == nil)
+        #expect(HotKeyToast.resolve(afterSuccess: true, current: "其他提示") == "其他提示")
+        #expect(HotKeyToast.resolve(afterSuccess: true, current: nil) == nil)
     }
 }

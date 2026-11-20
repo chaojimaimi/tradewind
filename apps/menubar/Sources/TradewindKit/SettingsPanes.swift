@@ -61,6 +61,11 @@ struct SettingsRow<Control: View>: View {
 /// mixed_port 热重载生效；gateway_port/panel_enabled 需重启 Tradewind。
 struct GeneralPane: View {
     @ObservedObject var model: SettingsModel
+    /// P3-6：当前订阅 type（file 型 interval 下拉禁用）经 subsModel 卡片数据判定
+    @ObservedObject var subsModel: SubsModel
+    /// 系统代理形态编辑模型（批④ §3.4）：ShellSettingsView @StateObject 装配注入
+    /// （toast 经窗口层 toastLayer 链展示）
+    @ObservedObject var proxyModeModel: ProxyModeModel
     @Environment(\.colorScheme) private var scheme
     @State private var confirmReset = false
     /// 壳偏好（增强 #1，M3-plan §11.7）：@AppStorage 直写 UserDefaults 即时生效，
@@ -81,15 +86,16 @@ struct GeneralPane: View {
             // 外观小节无条件渲染（§12 c2 评审 P3）：纯壳偏好不依赖 CLI 快照，
             // CLI 缺失/加载失败仍可切主题
             appearanceSection
+            shellSection
             if !model.available {
                 Text("tradewind CLI 未找到，设置不可用")
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.muted(scheme))
             } else if let settings = model.settings {
                 portSection(settings)
+                proxySection
                 subsSection(settings)
                 launchSection(settings)
-                shellSection
                 resetSection
             } else if model.loadFailed {
                 Text("设置读取失败，请关闭窗口后重开")
@@ -101,6 +107,8 @@ struct GeneralPane: View {
                     .foregroundStyle(Theme.muted(scheme))
             }
         }
+        // 系统代理形态数据装载（批④ §3.4：页面出现时拉 settings 快照）
+        .task { await proxyModeModel.load() }
         // 壳偏好热变更投递（m3b2 返修）：@AppStorage 落盘后 App 层无 KVO 可依赖
         // （键含点），由本页唯一写入点 post 通知携带变更键名
         .onChange(of: appearanceRaw) { _ in
@@ -182,6 +190,13 @@ struct GeneralPane: View {
         }
     }
 
+    /// P3-6（F13）：file 型订阅无自动更新语义（Go dueForUpdate 恒 false，interval
+    /// 落盘即静默无效）——下拉禁用；无当前订阅/未装载保持可用（保守口径）。
+    private var intervalDisabled: Bool {
+        GeneralPaneLogic.intervalDisabled(
+            type: subsModel.subs.first(where: { $0.current })?.type)
+    }
+
     private var intervalPicker: some View {
         Picker("", selection: Binding(
             get: { model.intervalMode },
@@ -194,7 +209,7 @@ struct GeneralPane: View {
         }
         .pickerStyle(.menu)
         .frame(width: 116)
-        .disabled(model.busy)
+        .disabled(model.busy || intervalDisabled)
         .accessibilityLabel("自动更新间隔")
     }
 
@@ -243,11 +258,16 @@ struct GeneralPane: View {
 
     /// 增强 #1/#2（M3-plan §11.7，demo 均无此字段）：菜单栏速率 opt-in 开关 +
     /// 启停快捷键只读展示。两行不受 model.busy 影响（壳偏好无 CLI 写编排）。
+    /// P3-3 降级口径统一（批④ §4）：CLI 缺失 → 区块可见 + 写控件禁用 + 说明行
+    ///（SubscriptionsPane 降级口径一致——区块不再随 CLI 缺失整段消失）。
     private var shellSection: some View {
         SettingsSection(title: "菜单栏与快捷键") {
             SettingsRow(label: "菜单栏速率",
-                        subtitle: "状态栏图标旁显示实时 ↓↑ 速率，关闭仅保留图标") {
+                        subtitle: !model.available
+                            ? "tradewind CLI 未找到：壳偏好暂停编辑（外观区块不受影响）"
+                            : "状态栏图标旁显示实时 ↓↑ 速率，关闭仅保留图标") {
                 SwitchPill(isOn: $menubarRate, small: true, accessibilityLabel: "菜单栏速率")
+                    .disabled(!model.available)
             }
             rowDivider
             // 增强 #2：固定 ⌥⇧T 只读——改键 UI 裁剪（§11.1-H），hotkey_enabled 写逻辑
@@ -257,6 +277,29 @@ struct GeneralPane: View {
                 Text("⌥⇧T")
                     .font(.system(size: 11).monospaced())
                     .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    // MARK: 系统代理（批④ §3.4：PAC 模式 + 绕过域名）
+
+    /// PAC 模式开关 + 绕过域名编辑行（走 ProxyModeModel settingsGet/set 链——双轨制
+    /// 不走 @AppStorage；写编排含 applied 态形态翻转重放与 gateway_port 仅警告联动，
+    /// 由 Go 侧编排）。
+    private var proxySection: some View {
+        SettingsSection(title: "系统代理") {
+            SettingsRow(label: "PAC 模式",
+                        subtitle: "PAC 需面板网关（panel_enabled）；绕过默认 localhost/内网段") {
+                SwitchPill(isOn: Binding(
+                    get: { proxyModeModel.pacMode },
+                    set: { newValue in Task { await proxyModeModel.setPacMode(newValue) } }
+                ), small: true, accessibilityLabel: "PAC 模式")
+                .disabled(proxyModeModel.busy)
+            }
+            rowDivider
+            SettingsRow(label: "绕过域名",
+                        subtitle: "逗号分隔；留空恢复缺省（默认 localhost/内网段）") {
+                BypassValueField(model: proxyModeModel)
             }
         }
     }
@@ -315,5 +358,39 @@ private struct NumberValueField: View {
             // 未变化（无需动作）或非法/失败：回显现值传达"未生效"
             text = String(field.currentValue(in: snapshot))
         }
+    }
+}
+
+
+/// 绕过域名编辑行（批④ §3.4）：逗号分隔 TextField，占位=当前生效值（未设置展示
+/// Go 缺省集）；失焦/回车提交（NumberValueField 同款交互），成功回显权威态、
+/// 失败回显现值。
+private struct BypassValueField: View {
+    @ObservedObject var model: ProxyModeModel
+    @State private var text: String = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        TextField(BypassEditorLogic.effectiveDisplay(current: model.currentBypass), text: $text)
+            .focused($focused)
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 12).monospaced())
+            .frame(width: 220)
+            .onSubmit { Task { await commit() } } // 回车提交
+            .onChange(of: focused) { isFocused in
+                if !isFocused { Task { await commit() } } // 失焦提交
+            }
+            .onChange(of: model.currentBypass) { current in
+                // 权威态被其他路径改写（写入回拉/失败回退）时同步显示；编辑中不抢焦点
+                if !focused { text = BypassEditorLogic.effectiveDisplay(current: current) }
+            }
+            .disabled(model.busy)
+            .accessibilityLabel("绕过域名")
+    }
+
+    private func commit() async {
+        await model.commitBypass(text)
+        // 成功/失败后回显权威值（unchanged 分支无写入，回显等价无害）
+        text = BypassEditorLogic.effectiveDisplay(current: model.currentBypass)
     }
 }

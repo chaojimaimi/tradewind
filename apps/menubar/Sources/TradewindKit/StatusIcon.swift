@@ -173,3 +173,30 @@ enum RateText {
         return "↓\(bytes(down))/s ↑\(bytes(up))/s"
     }
 }
+
+/// 菜单栏速率 title 判定（批④ P3-1 提纯：原 refreshRateTitle 内联 statusItem 副作用
+/// 不可单测——本纯函数只做判定，App 调用点只剩赋值）。
+enum RateTitle {
+    /// enabled=壳偏好开关（menubar_rate）；running=有效运行态（乐观值口径）。
+    /// 返回 nil = 清空 title（开关关/停止态，"热清空不等下条 WS 推送"语义不变）。
+    static func forModel(enabled: Bool, running: Bool, down: Double?, up: Double?) -> String? {
+        guard enabled, running else { return nil }
+        return RateText.statusItem(down: down, up: up)
+    }
+}
+
+/// 快捷键注册失败 toast 持久化口径（批④ P3-4：失败 toast 不自清——直至下次注册
+/// 尝试改写/清除；纯函数可测，App.registerHotKey 只做赋值）。
+enum HotKeyToast {
+    static let failureMessage = "快捷键 ⌥⇧T 注册失败：可能与其他应用冲突"
+
+    /// 注册尝试结束后的 toast 终态：
+    ///   - 失败 → 失败文案（覆盖任何在显消息——失败态必须可见）；
+    ///   - 成功 → 既有失败 toast 清除，其他消息（CLI 缺失等）不动。
+    static func resolve(afterSuccess: Bool, current: String?) -> String? {
+        if afterSuccess {
+            return current == failureMessage ? nil : current
+        }
+        return failureMessage
+    }
+}

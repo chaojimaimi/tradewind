@@ -288,16 +288,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 通用页开关 @AppStorage 即时生效）：开关开且运行态时 title = RateText.statusItem
     /// （停止态传 nil → nil 文本 → 清空，RateText 既有契约）；关时清空只留图标。
     /// title 唯一写入点：WS 速率推送 + 图标刷新（运行态翻转即隐藏/显现）+ 壳偏好通知。
+    /// P3-1 提纯（批④ §4）：判定收敛 RateTitle.forModel（两态断言进测试），
+    /// 调用点只剩赋值——不再内联 statusItem 副作用。
     private func refreshRateTitle() {
         guard let button = statusItem?.button else { return }
-        guard ShellPrefs.menubarRate() else {
-            if !button.title.isEmpty { button.title = "" } // 关：热清空（不等下条 WS 推送）
-            return
-        }
         // WHY effectiveRunning：与图标同口径（v0.4.7 乐观值优先），toggle 期间 title 同步翻转
         let running = model.effectiveRunning
-        let text = RateText.statusItem(down: running ? model.traffic.down : nil,
-                                       up: running ? model.traffic.up : nil) ?? ""
+        let text = RateTitle.forModel(
+            enabled: ShellPrefs.menubarRate(),
+            running: running,
+            down: running ? model.traffic.down : nil,
+            up: running ? model.traffic.up : nil) ?? ""
         if button.title != text { button.title = text }
     }
 
@@ -306,15 +307,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 注册 ⌥⇧T。动作经 PanelModel.toggleFromHotkey：现场 status 探测定向 + 与
     /// popover toggleMaster 共享 busy 防抖；注册失败经 onError toast 显式上报
     /// （不静默，§11.6 冲突风险对策；OSStatus 无用户语义不回显错误码）。
+    /// P3-4（批④ §4）：失败 toast 不自清（直赋值持久化，直至下次注册尝试——成功
+    /// 清除既有失败 toast，失败重写同文案）；热装卸链不变。
     private func registerHotKey() {
         guard hotKey == nil else { return } // 已注册：热开关重复开启不重注册
         let hotKey = GlobalHotKey(handler: { [weak self] in
             guard let self else { return }
             Task { await self.model.toggleFromHotkey() }
         }, onError: { [weak self] _ in
-            self?.model.toast = "快捷键 ⌥⇧T 注册失败：可能与其他应用冲突"
+            self?.model.toast = HotKeyToast.resolve(afterSuccess: false, current: nil)
         })
         self.hotKey = hotKey
+        if hotKey.isRegistered {
+            model.toast = HotKeyToast.resolve(afterSuccess: true, current: model.toast)
+        }
     }
 
     /// 热卸载（hotkey_enabled 关闭时；热开关语义——不重启壳即时生效）

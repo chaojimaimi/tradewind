@@ -145,3 +145,38 @@ import Testing
         #expect(RateText.statusItem(down: nil, up: nil) == nil)
     }
 }
+
+// MARK: - 批④ P3-1（RateTitle 提纯：两态断言）
+
+@Suite struct RateTitleTests {
+    private static let down = 42.0 * 1024 * 1024
+    private static let up = 0.8 * 1024 * 1024
+
+    /// 开 + 运行态 → 文本（↓↑ 同 RateText.statusItem 契约）。
+    @Test func enabledRunningShowsText() {
+        let text = RateTitle.forModel(enabled: true, running: true,
+                                      down: Self.down, up: Self.up)
+        #expect(text == RateText.statusItem(down: Self.down, up: Self.up))
+        #expect(text?.contains("↓") == true && text?.contains("↑") == true)
+    }
+
+    /// 开关关 → nil（清空 title，热清空语义）。
+    @Test func disabledClearsTitle() {
+        #expect(RateTitle.forModel(enabled: false, running: true,
+                                   down: Self.down, up: Self.up) == nil)
+    }
+
+    /// 停止态 → nil（隐藏文本）。
+    @Test func stoppedClearsTitle() {
+        #expect(RateTitle.forModel(enabled: true, running: false,
+                                   down: Self.down, up: Self.up) == nil)
+        #expect(RateTitle.forModel(enabled: false, running: false,
+                                   down: nil, up: nil) == nil)
+    }
+
+    /// 速率缺失（WS 未推送）→ nil（RateText 既有契约透传）。
+    @Test func missingRatesYieldNil() {
+        #expect(RateTitle.forModel(enabled: true, running: true,
+                                   down: nil, up: Self.up) == nil)
+    }
+}

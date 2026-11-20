@@ -427,6 +427,17 @@ func TestTryAcquireMutationLockBusy(t *testing.T) {
 // 两个关停调用点共用本序，覆盖 signal 与 giveup 双路径。
 func TestShutdownSequenceConvergesWatcherBeforeFullShutdown(t *testing.T) {
 	home, fake := watcherHome(t, sysproxy.FormManual)
+	// 纪律 6（绝不触真系统代理）：本测试经 shutdownSequence→fullShutdown→
+	// restoreSysProxyIfApplied（生产实现恒 SystemRunner，不可注入）——state 必须
+	// applied=false 使还原分支早退；本测试断言的是收敛序，applied 态无关。
+	st, err := store.LoadState(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.SysProxy.Applied = false
+	if err := store.SaveState(home, st); err != nil {
+		t.Fatal(err)
+	}
 	fake.web = store.ProxyState{Enabled: true, Server: "127.0.0.1", Port: store.DefaultMixedPort}
 	fake.secure = store.ProxyState{Enabled: true, Server: "127.0.0.1", Port: store.DefaultMixedPort}
 	fake.socks = store.ProxyState{Enabled: true, Server: "127.0.0.1", Port: store.DefaultMixedPort}

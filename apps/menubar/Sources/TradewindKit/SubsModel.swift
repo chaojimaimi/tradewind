@@ -134,8 +134,9 @@ final class SubsModel: ObservableObject {
     var available: Bool { bridge != nil }
 
     /// remote 订阅的 type 标记（Go ProfileItem.Type：remote=远端可拉取、file=本地导入
-    /// ——store/profiles.go ProfileTypeRemote/ProfileTypeFile；§14 R2 常量漂移修正）
-    private static let remoteType = "remote"
+    /// ——store/profiles.go ProfileTypeRemote/ProfileTypeFile；§14 R2 常量漂移修正）。
+    /// WHY 非 private：GeneralPane P3-6 interval 禁用判定同源消费（同模块 internal）。
+    static let remoteType = "remote"
 
     init(bridge: CoreBridge?) {
         self.bridge = bridge
