@@ -218,10 +218,14 @@ func equalStrings(a, b []string) bool {
 }
 
 // syscallExecNotify 经 osascript 发 macOS 通知（best-effort；runNotifier 注入缝
-// 的生产实现——单测替换 runNotifier，不触达真实通知）。
+// 的生产实现——单测替换 runNotifier，不触达真实通知）。WHY 5s 超时（code-reviewer
+// P3-2）：退出序收敛使"在途 tick 完成"成为 fullShutdown 前置，无超时的子进程
+// 卡死会阻塞系统代理还原；通知本就是 best-effort，超时即放弃。
 func syscallExecNotify(title, body string) error {
 	script := fmt.Sprintf("display notification %s with title %s", quoteAS(body), quoteAS(title))
-	return exec.Command("osascript", "-e", script).Run()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, "osascript", "-e", script).Run()
 }
 
 func quoteAS(s string) string {

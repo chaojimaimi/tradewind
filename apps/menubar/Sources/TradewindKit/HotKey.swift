@@ -83,6 +83,9 @@ final class GlobalHotKey {
     private let onError: (OSStatus) -> Void
     private var hotKeyRef: EventHotKeyRef?
     private var eventHandlerRef: EventHandlerRef?
+    /// userData 载荷的实例持有（code-reviewer P1-1：passUnretained 不持引用，
+    /// 局部变量随装配函数返回释放=热键触发 use-after-free；unowned owner 不成环）
+    private var hotKeyContext: HotKeyContext?
     /// 事件签名（任意 OSType，取 'TRAD' 便于调试器辨识；ID 1 = 壳仅注册一枚热键）
     private static let hotKeySignature = OSType(0x54_52_41_44) // 'TRAD'
     private static let hotKeyID: UInt32 = 1
@@ -114,6 +117,7 @@ final class GlobalHotKey {
         if let eventHandlerRef { RemoveEventHandler(eventHandlerRef) }
         hotKeyRef = nil
         eventHandlerRef = nil
+        hotKeyContext = nil // 事件面已拆除，断开可达性（code-reviewer P1-1）
         isRegistered = false
     }
 
@@ -141,9 +145,12 @@ final class GlobalHotKey {
     private func installEventHandlerAndRegister(keyCode: UInt32, modifiers: UInt32) -> OSStatus {
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
                                       eventKind: UInt32(kEventHotKeyPressed))
-        // WHY passUnretained：context 由实例持有（unowned owner 不成环），事件面不持
-        // 引用；deinit 中 unregister 先拆除处理器再释放，回调不会触达已释放实例
+        // WHY 实例存储持有 context（code-reviewer P1-1）：passUnretained 不持引用，
+        // 局部变量随本函数返回即释放——热键触发时 takeUnretainedValue 是
+        // use-after-free（单测全注入 registrar 绕过真装配路径，故测试全绿未暴露）。
+        // unowned owner 不成环；unregister 置 nil 断开事件面可达性。
         let context = HotKeyContext(owner: self, expected: expectedID)
+        hotKeyContext = context
         let userData = Unmanaged.passUnretained(context).toOpaque()
         var installed: EventHandlerRef?
         let installStatus = InstallEventHandler(

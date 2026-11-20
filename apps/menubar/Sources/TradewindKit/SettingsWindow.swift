@@ -159,8 +159,11 @@ struct ShellSettingsView: View {
     let connectionsStore: ConnectionsStore
     /// 代理守护 toast 模型（批④ §2.3；App 注入与窗口层生命周期配对）
     let guardModel: GuardModel
-    /// tradewind:// 导入协调器（批④ §2.3；App 注入，订阅页据此挂确认 alert）
-    let importCoordinator: ImportCoordinator
+    /// tradewind:// 导入协调器（批④ §2.3；App 注入，订阅页据此挂确认 alert）。
+    /// WHY ObservedObject（code-reviewer P1-2）：窗口 orderOut 保活且 selection
+    /// 跨开关窗持久——用户上次停在非订阅页时收到 URL 事件，alert（只挂在订阅页）
+    /// 永不出现且 pendingURL 静默滞留；观察 pendingURL 变化驱动选页回订阅页。
+    @ObservedObject var importCoordinator: ImportCoordinator
     /// 增强链页模型（批③ B2 转正：@StateObject 本页装配，App 层装配面不变）
     @StateObject private var enhanceModel = EnhanceModel.live()
     /// 系统代理形态编辑模型（批④ §3.4：GeneralPane 消费，toast 并入窗口层）
@@ -182,6 +185,11 @@ struct ShellSettingsView: View {
         .frame(width: SettingsWindowController.windowSize.width,
                height: SettingsWindowController.windowSize.height)
         .background(Theme.popBackground(scheme))
+        // URL 事件落点强制订阅页（code-reviewer P1-2）：无论窗口当前停在哪页，
+        // pendingURL 到达即切回订阅页——确认 alert 的宿主与"导入后落点"同时对齐
+        .onChange(of: importCoordinator.pendingURL) { newValue in
+            if newValue != nil { selection = .subs }
+        }
     }
 
     private var paneContent: some View {

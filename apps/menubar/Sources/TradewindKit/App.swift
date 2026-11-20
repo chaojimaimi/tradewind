@@ -44,8 +44,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSAppleEventManager.shared().setEventHandler(
             target,
             andSelector: selector,
-            forEventClass: AEEventClass(kAEGetURL),
-            andEventID: AEEventID(kInternetEventClass))
+            // 惯例顺序（code-reviewer P3-1）：class=kInternetEventClass、id=kAEGetURL
+            // ——两常量恰同值 'GURL'，写反当前侥幸等值，防未来常量重定义踩坑
+            forEventClass: AEEventClass(kInternetEventClass),
+            andEventID: AEEventID(kAEGetURL))
     }
     /// WHY 显式 Optional 懒创建而非 lazy var（§12 c2 评审 P3 定案）：保懒创建语义
     /// 且 applyAppearance 的 KVO 路径可安全触碰——Optional 链在窗口未创建时直接
