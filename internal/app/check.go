@@ -33,6 +33,29 @@ type CheckUpdateResult struct {
 	UpdateAvailable bool
 	Asset           string
 	AssetSize       int64
+	// rel 保留资产清单（self-update 步 2/3 按资产 ID 走 octet-stream 通道；不外发）。
+	rel *release.Release
+}
+
+// checkUpdateWith 在给定客户端上执行版本比对（CheckUpdate 与 self-update 步 1 共用）。
+func checkUpdateWith(ctx context.Context, client *release.Client) (CheckUpdateResult, error) {
+	rel, err := client.LatestRelease(ctx)
+	if err != nil {
+		return CheckUpdateResult{}, err
+	}
+	assetName := AssetNameFor(rel.Tag)
+	asset, ok := rel.AssetByName(assetName)
+	if !ok {
+		return CheckUpdateResult{}, fmt.Errorf("app: 目标版本 %s 缺资产 %s（旧 release 无整包资产，不可自升级）", rel.Tag, assetName)
+	}
+	return CheckUpdateResult{
+		Current:         version.Version,
+		Latest:          rel.Tag,
+		UpdateAvailable: rel.Tag != version.Version,
+		Asset:           assetName,
+		AssetSize:       asset.Size,
+		rel:             rel,
+	}, nil
 }
 
 // CheckUpdate 编排 `tradewind version --check`：比对 internal/version.Version 与
@@ -47,21 +70,9 @@ func CheckUpdate(ctx context.Context, home paths.Home, progress io.Writer) (Chec
 		return CheckUpdateResult{}, err
 	}
 	client := newReleaseClient(token, func() *http.Client { return selfEgressClient(ctx, home) })
-	rel, err := client.LatestRelease(ctx)
+	res, err := checkUpdateWith(ctx, client)
 	if err != nil {
 		return CheckUpdateResult{}, err
-	}
-	assetName := AssetNameFor(rel.Tag)
-	asset, ok := rel.AssetByName(assetName)
-	if !ok {
-		return CheckUpdateResult{}, fmt.Errorf("app: 目标版本 %s 缺资产 %s（旧 release 无整包资产，不可自升级）", rel.Tag, assetName)
-	}
-	res := CheckUpdateResult{
-		Current:         version.Version,
-		Latest:          rel.Tag,
-		UpdateAvailable: rel.Tag != version.Version,
-		Asset:           assetName,
-		AssetSize:       asset.Size,
 	}
 	fmt.Fprintf(progress, "current: %s\nlatest:  %s\n", res.Current, res.Latest)
 	if res.UpdateAvailable {

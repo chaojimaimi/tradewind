@@ -40,6 +40,7 @@ Usage:
   tradewind panel [--url]                             open metacubexd via the panel gateway (--url prints URL only)
   tradewind version                                   show app and core version
   tradewind version --check [--json]                  compare with the latest GitHub release
+  tradewind self-update [--json]                      self-upgrade the CLI from the latest release
 
 Data directory defaults to ~/Library/Application Support/tradewind,
 override with ` + paths.EnvHome + ` (used by tests and smoke).
@@ -97,6 +98,8 @@ func dispatch(home paths.Home, args []string) error {
 		err = cmdAutostart(home, args[1:])
 	case "panel":
 		err = cmdPanel(home, args[1:])
+	case "self-update":
+		err = cmdSelfUpdate(home, args[1:])
 	case "version", "--version", "-v":
 		// WHY 收编惯用 flag 形式：用户直觉输入 tradewind --version，而非子命令
 		err = cmdVersion(home, args[1:])
@@ -197,6 +200,25 @@ func cmdVersion(home paths.Home, args []string) error {
 		return nil
 	}
 	_, err := app.CheckUpdate(context.Background(), home, os.Stdout)
+	return err
+}
+
+func cmdSelfUpdate(home paths.Home, args []string) error {
+	fs := flag.NewFlagSet("self-update", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "machine-readable single-line JSON (about pane self-update source)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("usage: tradewind self-update [--json]")
+	}
+	ctx := context.Background()
+	if *asJSON {
+		// --json 恒退出 0 契约（batch3 红线 2）：结果/错误均为 stdout 单行 JSON，进度走 stderr
+		fmt.Println(app.SelfUpdateJSONLine(ctx, home))
+		return nil
+	}
+	_, err := app.SelfUpdate(ctx, home, app.ProductionEnv(ctx, home, os.Stdout))
 	return err
 }
 

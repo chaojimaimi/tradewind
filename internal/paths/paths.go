@@ -49,6 +49,10 @@ func (h Home) join(elem ...string) string {
 	return filepath.Join(append([]string{h.String()}, elem...)...)
 }
 
+// Join 返回数据目录内的派生路径（self-update 下载落盘、enhance 候选临时文件等
+// 需要在数据目录内暂存的文件由此派生——不写死字面量）。
+func (h Home) Join(elem ...string) string { return h.join(elem...) }
+
 func (h Home) BinDir() string       { return h.join("bin") }
 func (h Home) Bin() string          { return h.join("bin", "mihomo") }
 func (h Home) Sidecar() string      { return h.join("bin", "mihomo.sha256") }
