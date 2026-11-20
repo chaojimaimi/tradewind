@@ -75,5 +75,8 @@ func (h Home) UIDir() string { return h.join("ui") }
 // PanelTokenFile 是面板网关凭据文件（32 字节 hex，600，首启生成）。
 func (h Home) PanelTokenFile() string { return h.join("panel_token") }
 
+// ReleaseTokenFile 是 GitHub 自升级凭据文件（用户经 gh auth token 写入，600 强制）。
+func (h Home) ReleaseTokenFile() string { return h.join("release_token") }
+
 // ProfileFile 返回某个订阅原文件路径（订阅文件本身只读）。
 func (h Home) ProfileFile(file string) string { return h.join("profiles", file) }

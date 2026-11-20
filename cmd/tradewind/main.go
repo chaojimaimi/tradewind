@@ -39,6 +39,7 @@ Usage:
   tradewind autostart on|off|status [--json]          manage the launchd LaunchAgent (starts on login, crash-restart)
   tradewind panel [--url]                             open metacubexd via the panel gateway (--url prints URL only)
   tradewind version                                   show app and core version
+  tradewind version --check [--json]                  compare with the latest GitHub release
 
 Data directory defaults to ~/Library/Application Support/tradewind,
 override with ` + paths.EnvHome + ` (used by tests and smoke).
@@ -181,11 +182,22 @@ func cmdStatus(home paths.Home, args []string) error {
 
 func cmdVersion(home paths.Home, args []string) error {
 	fs := flag.NewFlagSet("version", flag.ContinueOnError)
+	check := fs.Bool("check", false, "compare the current build with the latest GitHub release")
+	asJSON := fs.Bool("json", false, "machine-readable single-line JSON (about pane check-update source)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	fmt.Print(app.VersionReport(home))
-	return nil
+	if !*check {
+		fmt.Print(app.VersionReport(home))
+		return nil
+	}
+	if *asJSON {
+		// --json 恒退出 0 契约（batch3 红线 2）：失败也输出单行 {"error":...} 到 stdout
+		fmt.Println(app.CheckUpdateJSONLine(context.Background(), home))
+		return nil
+	}
+	_, err := app.CheckUpdate(context.Background(), home, os.Stdout)
+	return err
 }
 
 func cmdNodes(home paths.Home, args []string) error {
