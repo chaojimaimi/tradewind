@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -309,5 +310,49 @@ func SubsInterval(_ context.Context, home paths.Home, target, mode string) error
 		return nil
 	}
 	fmt.Printf("update interval for %q (uid %s) -> every %dh\n", item.Name, item.UID, interval/3600)
+	return nil
+}
+
+// SubsRename 编排 `tradewind subs rename <uid|name> <new_name>`（M3-plan §14 R1）：
+// 纯索引写——name 全仓消费仅展示/日志与 resolveProfile 解析目标，不进合成配置
+// （synth 只吃订阅文件字节按白名单取键），故不 ReloadIfRunning（热重载是伪需求）。
+// 同 uid 同名幂等 no-op；与其他条目重名显式拒绝（resolveProfile 同名多条报歧义，
+// rename 不得制造重名）。持 mutation.lock 与其他索引写互斥（SubsDelete 同先例）。
+func SubsRename(_ context.Context, home paths.Home, target, newName string) error {
+	if target == "" {
+		return errors.New("app: usage: tradewind subs rename <uid|name> <new_name>")
+	}
+	name := strings.TrimSpace(newName)
+	if name == "" {
+		return errors.New("app: usage: tradewind subs rename <uid|name> <new_name>")
+	}
+	lock, err := AcquireMutationLock(home)
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+	idx, err := store.LoadIndex(home)
+	if err != nil {
+		return err
+	}
+	item, err := resolveProfile(idx, target)
+	if err != nil {
+		return err
+	}
+	if item.Name == name {
+		fmt.Printf("renamed %q -> %q (uid %s)\n", item.Name, name, item.UID)
+		return nil
+	}
+	for i := range idx.Items {
+		if idx.Items[i].UID != item.UID && idx.Items[i].Name == name {
+			return fmt.Errorf("app: name %q is already in use", name)
+		}
+	}
+	oldName := item.Name
+	item.Name = name
+	if err := store.SaveIndex(home, idx); err != nil {
+		return err
+	}
+	fmt.Printf("renamed %q -> %q (uid %s)\n", oldName, name, item.UID)
 	return nil
 }

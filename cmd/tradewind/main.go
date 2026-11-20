@@ -32,6 +32,7 @@ Usage:
   tradewind use <UID|NAME>                            switch the current subscription (snapshot + hot reload)
   tradewind subs delete <UID|NAME> [--force]          delete a subscription (current one needs --force)
   tradewind subs interval <UID|NAME> <off|1|12|24>    per-subscription auto update interval (off disables it)
+  tradewind subs rename <UID|NAME> <NEW_NAME>         rename a subscription alias
   tradewind settings [get [--json]]                   show app settings (--json single-line for shells)
   tradewind settings set <key> <value>                set mixed_port/gateway_port/panel_enabled/allow_lan/log_retention_days
   tradewind settings reset                            restore default settings (hot reload + sysproxy retarget)
@@ -260,7 +261,8 @@ func cmdUse(home paths.Home, args []string) error {
 
 func cmdSubs(home paths.Home, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: tradewind subs delete <uid|name> [--force] | tradewind subs interval <uid|name> <off|1|12|24>")
+		return errors.New("usage: tradewind subs delete <uid|name> [--force] | tradewind subs interval <uid|name> <off|1|12|24>" +
+			" | tradewind subs rename <uid|name> <new_name>")
 	}
 	switch args[0] {
 	case "delete":
@@ -286,8 +288,15 @@ func cmdSubs(home paths.Home, args []string) error {
 			return errors.New("usage: tradewind subs interval <uid|name> <off|1|12|24>")
 		}
 		return app.SubsInterval(context.Background(), home, fs.Arg(0), fs.Arg(1))
+	case "rename":
+		// 无 flag 项：target/newName 位置参数直取，不经 flag.FlagSet（评审 P1-2）——
+		// 顺带规避 newName 以 "-" 开头被 flag.Parse 误判 bad flag syntax 的自由文本陷阱
+		if len(args) != 3 {
+			return errors.New("usage: tradewind subs rename <uid|name> <new_name>")
+		}
+		return app.SubsRename(context.Background(), home, args[1], args[2])
 	default:
-		return fmt.Errorf("unknown subs command %q (valid: delete|interval)", args[0])
+		return fmt.Errorf("unknown subs command %q (valid: delete|interval|rename)", args[0])
 	}
 }
 

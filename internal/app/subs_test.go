@@ -307,6 +307,91 @@ func TestSubsIntervalInvalid(t *testing.T) {
 	}
 }
 
+// --- subs rename（M3-plan §14 R1：纯索引写，无热重载）---
+
+func TestSubsRenameUpdatesIndex(t *testing.T) {
+	// happy path：按 name 定位改写新名，其余条目与 current 不动、无热重载
+	var reloads []string
+	home, cleanup := stubFullCore(t, &reloads)
+	defer cleanup()
+	seedTwoProfiles(t, home)
+
+	if err := SubsRename(context.Background(), home, "second sub", "renamed sub"); err != nil {
+		t.Fatalf("SubsRename: %v", err)
+	}
+	idx, err := store.LoadIndex(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, _ := idx.ByUID("new02")
+	if item.Name != "renamed sub" {
+		t.Fatalf("name = %q, want renamed sub", item.Name)
+	}
+	if idx.Current != "old01" || len(idx.Items) != 2 {
+		t.Fatalf("index = %+v, want current old01 and both entries kept", idx)
+	}
+	// WHY 不 ReloadIfRunning：name 不进合成配置（synth 白名单），热重载是伪需求
+	if len(reloads) != 0 {
+		t.Fatalf("rename must not reload; reloads = %v", reloads)
+	}
+}
+
+func TestSubsRenameBlankNameErrors(t *testing.T) {
+	// 新名 trim 后为空 → usage 报错，索引不动
+	home := paths.Home(stubSocketDir(t))
+	seedTwoProfiles(t, home)
+	for _, name := range []string{"", "   "} {
+		if err := SubsRename(context.Background(), home, "new02", name); err == nil {
+			t.Fatalf("blank name %q: want usage error", name)
+		}
+	}
+	idx, _ := store.LoadIndex(home)
+	if item, _ := idx.ByUID("new02"); item.Name != "second sub" {
+		t.Fatalf("blank rename must not touch index; got %q", item.Name)
+	}
+}
+
+func TestSubsRenameDuplicateNameErrors(t *testing.T) {
+	// "first sub" 已属 old01：new02 改成同名必须拒绝（否则 resolveProfile 歧义）
+	home := paths.Home(stubSocketDir(t))
+	seedTwoProfiles(t, home)
+	err := SubsRename(context.Background(), home, "new02", "first sub")
+	if err == nil || !strings.Contains(err.Error(), "already in use") {
+		t.Fatalf("err = %v, want name-in-use error", err)
+	}
+	idx, _ := store.LoadIndex(home)
+	if item, _ := idx.ByUID("new02"); item.Name != "second sub" {
+		t.Fatalf("duplicate rename must not touch index; got %q", item.Name)
+	}
+}
+
+func TestSubsRenameUnknownTargetErrors(t *testing.T) {
+	home := paths.Home(stubSocketDir(t))
+	seedTwoProfiles(t, home)
+	if err := SubsRename(context.Background(), home, "nope", "x"); err == nil {
+		t.Fatal("unknown target: want error")
+	}
+	if err := SubsRename(context.Background(), home, "", "x"); err == nil {
+		t.Fatal("empty target: want usage error")
+	}
+}
+
+func TestSubsRenameSameNameIdempotent(t *testing.T) {
+	// 同 uid 同名：幂等 no-op 返回 nil，索引无副作用
+	home := paths.Home(stubSocketDir(t))
+	seedTwoProfiles(t, home)
+	if err := SubsRename(context.Background(), home, "first sub", "first sub"); err != nil {
+		t.Fatalf("idempotent rename: %v", err)
+	}
+	idx, _ := store.LoadIndex(home)
+	if len(idx.Items) != 2 || idx.Current != "old01" {
+		t.Fatalf("index must stay; got %+v", idx)
+	}
+	if item, _ := idx.ByUID("old01"); item.Name != "first sub" {
+		t.Fatalf("name = %q, want unchanged", item.Name)
+	}
+}
+
 // --- list --json / autostart status --json（壳机器可读输出，M3-plan §11.2-5）---
 
 func TestListJSONDecodable(t *testing.T) {
