@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/chaojimaimi/tradewind/internal/app"
 	"github.com/chaojimaimi/tradewind/internal/paths"
@@ -27,9 +28,14 @@ Usage:
   tradewind delay [GROUP]                             latency test, default group from last selection
   tradewind mode [rule|global|direct]                 show or switch outbound mode (hot-applied when running)
   tradewind sysproxy on|off                           runtime system proxy toggle (idempotent; on requires core running)
-  tradewind list                                      list subscriptions (uid/name/type/updated/traffic/expire)
+  tradewind list [--json]                             list subscriptions (uid/name/type/updated/traffic/expire)
   tradewind use <UID|NAME>                            switch the current subscription (snapshot + hot reload)
-  tradewind autostart on|off|status                   manage the launchd LaunchAgent (starts on login, crash-restart)
+  tradewind subs delete <UID|NAME> [--force]          delete a subscription (current one needs --force)
+  tradewind subs interval <UID|NAME> <off|1|12|24>    per-subscription auto update interval (off disables it)
+  tradewind settings [get [--json]]                   show app settings (--json single-line for shells)
+  tradewind settings set <key> <value>                set mixed_port/gateway_port/panel_enabled/allow_lan/log_retention_days
+  tradewind settings reset                            restore default settings (hot reload + sysproxy retarget)
+  tradewind autostart on|off|status [--json]          manage the launchd LaunchAgent (starts on login, crash-restart)
   tradewind panel [--url]                             open metacubexd via the panel gateway (--url prints URL only)
   tradewind version                                   show app and core version
 
@@ -45,6 +51,14 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+	if err := dispatch(home, args); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+}
+
+// dispatch 分发子命令（stdlib switch，不引 cobra）。
+func dispatch(home paths.Home, args []string) error {
 	var err error
 	switch cmd := args[0]; cmd {
 	case "add":
@@ -73,6 +87,10 @@ func main() {
 		err = cmdList(home, args[1:])
 	case "use":
 		err = cmdUse(home, args[1:])
+	case "subs":
+		err = cmdSubs(home, args[1:])
+	case "settings":
+		err = cmdSettings(home, args[1:])
 	case "autostart":
 		err = cmdAutostart(home, args[1:])
 	case "panel":
@@ -87,10 +105,7 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
-	}
+	return err
 }
 
 func cmdAdd(home paths.Home, args []string) error {
@@ -228,10 +243,11 @@ func cmdSysProxy(home paths.Home, args []string) error {
 
 func cmdList(home paths.Home, args []string) error {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "machine-readable single-line JSON (shell subscriptions pane source)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	return app.List(home)
+	return app.List(home, *asJSON)
 }
 
 func cmdUse(home paths.Home, args []string) error {
@@ -242,7 +258,98 @@ func cmdUse(home paths.Home, args []string) error {
 	return app.Use(context.Background(), home, fs.Arg(0))
 }
 
+func cmdSubs(home paths.Home, args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: tradewind subs delete <uid|name> [--force] | tradewind subs interval <uid|name> <off|1|12|24>")
+	}
+	switch args[0] {
+	case "delete":
+		if len(args) < 2 {
+			return errors.New("usage: tradewind subs delete <uid|name> [--force]")
+		}
+		// 位置参数后可跟 --force：Go flag 在首个非 flag 参数处停止，需先取 target 再解析余下 flag
+		fs := flag.NewFlagSet("subs delete", flag.ContinueOnError)
+		force := fs.Bool("force", false, "allow deleting the current subscription (bare-core fallback)")
+		if err := fs.Parse(args[2:]); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return errors.New("usage: tradewind subs delete <uid|name> [--force]")
+		}
+		return app.SubsDelete(context.Background(), home, args[1], *force)
+	case "interval":
+		fs := flag.NewFlagSet("subs interval", flag.ContinueOnError)
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if fs.NArg() != 2 {
+			return errors.New("usage: tradewind subs interval <uid|name> <off|1|12|24>")
+		}
+		return app.SubsInterval(context.Background(), home, fs.Arg(0), fs.Arg(1))
+	default:
+		return fmt.Errorf("unknown subs command %q (valid: delete|interval)", args[0])
+	}
+}
+
+func cmdSettings(home paths.Home, args []string) error {
+	// get 是默认子命令；flag 前置形态（settings --json）按 get 的 flag 解析
+	if len(args) == 0 || args[0] == "get" || strings.HasPrefix(args[0], "-") {
+		rest := args
+		if len(args) > 0 && args[0] == "get" {
+			rest = args[1:]
+		}
+		fs := flag.NewFlagSet("settings get", flag.ContinueOnError)
+		asJSON := fs.Bool("json", false, "machine-readable single-line JSON (shell general pane source)")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return errors.New("usage: tradewind settings [get [--json] | set <key> <value> | reset]")
+		}
+		return app.SettingsGet(home, *asJSON)
+	}
+	switch args[0] {
+	case "set":
+		fs := flag.NewFlagSet("settings set", flag.ContinueOnError)
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if fs.NArg() != 2 {
+			return errors.New("usage: tradewind settings set <key> <value>")
+		}
+		return app.SettingsSet(context.Background(), home, fs.Arg(0), fs.Arg(1))
+	case "reset":
+		fs := flag.NewFlagSet("settings reset", flag.ContinueOnError)
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return errors.New("usage: tradewind settings reset")
+		}
+		return app.SettingsReset(context.Background(), home)
+	default:
+		return fmt.Errorf("unknown settings command %q (valid: get|set|reset)", args[0])
+	}
+}
+
 func cmdAutostart(home paths.Home, args []string) error {
+	// `autostart status --json`：动作后跟 flag，Go flag 在首个非 flag 参数处停止，需分段解析
+	if len(args) > 0 && args[0] == "status" {
+		fs := flag.NewFlagSet("autostart status", flag.ContinueOnError)
+		asJSON := fs.Bool("json", false, "machine-readable single-line JSON (shell general pane source)")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *asJSON {
+			line, err := app.AutostartStatusJSON(home)
+			if err != nil {
+				return err
+			}
+			fmt.Println(line)
+			return nil
+		}
+		return app.Autostart(home, "status")
+	}
 	fs := flag.NewFlagSet("autostart", flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
 		return err

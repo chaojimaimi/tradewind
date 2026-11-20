@@ -51,6 +51,13 @@ tradewind stop                                           # SIGTERM 运行实例
 | `panel [--url]`                           | metacubexd 面板；`--url` 仅打印入口        |
 | `version`                                 | 版本                                       |
 
+命令分组补充（M3 批② c1）：`settings [get [--json] | set <key> <value> | reset]` 应用设置
+（白名单键 mixed_port/gateway_port/panel_enabled/allow_lan/log_retention_days；写后热重载，
+mixed_port 变更且系统代理已应用时自动迁移到新端口）；`subs delete <UID|NAME> [--force]` 删除
+订阅（当前订阅需 `--force`，删除后落裸内核态）、`subs interval <UID|NAME> <off|1|12|24>`
+按订阅设置自动更新间隔（off 为真实关闭）；`list --json` 与 `autostart status --json` 输出
+机器可读单行 JSON，与 `settings get --json` 一同为菜单栏壳的数据源。
+
 ## 菜单栏壳（Tradewind.app）
 
 功能：三态图标（品牌色=运行+有接入 / 灰=停止或无接入）、popover 主面板

@@ -21,7 +21,7 @@ func TestLoadSettingsDefaults(t *testing.T) {
 
 func TestSettingsRoundTrip(t *testing.T) {
 	home := paths.Home(t.TempDir())
-	s := Settings{MixedPort: 17897, GatewayPort: 19097, PanelEnabled: true, Mode: "global", LogLevel: "debug"}
+	s := Settings{MixedPort: 17897, GatewayPort: 19097, PanelEnabled: true, AllowLan: true, Mode: "global", LogLevel: "debug"}
 	if err := SaveSettings(home, s); err != nil {
 		t.Fatalf("SaveSettings: %v", err)
 	}
@@ -45,6 +45,8 @@ func TestSettingsValidate(t *testing.T) {
 		{MixedPort: 7897, GatewayPort: 39097, Mode: "turbo", LogLevel: "info"},
 		{MixedPort: 7897, GatewayPort: 39097, Mode: "rule", LogLevel: "loud"},
 		{MixedPort: 7897, GatewayPort: 39097, Mode: "rule", LogLevel: "info", LogRetentionDays: -1},
+		// 跨字段互斥（M3-plan §11.2-5）：mixed_port == gateway_port 拒绝（手改 YAML 同样被拦）
+		{MixedPort: 7897, GatewayPort: 7897, Mode: "rule", LogLevel: "info"},
 	}
 	for _, s := range bad {
 		if err := s.Validate(); err == nil {

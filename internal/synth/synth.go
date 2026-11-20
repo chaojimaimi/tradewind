@@ -52,6 +52,8 @@ func Synth(subscription []byte, inj Injection) ([]byte, error) {
 	}
 	// 注入顺序固定，保证输出键序确定性
 	setMappingValue(root, "mixed-port", scalarNode(inj.Settings.MixedPort))
+	// allow-lan：模板内静态占位 false，运行时按 settings.allow_lan 注入覆盖（M3-plan §11.2-6）
+	setMappingValue(root, "allow-lan", scalarNode(inj.Settings.AllowLan))
 	setMappingValue(root, "mode", scalarNode(inj.Settings.Mode))
 	setMappingValue(root, "log-level", scalarNode(inj.Settings.LogLevel))
 	setMappingValue(root, "secret", scalarNode(inj.Secret))
@@ -121,6 +123,8 @@ func scalarNode(v any) *yaml.Node {
 		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: t}
 	case int:
 		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: strconv.Itoa(t)}
+	case bool:
+		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: strconv.FormatBool(t)}
 	default:
 		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: fmt.Sprint(v)}
 	}

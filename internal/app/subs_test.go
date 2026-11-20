@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"os"
 	"strings"
@@ -168,7 +169,218 @@ func TestListRows(t *testing.T) {
 
 func TestListEmptyIndex(t *testing.T) {
 	// 空索引不报错（提示先 add）
-	if err := List(paths.Home(stubSocketDir(t))); err != nil {
+	if err := List(paths.Home(stubSocketDir(t)), false); err != nil {
 		t.Fatalf("List(empty): %v", err)
+	}
+}
+
+// --- subs delete / subs interval（M3-plan §11.2-5，评审 P1-2 语义）---
+
+func TestSubsDeleteNonCurrent(t *testing.T) {
+	// 删非 current：索引移除条目 + 原文件清理，current 与其余条目不动、无热重载
+	var reloads []string
+	home, cleanup := stubFullCore(t, &reloads)
+	defer cleanup()
+	seedTwoProfiles(t, home)
+
+	if err := SubsDelete(context.Background(), home, "second sub", false); err != nil {
+		t.Fatalf("SubsDelete: %v", err)
+	}
+	idx, err := store.LoadIndex(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idx.Current != "old01" || len(idx.Items) != 1 || idx.Items[0].UID != "old01" {
+		t.Fatalf("index after delete = %+v, want only old01 with current intact", idx)
+	}
+	if _, err := os.Stat(home.ProfileFile("new02.yaml")); !os.IsNotExist(err) {
+		t.Fatal("profile file must be removed")
+	}
+	if _, err := os.Stat(home.ProfileFile("old01.yaml")); err != nil {
+		t.Fatalf("other profile file must stay: %v", err)
+	}
+	if len(reloads) != 0 {
+		t.Fatalf("non-current delete must not reload; reloads = %v", reloads)
+	}
+}
+
+func TestSubsDeleteCurrentWithoutForceRejected(t *testing.T) {
+	// current 保护：非 --force 删当前订阅显式报错，索引与文件均不动
+	home := paths.Home(stubSocketDir(t))
+	seedTwoProfiles(t, home)
+	err := SubsDelete(context.Background(), home, "old01", false)
+	if err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("err = %v, want current-protection error", err)
+	}
+	idx, _ := store.LoadIndex(home)
+	if len(idx.Items) != 2 || idx.Current != "old01" {
+		t.Fatalf("index must be untouched; got %+v", idx)
+	}
+	if _, err := os.Stat(home.ProfileFile("old01.yaml")); err != nil {
+		t.Fatalf("current profile file must stay: %v", err)
+	}
+}
+
+func TestSubsDeleteCurrentForceBareCore(t *testing.T) {
+	// 删 current（--force）：Current 置空 → 纯模板裸内核重合成 + 热重载 + 原文件清理
+	var reloads []string
+	home, cleanup := stubFullCore(t, &reloads)
+	defer cleanup()
+	seedTwoProfiles(t, home)
+
+	if err := SubsDelete(context.Background(), home, "old01", true); err != nil {
+		t.Fatalf("SubsDelete(--force): %v", err)
+	}
+	idx, _ := store.LoadIndex(home)
+	if idx.Current != "" || len(idx.Items) != 1 {
+		t.Fatalf("index after force delete = %+v, want current empty with new02 left", idx)
+	}
+	if _, err := os.Stat(home.ProfileFile("old01.yaml")); !os.IsNotExist(err) {
+		t.Fatal("deleted current profile file must be removed")
+	}
+	if len(reloads) != 1 || reloads[0] != http.MethodPut {
+		t.Fatalf("reloads = %v, want bare-core hot reload", reloads)
+	}
+	data, err := os.ReadFile(home.RuntimeFile())
+	if err != nil || strings.Contains(string(data), "proxies:") {
+		t.Fatalf("runtime.yaml must be bare template after current delete:\n%s", data)
+	}
+}
+
+func TestSubsIntervalOff(t *testing.T) {
+	// 评审 P1-2 语义：off → AllowAutoUpdate=false（真实关闭开关，非 interval=0）
+	home := paths.Home(stubSocketDir(t))
+	seedTwoProfiles(t, home)
+	if err := SubsInterval(context.Background(), home, "new02", "off"); err != nil {
+		t.Fatalf("SubsInterval(off): %v", err)
+	}
+	idx, _ := store.LoadIndex(home)
+	item, _ := idx.ByUID("new02")
+	if item.AllowAutoUpdate == nil || *item.AllowAutoUpdate {
+		t.Fatalf("AllowAutoUpdate = %+v, want explicit false", item.AllowAutoUpdate)
+	}
+	// 其余条目不受影响
+	other, _ := idx.ByUID("old01")
+	if other.AllowAutoUpdate != nil {
+		t.Fatalf("other item AllowAutoUpdate = %+v, want untouched", other.AllowAutoUpdate)
+	}
+}
+
+func TestSubsIntervalValidHours(t *testing.T) {
+	// 1/12/24 → UpdateInterval=3600/43200/86400 且 AllowAutoUpdate=true
+	home := paths.Home(stubSocketDir(t))
+	seedTwoProfiles(t, home)
+	for mode, want := range map[string]int{"1": 3600, "12": 43200, "24": 86400} {
+		if err := SubsInterval(context.Background(), home, "old01", mode); err != nil {
+			t.Fatalf("SubsInterval(%s): %v", mode, err)
+		}
+		idx, _ := store.LoadIndex(home)
+		item, _ := idx.ByUID("old01")
+		if item.UpdateInterval != want {
+			t.Fatalf("UpdateInterval = %d, want %d", item.UpdateInterval, want)
+		}
+		if item.AllowAutoUpdate == nil || !*item.AllowAutoUpdate {
+			t.Fatalf("AllowAutoUpdate = %+v, want explicit true", item.AllowAutoUpdate)
+		}
+	}
+}
+
+func TestSubsIntervalInvalid(t *testing.T) {
+	// 非法档位 / 空目标显式报错，profiles 不动
+	home := paths.Home(stubSocketDir(t))
+	seedTwoProfiles(t, home)
+	for _, mode := range []string{"30", "abc", "0", ""} {
+		if err := SubsInterval(context.Background(), home, "old01", mode); err == nil {
+			t.Fatalf("interval %q: want error", mode)
+		}
+	}
+	if err := SubsInterval(context.Background(), home, "nope", "12"); err == nil {
+		t.Fatal("unknown target: want error")
+	}
+	if err := SubsInterval(context.Background(), home, "", "12"); err == nil {
+		t.Fatal("empty target: want usage error")
+	}
+	idx, _ := store.LoadIndex(home)
+	item, _ := idx.ByUID("old01")
+	if item.UpdateInterval != 0 || item.AllowAutoUpdate != nil {
+		t.Fatalf("invalid calls must not touch profiles; got %+v", item)
+	}
+}
+
+// --- list --json / autostart status --json（壳机器可读输出，M3-plan §11.2-5）---
+
+func TestListJSONDecodable(t *testing.T) {
+	// 字段契约：current 标记 / uid / name / type / updated / extra / allow_auto_update / update_interval
+	off := false
+	idx := store.Index{Current: "r1", Items: []store.ProfileItem{
+		{UID: "r1", Type: store.ProfileTypeRemote, Name: "机场", Updated: 1763400000,
+			AllowAutoUpdate: &off, UpdateInterval: 43200,
+			Extra: store.ExtraInfo{Upload: 1024, Download: 2048, Total: 10240, Expire: 1767225600}},
+		{UID: "f2", Type: store.ProfileTypeFile, Name: "本地"},
+	}}
+	line, err := MarshalListJSON(listReport(idx))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []ProfileJSON
+	if err := json.Unmarshal([]byte(line), &got); err != nil {
+		t.Fatalf("list --json not decodable: %v (%s)", err, line)
+	}
+	if len(got) != 2 || !got[0].Current || got[1].Current {
+		t.Fatalf("current markers wrong: %+v", got)
+	}
+	if got[0].UID != "r1" || got[0].Name != "机场" || got[0].Type != "remote" || got[0].Updated != 1763400000 {
+		t.Fatalf("item0 fields = %+v", got[0])
+	}
+	if got[0].Extra.Total != 10240 || got[0].Extra.Expire != 1767225600 {
+		t.Fatalf("item0 extra = %+v", got[0].Extra)
+	}
+	// off 态必须可辨（allow_auto_update=false 显式出现，不能被 omitempty 吞掉）
+	if !strings.Contains(line, `"allow_auto_update":false`) {
+		t.Fatalf("list --json must expose explicit off state: %s", line)
+	}
+	if got[0].UpdateInterval != 43200 {
+		t.Fatalf("update_interval = %d, want 43200", got[0].UpdateInterval)
+	}
+}
+
+func TestListJSONEmptyIndex(t *testing.T) {
+	// 空索引输出 []（壳解码为数组而非 null）
+	line, err := MarshalListJSON(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != "[]" {
+		t.Fatalf("empty list json = %q, want []", line)
+	}
+}
+
+func TestAutostartStatusJSONDecodable(t *testing.T) {
+	// 机器可读开关态（人读文本与 --json 共用 autostartStatusReport 数据源）
+	dir := t.TempDir()
+	line, err := autostartStatusJSONReport(dir, &fakeLaunchctl{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st autostartStatusJSON
+	if err := json.Unmarshal([]byte(line), &st); err != nil {
+		t.Fatalf("autostart --json not decodable: %v (%s)", err, line)
+	}
+	if st.Installed || st.Loaded {
+		t.Fatalf("disabled state = %+v, want installed=false loaded=false", st)
+	}
+	content, _ := launchdPlist(LaunchAgentLabel, "/x/tradewind", "/x/logs")
+	if err := os.WriteFile(plistPathFor(dir), content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	line, err = autostartStatusJSONReport(dir, &fakeLaunchctl{listLoaded: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(line), &st); err != nil {
+		t.Fatalf("enabled state not decodable: %v", err)
+	}
+	if !st.Installed || !st.Loaded {
+		t.Fatalf("enabled state = %+v, want installed=true loaded=true", st)
 	}
 }

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -116,21 +117,54 @@ func disableAutostart(dir string, r launchctlRunner) error {
 
 // autostartStatus 报告 plist 存在性 + launchd 加载态。
 func autostartStatus(dir string, r launchctlRunner) error {
-	p := plistPathFor(dir)
-	_, statErr := os.Stat(p)
-	loaded := false
-	if _, err := r.Run("list", LaunchAgentLabel); err == nil {
-		loaded = true
-	}
+	installed, loaded := autostartStatusReport(dir, r)
 	switch {
-	case statErr == nil && loaded:
+	case installed && loaded:
 		fmt.Println("autostart: enabled (plist installed, loaded)")
-	case statErr == nil:
+	case installed:
 		fmt.Println("autostart: installed but not loaded (takes effect next login)")
 	default:
 		fmt.Println("autostart: disabled")
 	}
 	return nil
+}
+
+// autostartStatusReport 计算开关态（人读文本与 --json 共用一份数据源）。
+func autostartStatusReport(dir string, r launchctlRunner) (installed, loaded bool) {
+	p := plistPathFor(dir)
+	_, statErr := os.Stat(p)
+	installed = statErr == nil
+	if _, err := r.Run("list", LaunchAgentLabel); err == nil {
+		loaded = true
+	}
+	return installed, loaded
+}
+
+// autostartStatusJSON 是 `autostart status --json` 的输出
+// （壳通用页开机自启开关初始值数据源，M3-plan §11.2-5）。
+// Installed：plist 已安装；Loaded：launchd 已加载（两者都真 = 自启已生效）。
+type autostartStatusJSON struct {
+	Installed bool `json:"installed"`
+	Loaded    bool `json:"loaded"`
+}
+
+// autostartStatusJSONReport 组装并序列化开关态（runner 可注入，测试绝不触碰真实 launchd）。
+func autostartStatusJSONReport(dir string, r launchctlRunner) (string, error) {
+	installed, loaded := autostartStatusReport(dir, r)
+	line, err := json.Marshal(autostartStatusJSON{Installed: installed, Loaded: loaded})
+	if err != nil {
+		return "", fmt.Errorf("app: marshal autostart json: %w", err)
+	}
+	return string(line), nil
+}
+
+// AutostartStatusJSON 编排 `tradewind autostart status --json`，返回单行 JSON。
+func AutostartStatusJSON(home paths.Home) (string, error) {
+	dir, err := launchAgentsDir()
+	if err != nil {
+		return "", err
+	}
+	return autostartStatusJSONReport(dir, realLaunchctl{})
 }
 
 // stopManualInstance 迁移前置：pidfile 存在则走 Stop（stale pidfile 由 Stop 自清）。

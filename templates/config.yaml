@@ -2,7 +2,7 @@
 #
 # 键域职责（白名单语义，M0-plan §5.2）：
 #   - proxies / proxy-groups / rules：来自订阅，订阅其余键（tun/external-ui/ports/dns…）一律丢弃
-#   - mixed-port / mode / log-level / secret / external-controller：运行时注入覆盖，settings 覆盖一切
+#   - mixed-port / allow-lan / mode / log-level / secret / external-controller：运行时注入覆盖，settings 覆盖一切
 #   - 其余基础设施键：本模板兜底
 # 本文件中的同名键仅为可读性占位，运行时必被注入值覆盖。
 mixed-port: 7897
@@ -10,7 +10,7 @@ mode: rule
 log-level: info
 # P0 #7：HTTP 控制器保持关闭，控制面仅 unix socket（运行时注入强制空串）
 external-controller: ''
-# 仅监听本机回环，不向局域网暴露代理端口
+# 默认仅监听本机回环；运行时按 settings.allow_lan 注入覆盖（静态占位，M3-plan §11.2-6）
 allow-lan: false
 # M1 #4：内核侧节点选择持久化。mihomo 该键默认 false——缺失则节点选择重启即丢
 # （M1-plan §1.1 前置依赖）；synth 以本模板为基底，无需双重注入

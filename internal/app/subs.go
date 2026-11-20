@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -13,10 +14,19 @@ import (
 )
 
 // List 编排 `tradewind list`：订阅总表（uid/name/type/updated/流量/到期）。
-func List(home paths.Home) error {
+// --json 输出机器可读单行 JSON 数组（壳订阅管理页数据源，M3-plan §11.2-5）。
+func List(home paths.Home, asJSON bool) error {
 	idx, err := store.LoadIndex(home)
 	if err != nil {
 		return err
+	}
+	if asJSON {
+		line, err := MarshalListJSON(listReport(idx))
+		if err != nil {
+			return err
+		}
+		fmt.Println(line)
+		return nil
 	}
 	rows := listRows(idx)
 	if len(rows) == 0 {
@@ -29,6 +39,54 @@ func List(home paths.Home) error {
 		fmt.Fprintln(tw, row)
 	}
 	return tw.Flush()
+}
+
+// ProfileJSON 是 `list --json` 的单条输出（字段对照 ProfileItem，壳侧解码模型）。
+type ProfileJSON struct {
+	// Current 是否当前订阅（人读表的 * 标记的机器可读形态）
+	Current bool   `json:"current"`
+	UID     string `json:"uid"`
+	Name    string `json:"name"`
+	Type    string `json:"type"`
+	// Updated 最近导入/更新的 unix 秒
+	Updated int64           `json:"updated"`
+	Extra   store.ExtraInfo `json:"extra"`
+	// AllowAutoUpdate 指针语义与 ProfileItem 一致：nil=未设置（默认允许），
+	// 非 nil false=显式关闭（subs interval off）。omitempty 对指针只吞 nil 不吞
+	// &false，关态显式输出 "allow_auto_update":false（审查 P3：机制是指针兜底，
+	// 勿据旧注释改 tag）
+	AllowAutoUpdate *bool `json:"allow_auto_update,omitempty"`
+	UpdateInterval  int   `json:"update_interval,omitempty"`
+}
+
+// listReport 把索引转为 JSON 行集（纯函数，便于单测断言字段）。
+func listReport(idx store.Index) []ProfileJSON {
+	var out []ProfileJSON
+	for _, item := range idx.Items {
+		out = append(out, ProfileJSON{
+			Current:         item.UID == idx.Current,
+			UID:             item.UID,
+			Name:            item.Name,
+			Type:            item.Type,
+			Updated:         item.Updated,
+			Extra:           item.Extra,
+			AllowAutoUpdate: item.AllowAutoUpdate,
+			UpdateInterval:  item.UpdateInterval,
+		})
+	}
+	return out
+}
+
+// MarshalListJSON 序列化（缩进关闭，壳按 stdout 单行 JSON 解析）；空表输出 []。
+func MarshalListJSON(items []ProfileJSON) (string, error) {
+	if items == nil {
+		items = []ProfileJSON{}
+	}
+	data, err := json.Marshal(items)
+	if err != nil {
+		return "", fmt.Errorf("app: marshal list json: %w", err)
+	}
+	return string(data), nil
 }
 
 // listRows 生成订阅表的行（纯函数，便于单测断言列内容）。
@@ -131,4 +189,121 @@ func resolveProfile(idx store.Index, target string) (*store.ProfileItem, error) 
 		}
 		return nil, fmt.Errorf("app: profile name %q is ambiguous (uids: %v); use uid", target, uids)
 	}
+}
+
+// SubsDelete 编排 `tradewind subs delete <uid|name> [--force]`（M3-plan §11.2-5）：
+// profiles.yaml 移除条目 + 删除 profiles/<uid>.yaml 原文件；current 保护（--force 才放行）。
+// 删 current 语义：Current 置空 → 重合成纯模板裸内核 + ReloadIfRunning（未运行则跳过）。
+func SubsDelete(ctx context.Context, home paths.Home, target string, force bool) error {
+	if target == "" {
+		return errors.New("app: usage: tradewind subs delete <uid|name> [--force]")
+	}
+	lock, err := AcquireMutationLock(home)
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+	idx, err := store.LoadIndex(home)
+	if err != nil {
+		return err
+	}
+	item, err := resolveProfile(idx, target)
+	if err != nil {
+		return err
+	}
+	isCurrent := item.UID == idx.Current
+	if isCurrent && !force {
+		return fmt.Errorf("app: %q is the current subscription; pass --force to delete it "+
+			"(Tradewind falls back to the bare core)", item.Name)
+	}
+	// 摘要字段先拷贝：下面的原地过滤会移动元素，item 指针随底层重写而失效
+	uid, name, file := item.UID, item.Name, item.File
+	// 先索引后文件：索引是唯一真相源，文件已删而索引残留才会误引用（反向残留无害）
+	remaining := idx.Items[:0]
+	for _, it := range idx.Items {
+		if it.UID != uid {
+			remaining = append(remaining, it)
+		}
+	}
+	idx.Items = remaining
+	if isCurrent {
+		idx.Current = ""
+	}
+	if err := store.SaveIndex(home, idx); err != nil {
+		return err
+	}
+	if err := os.Remove(home.ProfileFile(file)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("app: remove profile file %s: %w", file, err)
+	}
+	fmt.Printf("deleted %q (uid %s)\n", name, uid)
+	if isCurrent {
+		return bareCoreFallback(ctx, home)
+	}
+	return nil
+}
+
+// bareCoreFallback 删 current 后的裸内核落位：Current 已置空，重合成纯模板 +
+// 运行中热重载（未运行由 ReloadIfRunning 跳过），并提示用户后续动作（M3-plan §11.2-5）。
+func bareCoreFallback(ctx context.Context, home paths.Home) error {
+	secret, err := store.EnsureSecret(home)
+	if err != nil {
+		return err
+	}
+	if err := Synthesize(home, secret); err != nil {
+		return err
+	}
+	if err := ReloadIfRunning(ctx, home); err != nil {
+		return err
+	}
+	fmt.Println("current subscription deleted; Tradewind is now a bare core — import or `tradewind use` a subscription")
+	return nil
+}
+
+// subsIntervalHours 是 `subs interval` 合法小时档位（demo 通用页 select 同款），秒值 = 小时×3600。
+var subsIntervalHours = map[string]int{"1": 1, "12": 12, "24": 24}
+
+// SubsInterval 编排 `tradewind subs interval <uid|name> <off|1|12|24>`（评审 P1-2 语义）：
+// off → 写 AllowAutoUpdate=false（真实关闭开关——UpdateInterval=0 会被
+// NormalizeUpdateInterval 归一为 86400，0≠关闭，勿混淆）；1/12/24 → 写秒值且允许自动更新。
+// 仅改 profiles.yaml（调度器自然生效），不触发内核 reload；持 mutation.lock 与调度器互斥。
+func SubsInterval(_ context.Context, home paths.Home, target, mode string) error {
+	if target == "" {
+		return errors.New("app: usage: tradewind subs interval <uid|name> <off|1|12|24>")
+	}
+	allow := true
+	interval := 0
+	switch mode {
+	case "off":
+		allow = false
+	default:
+		hours, ok := subsIntervalHours[mode]
+		if !ok {
+			return fmt.Errorf("app: subs interval: invalid mode %q (valid: off|1|12|24)", mode)
+		}
+		interval = hours * 3600
+	}
+	lock, err := AcquireMutationLock(home)
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+	idx, err := store.LoadIndex(home)
+	if err != nil {
+		return err
+	}
+	item, err := resolveProfile(idx, target)
+	if err != nil {
+		return err
+	}
+	item.AllowAutoUpdate = &allow
+	item.UpdateInterval = interval
+	if err := store.SaveIndex(home, idx); err != nil {
+		return err
+	}
+	if !allow {
+		fmt.Printf("auto update off for %q (uid %s)\n", item.Name, item.UID)
+		return nil
+	}
+	fmt.Printf("update interval for %q (uid %s) -> every %dh\n", item.Name, item.UID, interval/3600)
+	return nil
 }

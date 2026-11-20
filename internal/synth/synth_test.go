@@ -175,3 +175,21 @@ func TestSynthEmptySubscriptionIsBareTemplate(t *testing.T) {
 		}
 	}
 }
+
+func TestSynthInjectsAllowLan(t *testing.T) {
+	// allow_lan 全链（M3-plan §11.2-6）：模板静态占位 false，settings.allow_lan=true 注入覆盖
+	sub, _ := os.ReadFile(filepath.Join("testdata", "subscription.yaml"))
+	inj := testInjection()
+	inj.Settings.AllowLan = true
+	got, err := Synth(sub, inj)
+	if err != nil {
+		t.Fatalf("Synth: %v", err)
+	}
+	var out map[string]any
+	if err := yaml.Unmarshal(got, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["allow-lan"] != true {
+		t.Fatalf("allow-lan = %v, want true injected from settings", out["allow-lan"])
+	}
+}

@@ -20,11 +20,13 @@ const (
 
 // Settings 是 settings.yaml：应用级端口/模式/日志级别。
 type Settings struct {
-	MixedPort    int    `yaml:"mixed_port" json:"mixed_port"`
-	GatewayPort  int    `yaml:"gateway_port" json:"gateway_port"`
-	PanelEnabled bool   `yaml:"panel_enabled" json:"panel_enabled"`
-	Mode         string `yaml:"mode" json:"mode"`
-	LogLevel     string `yaml:"log_level" json:"log_level"`
+	MixedPort    int  `yaml:"mixed_port" json:"mixed_port"`
+	GatewayPort  int  `yaml:"gateway_port" json:"gateway_port"`
+	PanelEnabled bool `yaml:"panel_enabled" json:"panel_enabled"`
+	// AllowLan 是否向局域网暴露代理端口（默认 false 仅监听回环；synth 注入 allow-lan 键）
+	AllowLan bool   `yaml:"allow_lan" json:"allow_lan"`
+	Mode     string `yaml:"mode" json:"mode"`
+	LogLevel string `yaml:"log_level" json:"log_level"`
 	// LogRetentionDays 滚动日志保留天数；0 视为未设置 → 归一为默认 14
 	LogRetentionDays int `yaml:"log_retention_days,omitempty" json:"log_retention_days,omitempty"`
 	// UpdateViaProxy 订阅拉取是否经自身代理（nil=未设置 → 默认 true）。
@@ -72,6 +74,11 @@ func (s Settings) Validate() error {
 	// 显式负值/超 10 年才拒绝
 	if s.LogRetentionDays < 0 || s.LogRetentionDays > 3650 {
 		return fmt.Errorf("store: invalid log_retention_days %d", s.LogRetentionDays)
+	}
+	// 跨字段互斥（M3-plan §11.2-5）：mixed_port 与 gateway_port 同端口会在监听上冲突；
+	// 落位 Validate 使手改 YAML 也被 LoadSettings 拦截，CLI 校验免费获得
+	if s.MixedPort == s.GatewayPort {
+		return fmt.Errorf("store: mixed_port and gateway_port must differ (both %d)", s.MixedPort)
 	}
 	return nil
 }
