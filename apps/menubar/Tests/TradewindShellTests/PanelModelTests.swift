@@ -182,23 +182,27 @@ final class StubURLProtocol: URLProtocol {
         #expect(pinned?.fixed == "HK-1")
         #expect(pinned?.modeBadge == "已固定")
 
-        // 解除：unpin 成功 → 网关侧 fixed 消失 → 权威值落地
+        // 解除：unpin 成功 → 网关侧 fixed 消失 → 权威值落地（返回值=true 实际清除，
+        // §13.2 c3 Bool 契约）
         StubURLProtocol.handler = { _ in (200, freeJSON) }
-        await model.unpinFixed()
+        let cleared = await model.unpinFixed()
+        #expect(cleared)
         let freed = model.groups.first { $0.id == "Auto" }
         #expect(freed?.fixed == nil)
         #expect(freed?.modeBadge == "自动")
         #expect(fake.calls.contains(["unpin", "Auto"]))
     }
 
-    /// v0.4.16（审查 P3-4）：fixed==nil 时恢复自动为 no-op（不发起 CLI 调用）
+    /// v0.4.16（审查 P3-4）：fixed==nil 时恢复自动为 no-op（不发起 CLI 调用）；
+    /// §13.2 c3：返回值 false=未实际清除
     @Test func unpinSkipsWhenNotFixed() async {
         StubURLProtocol.handler = { _ in (200, Self.proxiesJSON) }
         let fake = FakeRunner(FakeRunner.Reply(output: Self.statusWithPanel, exitCode: 0))
         let model = PanelModel(bridge: CoreBridge(runner: fake), session: StubURLProtocol.install())
         await model.refresh()
         let before = fake.calls.count
-        await model.unpinFixed() // 共享 mock 的组均无 fixed → no-op
+        let cleared = await model.unpinFixed() // 共享 mock 的组均无 fixed → no-op
+        #expect(!cleared)
         #expect(fake.calls.count == before)
     }
 

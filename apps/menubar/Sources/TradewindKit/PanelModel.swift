@@ -283,23 +283,46 @@ final class PanelModel: ObservableObject {
     /// 恢复自动（v0.4.16）：DELETE /proxies/{group} 清除 URLTest/Fallback 手动固定。
     /// WHY 不做显式乐观：DELETE 是即时生效语义且网关本地毫秒级，refreshGroups 权威值
     /// 落地即正确态；selectNode 的乐观模式针对 PUT 后内核确认延迟，此处无此时序。
-    func unpinFixed() async {
-        guard let group = activeGroup, let bridge, group.fixed != nil else { return }
+    /// §13.2 c3 返回 Bool=是否实际清除：fixed==nil 早退返 false；DELETE 失败
+    /// （toast 后）返 false，成功 true。WHY 不按组类型过滤：Fallback 组 fixed 可
+    /// 非 nil（modeBadge/unpin 链同口径），本函数对 URLTest/Fallback 均真实清除。
+    /// @discardableResult：恢复自动按钮链路（GroupsCardView）无需返回值。
+    /// WHY 组参数（§13 review P2 身份漂移）：testLatency 的 runDelay 期间用户可点
+    /// chips 换组，unpinFixed 内部重解析 activeGroup 会清错组/漏清被测组——测速链
+    /// 显式传入口捕获组；缺省 nil=现行为（按钮链路零改动）。
+    @discardableResult
+    func unpinFixed(for target: ProxyGroup? = nil) async -> Bool {
+        guard let group = target ?? activeGroup, let bridge, group.fixed != nil else { return false }
+        let cleared: Bool
         do {
             try await bridge.unpin(group: group.id)
+            cleared = true
         } catch {
             showToast("恢复自动失败")
+            cleared = false
         }
         await refreshGroups()
+        return cleared
     }
 
-    /// 测速：CLI delay（并发 ≤8 由 CLI 保证）→ 重拉 /proxies 刷新延迟历史。
+    /// 测速：CLI delay（并发 ≤8 由 CLI 保证）→ 清历史固定态 → 重拉 /proxies。
+    /// §13.2 c3 b：URLTest 组曾误点击固定（fixed≠nil）则内核永不自动切换，测速后
+    /// unpinFixed 真实清除（与 mihomo GET /group/:name/delay 清 fixed 同构）；内核
+    /// 300s tick 用新延迟重选。调用序定死（评审 P2）：unpinFixed 在前、保留尾部
+    /// refreshGroups——"URLTest 且曾固定"罕见路径双拉 /proxies 显式接受（多一次
+    /// 本地网关 GET 无害）。toast 仅 URLTest 且确有清除（Fallback 清固定静默，
+    /// 状态变化经 refreshGroups 徽标呈现——"选中最低延迟"对 fallback 优先级选主
+    /// 是误导）。
     func testLatency() async {
         guard let bridge, let group = activeGroup, !busy else { return }
         busy = true
         defer { busy = false }
         do {
             try await bridge.runDelay(group: group.id)
+            let cleared = await unpinFixed(for: group) // 显式传被测组：防 await 期间换组致身份漂移
+            if cleared, group.type == "URLTest" {
+                showToast("已恢复自动切换，内核将在测速周期内选中最低延迟")
+            }
         } catch {
             showToast("测速失败")
         }

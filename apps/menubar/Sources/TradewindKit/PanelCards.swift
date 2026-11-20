@@ -264,6 +264,13 @@ struct GroupsCardView: View {
                     .foregroundStyle(.tertiary)
             } else {
                 GroupChips(model: model)
+                // §13.2 c3：URLTest 组说明小字（视觉顺序 chips→说明→列表）。落位卡片
+                // VStack 直接子级而非 chips 横向 ScrollView 内——不随 chips 滚动（评审 P3）
+                if activeGroup?.type == "URLTest" {
+                    Text("按延迟自动切换 · 不可手动固定")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.muted(scheme))
+                }
                 NodeList(model: model)
             }
         }
@@ -306,7 +313,8 @@ private struct GroupChips: View {
     }
 }
 
-/// 节点列表：延迟点三色阶（<100 ok / 100-299 warn / ≥300 bad / 未测灰，demo 设计规范）
+/// 节点列表：延迟点四档色阶（≤200 ok / ≤500 warn / >500 bad / 未测灰，
+/// 2026-11-20 用户拍板口径，LatencyColor 注释同源）
 /// + ✓ 当前（色阶口径同节点卡延迟徽标——批①.5 起两处统一按延迟分级）。
 private struct NodeList: View {
     @ObservedObject var model: PanelModel
@@ -333,9 +341,14 @@ private struct NodeList: View {
     private var rows: some View {
         VStack(spacing: 2) {
             ForEach(group?.nodes ?? []) { node in
-                NodeRow(node: node, selected: node.name == group?.currentNode) {
-                    Task { await model.selectNode(node.name) }
-                }
+                // §13.2 c3：URLTest 组行不可点（内核按延迟自动切换）；其余组
+                // （Selector/Fallback 等）默认可点，selectable 缺省 true 零回归。
+                // onSelect 显式标签且置于 selectable 前（memberwise 形参序）：
+                // 尾闭包落在 selectable 之后属 backward matching deprecated 警告
+                NodeRow(node: node,
+                        selected: node.name == group?.currentNode,
+                        onSelect: { Task { await model.selectNode(node.name) } },
+                        selectable: group?.type != "URLTest")
             }
         }
     }
@@ -345,44 +358,65 @@ private struct NodeRow: View {
     let node: ProxyGroup.Node
     let selected: Bool
     let onSelect: () -> Void
+    /// 可点性（§13.2 c3）：URLTest 组传 false → 纯展示态（内核按延迟自动切换，
+    /// 误点击 PUT 固定会"永不自动切换"）；Fallback 组维持可点现状（有意裁剪，§13.3）。
+    /// WHY var：带默认值 `let` 被排除出合成 memberwise init，调用点传 selectable:
+    /// false 直接编译失败（M3-plan §13.2 c3 评审 P1 语言级约束）
+    var selectable = true
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        Button(action: onSelect) {
-            HStack(spacing: 9) {
-                Circle()
-                    .fill(LatencyColor.scale(node.delay, scheme: scheme))
-                    .frame(width: 8, height: 8)
-                // WHY v0.4.4：嵌套组不渲染旗帜——CountryFlag 对组名无语义（🌐 误导），
-                // 「组」徽标标明类型（metacubexd 同类信息位）；2026-11-19 拍板
-                // Auto（url-test）组自身形态保留现状，本批只做组成员识别
-                if !node.isGroup {
-                    Text(CountryFlag.flag(for: node.name))
-                        .font(.system(size: 12.5))
-                        .lineLimit(1)
-                }
-                Text(node.name)
-                    .font(.system(size: 12.5, weight: selected ? .semibold : .regular))
-                    .lineLimit(1)
-                    .foregroundStyle(Color.primary)
-                if node.isGroup {
-                    BadgeView(text: "组")
-                }
-                Spacer()
-                Text(node.delay.map { "\($0) ms" } ?? "—")
-                    .font(.system(size: 11.5))
-                    .monospacedDigit()
-                    .foregroundStyle(.tertiary)
-                Image(systemName: "checkmark")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(Theme.brand(scheme))
-                    .opacity(selected ? 1 : 0)
+        if selectable {
+            Button(action: onSelect) {
+                content
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 7)
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+        } else {
+            // 纯展示态：无 Button/hover/灰化；可访问性合并为单元素（节点名+延迟+当前态，
+            // §13.3 去 Button 退化对策）
+            content
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel([node.name,
+                                     node.delay.map { "\($0) ms" },
+                                     selected ? "当前节点" : nil].compactMap { $0 }
+                    .joined(separator: "，"))
         }
-        .buttonStyle(.plain)
+    }
+
+    /// 行内容两形态共用（padding 一并归 content，行高/内容语义完全一致）
+    private var content: some View {
+        HStack(spacing: 9) {
+            Circle()
+                .fill(LatencyColor.scale(node.delay, scheme: scheme))
+                .frame(width: 8, height: 8)
+            // WHY v0.4.4：嵌套组不渲染旗帜——CountryFlag 对组名无语义（🌐 误导），
+            // 「组」徽标标明类型（metacubexd 同类信息位）；2026-11-19 拍板
+            // Auto（url-test）组自身形态保留现状，本批只做组成员识别
+            if !node.isGroup {
+                Text(CountryFlag.flag(for: node.name))
+                    .font(.system(size: 12.5))
+                    .lineLimit(1)
+            }
+            Text(node.name)
+                .font(.system(size: 12.5, weight: selected ? .semibold : .regular))
+                .lineLimit(1)
+                .foregroundStyle(Color.primary)
+            if node.isGroup {
+                BadgeView(text: "组")
+            }
+            Spacer()
+            Text(node.delay.map { "\($0) ms" } ?? "—")
+                .font(.system(size: 11.5))
+                .monospacedDigit()
+                .foregroundStyle(.tertiary)
+            Image(systemName: "checkmark")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(Theme.brand(scheme))
+                .opacity(selected ? 1 : 0)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .contentShape(Rectangle())
     }
 }
 
@@ -392,15 +426,13 @@ private func isNestedGroup(_ name: String, in groups: [ProxyGroup]) -> Bool {
     groups.contains { $0.id == name }
 }
 
-/// 延迟色阶（demo 设计规范面板的纯函数化）。
+/// 延迟色阶（2026-11-20 用户拍板四档：≤200 绿 / ≤500 黄 / >500 红 / 不可达灰）。
 enum LatencyColor {
     static func scale(_ delay: Int?, scheme: ColorScheme) -> Color {
         guard let delay else { return Theme.muted(scheme) } // 未测/不可用 → 灰
-        switch delay {
-        case ..<100: return Theme.ok
-        case ..<300: return Theme.warn
-        default: return Theme.bad
-        }
+        if delay <= 200 { return Theme.ok }
+        if delay <= 500 { return Theme.warn }
+        return Theme.bad
     }
 }
 

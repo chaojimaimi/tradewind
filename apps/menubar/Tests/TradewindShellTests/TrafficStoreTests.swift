@@ -86,13 +86,15 @@ import Testing
     }
 
     @Test func latencyColorScaleFollowsDemoThresholds() {
-        // demo 设计规范：<100 ok / 100-299 warn / ≥300 bad / 未测灰
+        // 2026-11-20 用户拍板四档：≤200 ok 绿 / ≤500 warn 黄 / >500 bad 红 / 未测灰
+        // （边界：200 含绿、500 含黄、501 起红）
         let dark = ColorScheme.dark
         #expect(LatencyColor.scale(42, scheme: dark) == Theme.ok)
         #expect(LatencyColor.scale(99, scheme: dark) == Theme.ok)
-        #expect(LatencyColor.scale(150, scheme: dark) == Theme.warn)
-        #expect(LatencyColor.scale(299, scheme: dark) == Theme.warn)
-        #expect(LatencyColor.scale(300, scheme: dark) == Theme.bad)
+        #expect(LatencyColor.scale(200, scheme: dark) == Theme.ok)
+        #expect(LatencyColor.scale(201, scheme: dark) == Theme.warn)
+        #expect(LatencyColor.scale(500, scheme: dark) == Theme.warn)
+        #expect(LatencyColor.scale(501, scheme: dark) == Theme.bad)
         #expect(LatencyColor.scale(nil, scheme: dark) == Theme.muted(dark))
     }
 
