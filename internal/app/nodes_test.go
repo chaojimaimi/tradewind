@@ -120,6 +120,39 @@ func TestSelectRecordsOnSuccessNotOnFailure(t *testing.T) {
 	}
 }
 
+// TestUnpinSendsDeleteAndValidatesArgs 锁定 v0.4.16 unpin 链路：DELETE /proxies/{group}
+// 且组名 PathEscape（emoji 组名）；空组名显式报错；unpin 不回写 profiles（固定态是
+// 内核运行时状态，无"期望选择"需持久化）。
+func TestUnpinSendsDeleteAndValidatesArgs(t *testing.T) {
+	var gotMethod, gotPath string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"version":"stub"}`))
+	})
+	mux.HandleFunc("/proxies/", func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	})
+	home, cleanup := newStubCore(t, mux)
+	defer cleanup()
+
+	if err := Unpin(context.Background(), home, "♻️ Auto"); err != nil {
+		t.Fatalf("Unpin: %v", err)
+	}
+	if gotMethod != http.MethodDelete {
+		t.Fatalf("method = %s, want DELETE", gotMethod)
+	}
+	// mux 侧 r.URL.Path 已解码：emoji 组名完整到达且为单段（client 侧 PathEscape
+	// 保证传输层编码；EscapedPath 校验见 core/api_test）
+	if gotPath != "/proxies/♻️ Auto" {
+		t.Fatalf("path = %q, want decoded emoji group path", gotPath)
+	}
+	if err := Unpin(context.Background(), home, ""); err == nil {
+		t.Fatal("empty group: want error")
+	}
+}
+
 func TestSelectWithoutCurrentProfile(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {

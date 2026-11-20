@@ -32,6 +32,15 @@ struct CurrentNodeCard: View {
                 }
                 delayBadge
                 Spacer()
+                // 模式徽标（v0.4.16）：自动/手动/已固定三态（判定见 ProxyGroup.modeBadge）
+                if let badge = activeGroup?.modeBadge {
+                    Text(badge)
+                        .font(.system(size: 10, weight: .medium))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(.quaternary))
+                        .foregroundStyle(Theme.secondary(scheme))
+                }
                 // 组名展示形态（v0.4.15 与 chips 同口径：icon+demo 中文名）；"当前组"
                 // 前缀语义由位置表达（M3-plan §3.2）
                 Text(currentGroupName ?? "—")
@@ -215,6 +224,10 @@ struct GroupsCardView: View {
     @ObservedObject var model: PanelModel
     @Environment(\.colorScheme) private var scheme
 
+    private var activeGroup: ProxyGroup? {
+        model.groups.first { $0.id == model.activeGroupID } ?? model.groups.first
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -222,6 +235,20 @@ struct GroupsCardView: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Theme.secondary(scheme))
                 Spacer()
+                // 恢复自动（v0.4.16）：仅当前组为 URLTest/Fallback 且处于固定态时出现
+                // ——固定态死角收口（此前固定后 UI 无解除路径）。WHY 按 fixed 数据
+                // 判定而非展示文案（审查 P3-1）：改文案不应静默失效功能
+                if activeGroup?.fixed != nil {
+                    Button {
+                        Task { await model.unpinFixed() }
+                    } label: {
+                        Label("恢复自动", systemImage: "arrow.counterclockwise")
+                            .font(.system(size: 11.5))
+                    }
+                    .controlSize(.small)
+                    .disabled(model.busy)
+                    .help("解除手动固定，恢复自动测速选择")
+                }
                 Button {
                     Task { await model.testLatency() }
                 } label: {

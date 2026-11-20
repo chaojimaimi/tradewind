@@ -146,6 +146,14 @@ func (c *Client) SelectProxy(ctx context.Context, group, node string) error {
 	return err
 }
 
+// UnpinProxy 清除 URLTest/Fallback 组的手动固定节点：DELETE /proxies/{group}，
+// 组恢复自动测速选择（mihomo 官方语义；v0.4.16 用户拍板"恢复自动"）。
+// WHY PathEscape 与 SelectProxy 同口径：组名含 emoji/空格。
+func (c *Client) UnpinProxy(ctx context.Context, group string) error {
+	_, err := c.do(ctx, http.MethodDelete, "/proxies/"+url.PathEscape(group), nil)
+	return err
+}
+
 // ProxyDelay 单节点延迟测试：GET /proxies/{name}/delay?timeout=&url=，
 // 返回毫秒数；内核测试失败（超时/不可达）按非 2xx 折为 error（实测 503）。
 func (c *Client) ProxyDelay(ctx context.Context, name string, timeoutMS int, testURL string) (int, error) {

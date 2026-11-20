@@ -135,6 +135,11 @@ final class CoreBridge {
         _ = try await runner.run(["select", group, node])
     }
 
+    /// 清除 URLTest/Fallback 组的手动固定节点，恢复自动测速选择（v0.4.16）。
+    func unpin(group: String) async throws {
+        _ = try await runner.run(["unpin", group])
+    }
+
     /// 出站模式热切换（rule|global|direct；非法值由 CLI 校验并报错）。
     func setMode(_ mode: String) async throws {
         _ = try await runner.run(["mode", mode])

@@ -86,6 +86,23 @@ func Select(ctx context.Context, home paths.Home, group, node string) error {
 	return nil
 }
 
+// Unpin 编排 `tradewind unpin`：清除 URLTest/Fallback 组的手动固定节点，恢复
+// 自动测速选择（v0.4.16 用户拍板）。WHY 不回写 profiles：固定态是内核运行时状态
+// （GET /proxies 的 fixed 字段），unpin 即清除，无"期望选择"需要持久化。
+func Unpin(ctx context.Context, home paths.Home, group string) error {
+	if group == "" {
+		return errors.New("app: usage: tradewind unpin <group>")
+	}
+	if err := requireCore(home); err != nil {
+		return err
+	}
+	if err := coreClient(home).UnpinProxy(ctx, group); err != nil {
+		return err
+	}
+	fmt.Printf("unpinned %q (auto selection resumed)\n", group)
+	return nil
+}
+
 // Delay 编排 `tradewind delay`：默认组解析 + 组内有界并发测试，按组内顺序输出。
 func Delay(ctx context.Context, home paths.Home, group string) error {
 	if err := requireCore(home); err != nil {

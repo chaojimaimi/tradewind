@@ -78,6 +78,9 @@ struct GatewayProxies: Codable {
         let now: String?
         let all: [String]?
         let history: [History]?
+        /// URLTest/Fallback 组的手动固定节点名（v0.4.16；固定态徽标+解除入口依据；
+        /// mihomo 官方字段，未固定态线格式为空串——消费侧归一化，见 PanelModel）
+        let fixed: String?
     }
 
     struct History: Codable {

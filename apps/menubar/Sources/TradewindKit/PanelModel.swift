@@ -21,6 +21,23 @@ struct ProxyGroup: Identifiable, Equatable {
     let type: String
     let nodes: [Node]
     let currentNode: String?
+    /// URLTest/Fallback 组的手动固定节点名（v0.4.16；nil=未固定=自动选择中）
+    let fixed: String?
+
+    /// 出站模式徽标（v0.4.16 用户拍板"全自动/手动固定两种模式可视化"）。
+    /// 锚定当前查看组的出口语义：Selector 出口落嵌套组=自动引擎接管；落节点=手动；
+    /// URLTest 看内核 fixed 字段（固定态 vs 自动选择中）。其余类型无此语义不显示。
+    var modeBadge: String? {
+        switch type {
+        case "Selector":
+            guard let now = currentNode else { return nil }
+            return nodes.first(where: { $0.name == now })?.isGroup == true ? "自动" : "手动"
+        case "URLTest", "Fallback":
+            return fixed == nil ? "自动" : "已固定"
+        default:
+            return nil
+        }
+    }
 
     /// 策略组展示形态（v0.4.15，用户反馈 pill 显示"Auto/Proxy"与 demo 的
     /// "节点选择/自动选择/全球直连"不一致）：中文名+图标按 demo 语义映射。
@@ -248,6 +265,19 @@ final class PanelModel: ObservableObject {
         await refreshGroups()
     }
 
+    /// 恢复自动（v0.4.16）：DELETE /proxies/{group} 清除 URLTest/Fallback 手动固定。
+    /// WHY 不做显式乐观：DELETE 是即时生效语义且网关本地毫秒级，refreshGroups 权威值
+    /// 落地即正确态；selectNode 的乐观模式针对 PUT 后内核确认延迟，此处无此时序。
+    func unpinFixed() async {
+        guard let group = activeGroup, let bridge, group.fixed != nil else { return }
+        do {
+            try await bridge.unpin(group: group.id)
+        } catch {
+            showToast("恢复自动失败")
+        }
+        await refreshGroups()
+    }
+
     /// 测速：CLI delay（并发 ≤8 由 CLI 保证）→ 重拉 /proxies 刷新延迟历史。
     func testLatency() async {
         guard let bridge, let group = activeGroup, !busy else { return }
@@ -350,7 +380,11 @@ final class PanelModel: ObservableObject {
                         case (nil, nil): return a.offset < b.offset // 同未测保持内核稳定序
                         }
                     }.map(\.element),
-                    currentNode: entry.now
+                    currentNode: entry.now,
+                    // 归一化空串（审查 P1，mihomo MarshalJSON 无 omitempty：未固定态
+                    // 线格式是 "fixed":"" 而非缺省——String? 解码得 Optional("")，不
+                    // 归一化则徽标恒"已固定"、解除闭环失效）
+                    fixed: entry.fixed.flatMap { $0.isEmpty ? nil : $0 }
                 )
             }
             activeGroupID = activeGroupID ?? groups.first?.id

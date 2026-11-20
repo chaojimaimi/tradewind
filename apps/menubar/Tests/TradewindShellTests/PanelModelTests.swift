@@ -95,7 +95,7 @@ final class StubURLProtocol: URLProtocol {
     /// 未命中组保留原名+按类型配图标（多地区组不重名）
     @Test func groupDisplayMapsDemoSemantics() {
         func group(_ name: String, _ type: String) -> ProxyGroup {
-            ProxyGroup(id: name, name: name, type: type, nodes: [], currentNode: nil)
+            ProxyGroup(id: name, name: name, type: type, nodes: [], currentNode: nil, fixed: nil)
         }
         #expect(group("Proxy", "Selector").display == ("🚀", "节点选择"))
         #expect(group("Auto", "URLTest").display == ("♻️", "自动选择"))
@@ -136,6 +136,70 @@ final class StubURLProtocol: URLProtocol {
         await model.refresh()
         #expect(model.degraded)
         #expect(model.groups.isEmpty)
+    }
+
+    /// v0.4.16：模式徽标三态（用户拍板"全自动/手动固定可视化"）——
+    /// Selector 出口落嵌套组=自动、落节点=手动；URLTest 看 fixed 字段
+    @Test func modeBadgeFollowsExitSemantics() {
+        func node(_ name: String, delay: Int? = nil, isGroup: Bool = false) -> ProxyGroup.Node {
+            .init(id: name, name: name, delay: delay, isGroup: isGroup)
+        }
+        // Selector：出口=嵌套组 → 自动；出口=节点 → 手动
+        let selectorToGroup = ProxyGroup(id: "Proxy", name: "Proxy", type: "Selector",
+                                         nodes: [node("Auto", isGroup: true)], currentNode: "Auto", fixed: nil)
+        #expect(selectorToGroup.modeBadge == "自动")
+        let selectorToNode = ProxyGroup(id: "Proxy", name: "Proxy", type: "Selector",
+                                        nodes: [node("HK-1")], currentNode: "HK-1", fixed: nil)
+        #expect(selectorToNode.modeBadge == "手动")
+        // URLTest：fixed 非空=已固定；空=自动
+        let urlTestPinned = ProxyGroup(id: "Auto", name: "Auto", type: "URLTest",
+                                       nodes: [node("HK-1")], currentNode: "HK-1", fixed: "HK-1")
+        #expect(urlTestPinned.modeBadge == "已固定")
+        let urlTestFree = ProxyGroup(id: "Auto", name: "Auto", type: "URLTest",
+                                     nodes: [node("HK-1")], currentNode: "HK-1", fixed: nil)
+        #expect(urlTestFree.modeBadge == "自动")
+        // 其他类型无此语义
+        #expect(ProxyGroup(id: "X", name: "X", type: "Relay", nodes: [], currentNode: nil, fixed: nil).modeBadge == nil)
+    }
+
+    /// v0.4.16：恢复自动动作——CLI unpin 调用后重拉 /proxies，fixed 权威值落地
+    @Test func unpinFixedResumesAuto() async {
+        let pinnedJSON = """
+        {"proxies":{
+          "GLOBAL":{"name":"GLOBAL","type":"Selector","now":"Auto"},
+          "Auto":{"name":"Auto","type":"URLTest","now":"HK-1","all":["HK-1"],"fixed":"HK-1"},
+          "HK-1":{"name":"HK-1","type":"Socks5","history":[{"delay":42}]}
+        }}
+        """
+        // 真实 mihomo 线格式（审查 P1）：未固定态是 "fixed":"" 而非字段缺省
+        // （MarshalJSON 无 omitempty）——空串必须归一化为 nil 才能判定"自动"
+        let freeJSON = pinnedJSON.replacingOccurrences(of: "\"fixed\":\"HK-1\"", with: "\"fixed\":\"\"")
+        StubURLProtocol.handler = { _ in (200, pinnedJSON) }
+        let fake = FakeRunner(FakeRunner.Reply(output: Self.statusWithPanel, exitCode: 0))
+        let model = PanelModel(bridge: CoreBridge(runner: fake), session: StubURLProtocol.install())
+        await model.refresh()
+        let pinned = model.groups.first { $0.id == "Auto" }
+        #expect(pinned?.fixed == "HK-1")
+        #expect(pinned?.modeBadge == "已固定")
+
+        // 解除：unpin 成功 → 网关侧 fixed 消失 → 权威值落地
+        StubURLProtocol.handler = { _ in (200, freeJSON) }
+        await model.unpinFixed()
+        let freed = model.groups.first { $0.id == "Auto" }
+        #expect(freed?.fixed == nil)
+        #expect(freed?.modeBadge == "自动")
+        #expect(fake.calls.contains(["unpin", "Auto"]))
+    }
+
+    /// v0.4.16（审查 P3-4）：fixed==nil 时恢复自动为 no-op（不发起 CLI 调用）
+    @Test func unpinSkipsWhenNotFixed() async {
+        StubURLProtocol.handler = { _ in (200, Self.proxiesJSON) }
+        let fake = FakeRunner(FakeRunner.Reply(output: Self.statusWithPanel, exitCode: 0))
+        let model = PanelModel(bridge: CoreBridge(runner: fake), session: StubURLProtocol.install())
+        await model.refresh()
+        let before = fake.calls.count
+        await model.unpinFixed() // 共享 mock 的组均无 fixed → no-op
+        #expect(fake.calls.count == before)
     }
 
     @Test func iconStateFollowsReportSemantics() async {

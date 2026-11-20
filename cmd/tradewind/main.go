@@ -23,6 +23,7 @@ Usage:
   tradewind status [--json]                           core / system proxy / subscription overview (--json for shells)
   tradewind nodes [GROUP]                             list policy groups, or GROUP's nodes with last delay
   tradewind select <GROUP> <NODE>                     switch node (requires core running)
+  tradewind unpin <GROUP>                             clear URLTest fixed node (resume auto selection)
   tradewind delay [GROUP]                             latency test, default group from last selection
   tradewind mode [rule|global|direct]                 show or switch outbound mode (hot-applied when running)
   tradewind sysproxy on|off                           runtime system proxy toggle (idempotent; on requires core running)
@@ -60,6 +61,8 @@ func main() {
 		err = cmdNodes(home, args[1:])
 	case "select":
 		err = cmdSelect(home, args[1:])
+	case "unpin":
+		err = cmdUnpin(home, args[1:])
 	case "delay":
 		err = cmdDelay(home, args[1:])
 	case "mode":
@@ -183,6 +186,14 @@ func cmdSelect(home paths.Home, args []string) error {
 		return err
 	}
 	return app.Select(context.Background(), home, fs.Arg(0), fs.Arg(1))
+}
+
+func cmdUnpin(home paths.Home, args []string) error {
+	fs := flag.NewFlagSet("unpin", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return app.Unpin(context.Background(), home, fs.Arg(0))
 }
 
 func cmdDelay(home paths.Home, args []string) error {
