@@ -142,10 +142,8 @@ var runMihomoCheck = func(binPath, configPath, dataDir string) (string, error) {
 }
 
 // verifyEnhanceCandidate 语义校验（评审 P1-2，仅挂 enhance set/clear 编排）：
-// 合成候选字节（uid=校验目标订阅，code-reviewer P2-2）→ 写候选到数据目录内临时文件
-// （0600，内容含 secret 与节点，不依赖 TMPDIR 权限假设）→ `mihomo -t`；二进制缺失
-// （裸机/未安装）跳过不阻断（best-effort）。mihomo 输出中的候选路径脱敏为
-// <candidate>（不泄露内部路径）。
+// 合成候选字节（uid=校验目标订阅，code-reviewer P2-2）→ 共享校验核 checkCandidateBytes。
+// 二进制缺失（裸机/未安装）跳过不阻断（best-effort，跳过说明经 progress 显式输出）。
 func verifyEnhanceCandidate(ctx context.Context, home paths.Home, progress io.Writer, uid string) error {
 	if _, err := os.Stat(home.Bin()); errors.Is(err, os.ErrNotExist) {
 		fmt.Fprintln(progress, "mihomo binary missing; skip semantic validation (best-effort)")
@@ -155,26 +153,19 @@ func verifyEnhanceCandidate(ctx context.Context, home paths.Home, progress io.Wr
 	if err != nil {
 		return err
 	}
-	tmp := home.Join("enhance-candidate.yaml")
-	if err := store.WriteFileRaw(tmp, candidate); err != nil {
-		return err
-	}
-	defer os.Remove(tmp)
-	out, err := runMihomoCheck(home.Bin(), tmp, home.String())
-	if err != nil {
-		detail := strings.ReplaceAll(strings.TrimSpace(out), tmp, "<candidate>")
-		if detail == "" {
-			detail = err.Error()
-		}
-		return fmt.Errorf("app: enhance 语义校验未通过（mihomo -t），槽已回滚: %s", detail)
+	if err := checkCandidateBytes(home, candidate); err != nil {
+		return fmt.Errorf("app: enhance 语义校验未通过（mihomo -t），槽已回滚: %w", err)
 	}
 	return nil
 }
 
-// synthesizeCandidate 合成候选字节（uid 订阅 + 该 uid 增强层 + 注入；校验专用，
-// 不落 runtime）。uid 空（global-merge 槽无解析目标）退 current 订阅+仅全局层——
-// 全局层作用于所有订阅，对 current 合成即代表校验其全局效果。
-func synthesizeCandidate(ctx context.Context, home paths.Home, uid string) ([]byte, error) {
+// composeCandidate 合成候选字节（批④ §2.2 共享核，Use/update 预检与 enhance 校验
+// 复用同一实现，不另起第三份）：settings + index + 该 uid 增强层 + synth.Synth。
+// profileBytes 非 nil 时直接采用（Use/update 预检——目标字节尚未落盘/勿读旧盘内容），
+// nil 时按 uid 从索引与磁盘读取（enhance 校验既有路径）。uid 空（global-merge 槽
+// 无解析目标）退 current 订阅 + 仅全局层——全局层作用于所有订阅，对 current 合成
+// 即代表校验其全局效果。
+func composeCandidate(home paths.Home, uid string, profileBytes []byte) ([]byte, error) {
 	settings, err := store.LoadSettings(home)
 	if err != nil {
 		return nil, err
@@ -187,11 +178,13 @@ func synthesizeCandidate(ctx context.Context, home paths.Home, uid string) ([]by
 	if profileUID == "" {
 		profileUID = idx.Current
 	}
-	var sub []byte
-	if item, ok := idx.ByUID(profileUID); ok {
-		sub, err = os.ReadFile(home.ProfileFile(item.File))
-		if err != nil {
-			return nil, fmt.Errorf("app: read profile %s: %w", item.File, err)
+	sub := profileBytes
+	if sub == nil {
+		if item, ok := idx.ByUID(profileUID); ok {
+			sub, err = os.ReadFile(home.ProfileFile(item.File))
+			if err != nil {
+				return nil, fmt.Errorf("app: read profile %s: %w", item.File, err)
+			}
 		}
 	}
 	enh, err := loadEnhanceLayers(home, profileUID)
@@ -200,6 +193,50 @@ func synthesizeCandidate(ctx context.Context, home paths.Home, uid string) ([]by
 	}
 	var warnings []string
 	return synth.Synth(sub, synth.Injection{Settings: settings, Secret: store.ReadSecret(home), Warnings: &warnings}, enh)
+}
+
+// checkCandidateBytes 校验候选字节（批④ §2.2 共享核）：写数据目录内临时文件
+// （0600，内容含 secret 与节点，不依赖 TMPDIR 权限假设）→ `mihomo -t` → 输出中
+// 候选路径脱敏为 <candidate>（不泄露内部路径）。二进制缺失（裸机/未安装）跳过
+// 不阻断（返回 nil，best-effort；调用方如需显式跳过说明自行 stat 前置）。
+func checkCandidateBytes(home paths.Home, candidate []byte) error {
+	if _, err := os.Stat(home.Bin()); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	tmp := home.Join("enhance-candidate.yaml")
+	if err := store.WriteFileRaw(tmp, candidate); err != nil {
+		return err
+	}
+	defer os.Remove(tmp)
+	out, err := runMihomoCheck(home.Bin(), tmp, home.String())
+	if err != nil {
+		detail := strings.ReplaceAll(strings.TrimSpace(out), tmp, "<candidate>")
+		if detail == "" {
+			detail = err.Error()
+		}
+		return errors.New(detail)
+	}
+	return nil
+}
+
+// precheckCandidateBytes Use/update 前语义预检（批④ §2.2，收口批③ F6 登记的
+// -t 绕过窗口）：候选合成失败或 mihomo -t 未通过 → 显式报错"已保持当前状态不变"，
+// 调用方在任何落盘（index/runtime/snapshot/订阅文件）之前中止。
+func precheckCandidateBytes(home paths.Home, uid string, profileBytes []byte) error {
+	candidate, err := composeCandidate(home, uid, profileBytes)
+	if err != nil {
+		return fmt.Errorf("app: 目标订阅合成失败，已保持当前状态不变: %w", err)
+	}
+	if err := checkCandidateBytes(home, candidate); err != nil {
+		return fmt.Errorf("app: 目标订阅合成后未通过 mihomo -t 校验，已保持当前状态不变: %w", err)
+	}
+	return nil
+}
+
+// synthesizeCandidate 合成候选字节（uid 订阅 + 该 uid 增强层 + 注入；校验专用，
+// 不落 runtime）。批④ §2.2 改薄包装：组合逻辑下沉 composeCandidate 共享核。
+func synthesizeCandidate(ctx context.Context, home paths.Home, uid string) ([]byte, error) {
+	return composeCandidate(home, uid, nil)
 }
 
 // EnhanceShow 编排 `tradewind enhance show <slot>` 人读形态（--json 由 CLI 层走

@@ -73,3 +73,46 @@ func TestParseBypassDomains(t *testing.T) {
 		t.Fatalf("Empty keyword should give nil, got %#v", got)
 	}
 }
+
+func TestParseAutoProxyStateConfigured(t *testing.T) {
+	// 批④ §3.3 评审 P2-6 样例钉死：PAC 已配置态
+	url, enabled, err := ParseAutoProxyState("URL: http://127.0.0.1:39097/pac\nEnabled: Yes\n")
+	if err != nil {
+		t.Fatalf("ParseAutoProxyState: %v", err)
+	}
+	if url != "http://127.0.0.1:39097/pac" || !enabled {
+		t.Fatalf("url=%q enabled=%v", url, enabled)
+	}
+}
+
+func TestParseAutoProxyStateURLButDisabled(t *testing.T) {
+	// `URL: x / Enabled: No` 是真实常见 macOS 态（用户曾配 PAC 后关闭）
+	url, enabled, err := ParseAutoProxyState("URL: http://old.example/pac\nEnabled: No\n")
+	if err != nil {
+		t.Fatalf("ParseAutoProxyState: %v", err)
+	}
+	if url != "http://old.example/pac" || enabled {
+		t.Fatalf("url=%q enabled=%v", url, enabled)
+	}
+}
+
+func TestParseAutoProxyStateNullSentinel(t *testing.T) {
+	// 未配置态：URL (null) 哨兵归一为零值
+	url, enabled, err := ParseAutoProxyState("URL: (null)\nEnabled: No\n")
+	if err != nil {
+		t.Fatalf("ParseAutoProxyState: %v", err)
+	}
+	if url != "" || enabled {
+		t.Fatalf("null sentinel must normalize to zero; url=%q enabled=%v", url, enabled)
+	}
+}
+
+func TestParseAutoProxyStateUnrecognizedOutput(t *testing.T) {
+	// 无已知键的输出（错误文本/空串）显式报错——静默零值会让备份误判
+	if _, _, err := ParseAutoProxyState(""); err == nil {
+		t.Fatal("empty output: want error")
+	}
+	if _, _, err := ParseAutoProxyState("** Error: Not Found\n"); err == nil {
+		t.Fatal("garbage output: want error")
+	}
+}

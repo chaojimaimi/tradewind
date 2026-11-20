@@ -11,6 +11,14 @@ struct SettingsSnapshot: Codable, Equatable {
     var mode: String
     var logLevel: String
     var logRetentionDays: Int
+    /// PAC 模式开关（批④ §3.1，Go store.Settings.PacMode 对齐）。
+    /// WHY 可选：版本偏斜窗口（新壳 + 旧 CLI）输出缺键——非可选 Bool 解码 keyNotFound
+    /// 会让整个 settings 读取失败（ProfileIntervalEntry.updateInterval 同款陷阱）；
+    /// nil=旧 CLI 未提供（UI 按 false 处理，legacy 语义即手工模式）。
+    var pacMode: Bool?
+    /// 绕过域名（逗号分隔存储的数组形态；nil=未设置 → 生效值取缺省集）。
+    /// Go omitempty 对 nil slice 缺键，同上必须可选。
+    var bypassDomains: [String]?
 
     enum CodingKeys: String, CodingKey {
         case mixedPort = "mixed_port"
@@ -20,6 +28,8 @@ struct SettingsSnapshot: Codable, Equatable {
         case mode
         case logLevel = "log_level"
         case logRetentionDays = "log_retention_days"
+        case pacMode = "pac_mode"
+        case bypassDomains = "bypass_domains"
     }
 
     /// 解码单行 JSON 输出；解析失败显式报错（壳按降级态处理而非崩溃）。

@@ -336,18 +336,17 @@ func TestEnhanceSetUnknownUIDRejected(t *testing.T) {
 	}
 }
 
-func TestUseAndSettingsBypassSemanticValidation(t *testing.T) {
-	// 既有写路径（use/settings）失败面维持现状（评审二轮 P1-2 折入）：
-	// 不挂 -t 校验；坏增强文件在场时 use/settings 照常落盘
+func TestUseAndSettingsSemanticValidationScope(t *testing.T) {
+	// 批④ §2.2 修订批③口径：Use 挂语义预检（收口 -t 绕过窗口），settings 写编排
+	// 仍不挂（settings 只改注入键值，不换订阅内容）
 	home := seedEnhanceHome(t)
 	fakeCoreBinary(t, home)
-	// 预置增强文件（对 synth 合法；-t 若被挂载会拦"配其他订阅非法"的组合——
-	// 断言点：既有写路径根本不调用 -t，失败面与批③之前一致）
+	// 预置增强文件（对 synth 合法）
 	if err := store.WriteFileRaw(home.EnhanceSlotFile("old01", EnhanceSlotRules), []byte("- DOMAIN-SUFFIX,enhanced.example,DIRECT\n")); err != nil {
 		t.Fatal(err)
 	}
 	calls := withMihomoCheckStub(t, false)
-	// use：不触发校验、照常切换
+	// use：目标订阅+该 uid 增强层合成候选过 -t（批④预检），照常切换
 	if err := Use(context.Background(), home, "new02"); err != nil {
 		t.Fatalf("Use with enhance files present: %v", err)
 	}
@@ -355,11 +354,15 @@ func TestUseAndSettingsBypassSemanticValidation(t *testing.T) {
 	if err != nil || idx.Current != "new02" {
 		t.Fatalf("current = %q, err = %v", idx.Current, err)
 	}
-	// settings：同样不触发校验
+	if len(*calls) == 0 {
+		t.Fatal("Use must run the mihomo -t precheck (batch4 §2.2)")
+	}
+	// settings：仍不触发校验
+	before := len(*calls)
 	if err := SettingsSet(context.Background(), home, "log_retention_days", "21"); err != nil {
 		t.Fatalf("SettingsSet with enhance files present: %v", err)
 	}
-	if len(*calls) != 0 {
-		t.Fatalf("existing write paths must not invoke mihomo -t: %v", *calls)
+	if len(*calls) != before {
+		t.Fatalf("settings write must not invoke mihomo -t: %v", *calls)
 	}
 }

@@ -135,7 +135,9 @@ func expireSummary(item store.ProfileItem) string {
 }
 
 // Use 编排 `tradewind use <uid|name>`：切换当前订阅。
-// 顺序（M2-plan §4）：mutation.lock → 旧订阅快照回写 → 切 current → 重合成 → 热重载。
+// 顺序（M2-plan §4；批④ §2.2 前插语义预检）：mutation.lock → 目标订阅合成候选
+// mihomo -t 预检（失败=报错返回，index/runtime/snapshot 全不动——收口批③登记的
+// -t 绕过窗口）→ 旧订阅快照回写 → 切 current → 重合成 → 热重载。
 // 快照先于切换：此刻内核仍运行旧配置，回写归属旧订阅（复用触发三，M1-plan §4.3）。
 func Use(ctx context.Context, home paths.Home, target string) error {
 	if target == "" {
@@ -158,6 +160,15 @@ func Use(ctx context.Context, home paths.Home, target string) error {
 	if item.UID == idx.Current {
 		fmt.Printf("%q is already current\n", item.Name)
 		return nil
+	}
+	// 语义预检（批④ §2.2）：目标订阅字节 + 该 uid 增强层合成候选过 mihomo -t；
+	// 失败在任何落盘之前中止（precheck 内部只读，不触碰 index/runtime/snapshot）
+	profileBytes, err := os.ReadFile(home.ProfileFile(item.File))
+	if err != nil {
+		return fmt.Errorf("app: read profile %s: %w", item.File, err)
+	}
+	if err := precheckCandidateBytes(home, item.UID, profileBytes); err != nil {
+		return err
 	}
 	if err := snapshotBeforeSwitch(ctx, home, &idx); err != nil {
 		return err

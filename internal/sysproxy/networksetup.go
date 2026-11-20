@@ -49,8 +49,8 @@ func ActiveServices(r Runner) ([]string, error) {
 	return active, nil
 }
 
-// Snapshot 读取各服务的 web/secure/socks 三项代理与 bypass 列表（写入前备份）。
-// 备份是精确还原的唯一依据（还原优先于设置，DESIGN §7.2）。
+// Snapshot 读取各服务的 web/secure/socks 三项代理、bypass 列表与自动代理态
+// （写入前备份）。备份是精确还原的唯一依据（还原优先于设置，DESIGN §7.2）。
 func Snapshot(r Runner, services []string) ([]store.ServiceBackup, error) {
 	var backups []store.ServiceBackup
 	for _, svc := range services {
@@ -70,8 +70,17 @@ func Snapshot(r Runner, services []string) ([]store.ServiceBackup, error) {
 		if err != nil {
 			return nil, err
 		}
+		autoURL, autoEnabled, err := getAutoProxyState(r, svc)
+		if err != nil {
+			return nil, err
+		}
 		backups = append(backups, store.ServiceBackup{
-			Service: svc, Web: web, Secure: secure, Socks: socks, Bypass: bypass,
+			Service:   svc,
+			Web:       web,
+			Secure:    secure,
+			Socks:     socks,
+			Bypass:    bypass,
+			AutoProxy: store.AutoProxyState{URL: autoURL, Enabled: autoEnabled},
 		})
 	}
 	return backups, nil
@@ -95,4 +104,18 @@ func getBypassDomains(r Runner, svc string) ([]string, error) {
 		return nil, fmt.Errorf("sysproxy: -getproxybypassdomains %s: %w", svc, err)
 	}
 	return ParseBypassDomains(out), nil
+}
+
+// getAutoProxyState 读取自动代理态（-getautoproxyurl）。
+// 注意：该命令在服务名不存在等异常时也可能输出错误文本——解析层以"无已知键"报错。
+func getAutoProxyState(r Runner, svc string) (string, bool, error) {
+	out, err := r.Run("-getautoproxyurl", svc)
+	if err != nil {
+		return "", false, fmt.Errorf("sysproxy: -getautoproxyurl %s: %w", svc, err)
+	}
+	url, enabled, err := ParseAutoProxyState(out)
+	if err != nil {
+		return "", false, fmt.Errorf("sysproxy: -getautoproxyurl %s: %w", svc, err)
+	}
+	return url, enabled, nil
 }

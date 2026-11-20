@@ -125,8 +125,9 @@ func PanelURLOnly(home paths.Home) error {
 	return nil
 }
 
-// gatewayReachable 探测网关端口是否有监听者（1s 超时）。
-func gatewayReachable(port int) bool {
+// gatewayReachable 探测网关端口是否有监听者（1s 超时）。var 缝隙（runMihomoCheck
+// 同款）：单测注入——真探测会与本机端口占用环境耦合（守卫分支测试钉死可注入）。
+var gatewayReachable = func(port int) bool {
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
 	if err != nil {
 		return false

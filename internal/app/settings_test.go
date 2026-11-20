@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/chaojimaimi/tradewind/internal/core"
 	"github.com/chaojimaimi/tradewind/internal/paths"
 	"github.com/chaojimaimi/tradewind/internal/store"
 )
@@ -265,7 +267,7 @@ func TestSettingsResetRestoresDefaults(t *testing.T) {
 		t.Fatalf("SettingsReset: %v", err)
 	}
 	got, err := store.LoadSettings(home)
-	if err != nil || got != store.DefaultSettings() {
+	if err != nil || !reflect.DeepEqual(got, store.DefaultSettings()) {
 		t.Fatalf("after reset = %+v err %v, want defaults", got, err)
 	}
 	data, err := os.ReadFile(home.RuntimeFile())
@@ -292,7 +294,7 @@ func TestSettingsGetJSONDecodable(t *testing.T) {
 	if err := json.Unmarshal([]byte(line), &got); err != nil {
 		t.Fatalf("settings --json not decodable: %v (%s)", err, line)
 	}
-	if got != store.DefaultSettings() {
+	if !reflect.DeepEqual(got, store.DefaultSettings()) {
 		t.Fatalf("decoded = %+v, want defaults", got)
 	}
 	// 键名与 yaml 一致（snake_case），壳按这些键建 Codable 模型
@@ -300,5 +302,80 @@ func TestSettingsGetJSONDecodable(t *testing.T) {
 		if !strings.Contains(line, `"`+key+`"`) {
 			t.Fatalf("settings --json missing key %q: %s", key, line)
 		}
+	}
+}
+
+// TestSettingsSetPacModeAndBypass 批④ §3.1：pac_mode 开关与 bypass_domains 逗号
+// 分隔写入门（空=恢复缺省），白名单校验拒绝注入形态且不落盘。
+func TestSettingsSetPacModeAndBypass(t *testing.T) {
+	home := paths.Home(stubSocketDir(t))
+	seedRuntimeInputs(t, home)
+
+	if err := SettingsSet(context.Background(), home, "pac_mode", "on"); err != nil {
+		t.Fatalf("set pac_mode: %v", err)
+	}
+	s, err := store.LoadSettings(home)
+	if err != nil || !s.PacMode {
+		t.Fatalf("pac_mode = %v err %v, want true", s.PacMode, err)
+	}
+
+	if err := SettingsSet(context.Background(), home, "bypass_domains", "*.local, 169.254/16 ,<local>"); err != nil {
+		t.Fatalf("set bypass_domains: %v", err)
+	}
+	s, _ = store.LoadSettings(home)
+	want := []string{"*.local", "169.254/16", "<local>"}
+	if !reflect.DeepEqual(s.BypassDomains, want) {
+		t.Fatalf("bypass = %#v, want %#v", s.BypassDomains, want)
+	}
+
+	// 空=恢复缺省（nil → 生效值取 sysproxy 缺省集）
+	if err := SettingsSet(context.Background(), home, "bypass_domains", ""); err != nil {
+		t.Fatalf("set bypass_domains empty: %v", err)
+	}
+	s, _ = store.LoadSettings(home)
+	if s.BypassDomains != nil {
+		t.Fatalf("empty bypass must reset to nil, got %#v", s.BypassDomains)
+	}
+
+	// 非法形态拒绝且不落盘（Validate 下沉）
+	if err := SettingsSet(context.Background(), home, "bypass_domains", "evil;x"); err == nil {
+		t.Fatal("injected bypass: want error")
+	}
+	s, _ = store.LoadSettings(home)
+	if s.BypassDomains != nil {
+		t.Fatalf("rejected bypass must not persist: %#v", s.BypassDomains)
+	}
+	if err := SettingsSet(context.Background(), home, "pac_mode", "maybe"); err == nil {
+		t.Fatal("invalid pac_mode: want error")
+	}
+}
+
+// TestPostHandshakePACGatewayDowngradedSkips 批④ §3.3 评审二轮 P2-3：start 路径
+// pac_mode on + 网关降级 → 跳过系统代理写入 + 显著警告，不 fail start（F4 降级哲学）。
+func TestPostHandshakePACGatewayDowngradedSkips(t *testing.T) {
+	home := paths.Home(stubSocketDir(t))
+	seedRuntimeInputs(t, home)
+	stubGatewayReachable(t, false)
+
+	mgr := core.NewManager(core.Config{SockPath: home.SockFile()}) // 未 spawn：仅装配态
+	settings := store.DefaultSettings()
+	settings.PacMode = true
+	opts := StartOptions{ApplySysProxy: true}
+	generation, err := postHandshake(context.Background(), home, mgr, opts, settings, "")
+	if err != nil {
+		t.Fatalf("postHandshake with downgraded gateway = %v, want nil (skip, not fail start)", err)
+	}
+	if generation != 1 {
+		t.Fatalf("generation = %d, want 1", generation)
+	}
+	st, err := store.LoadState(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.SysProxy.Applied {
+		t.Fatal("sysproxy must stay unapplied on PAC guard skip")
+	}
+	if st.Core.Desired != store.DesiredRunning {
+		t.Fatalf("desired = %q, want running (start continues)", st.Core.Desired)
 	}
 }

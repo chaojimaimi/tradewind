@@ -24,20 +24,36 @@ type ProxyState struct {
 	Port    int    `json:"port"`
 }
 
+// AutoProxyState 是单个网络服务上自动代理（PAC）的备份态。
+// URL 空 + Enabled 假 = 零值（机器未配置自动代理的常态；-getautoproxyurl 的
+// (null) 哨兵归一为零值 URL）。
+type AutoProxyState struct {
+	URL     string `json:"url"`
+	Enabled bool   `json:"enabled"`
+}
+
 // ServiceBackup 是单个网络服务的代理全量备份（写入前快照）。
+// AutoProxy 为批④新增：旧 state.json 缺键 → 零值（ReadJSON 语义），Restore 据此零扰动。
 type ServiceBackup struct {
-	Service string     `json:"service"`
-	Web     ProxyState `json:"web"`
-	Secure  ProxyState `json:"secure"`
-	Socks   ProxyState `json:"socks"`
-	Bypass  []string   `json:"bypass"`
+	Service   string         `json:"service"`
+	Web       ProxyState     `json:"web"`
+	Secure    ProxyState     `json:"secure"`
+	Socks     ProxyState     `json:"socks"`
+	Bypass    []string       `json:"bypass"`
+	AutoProxy AutoProxyState `json:"auto_proxy"`
 }
 
 // SysProxyState 记录系统代理是否由我们写入 + 各服务备份。
 // applied=false 即视为无残留——启动清理的唯一判据。
+// Form 是本会话写入形态（"manual"/"pac"；空=legacy 视为 manual，Restore 决策表
+// 按 Form 分流）。HijackEvents/LastRestore 是代理守护（批④ D1）的抢改事件计数
+// 与最近还原时间戳——零值兼容旧 state.json。
 type SysProxyState struct {
-	Applied  bool            `json:"applied"`
-	Services []ServiceBackup `json:"services"`
+	Applied      bool            `json:"applied"`
+	Services     []ServiceBackup `json:"services"`
+	Form         string          `json:"form,omitempty"`
+	HijackEvents int             `json:"hijack_events,omitempty"`
+	LastRestore  int64           `json:"last_restore,omitempty"`
 }
 
 // CoreState 记录内核期望状态与最近已知 pid（孤儿内核检测用）。

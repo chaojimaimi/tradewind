@@ -60,6 +60,22 @@ private let statusWithoutProfileJSON =
         }
     }
 
+    /// 批④ §3.1：pac_mode/bypass_domains 两键解码（SettingsSnapshot 同步加键，F12 勿漏）
+    @Test func settingsGetJSONDecodesPacKeys() throws {
+        let line = #"{"mixed_port":7897,"gateway_port":39097,"panel_enabled":true,"allow_lan":false,"mode":"rule","log_level":"info","log_retention_days":14,"pac_mode":true,"bypass_domains":["*.local","169.254/16"]}"#
+        let snapshot = try SettingsSnapshot.decode(line)
+        #expect(snapshot.pacMode == true)
+        #expect(snapshot.bypassDomains == ["*.local", "169.254/16"])
+    }
+
+    /// 版本偏斜兼容：旧 CLI 输出缺两键 → 解码成功、字段为 nil（非可选会 keyNotFound
+    /// 全解码失败——ProfileIntervalEntry.updateInterval 同款陷阱）
+    @Test func settingsGetJSONToleratesMissingPacKeys() throws {
+        let snapshot = try SettingsSnapshot.decode(settingsJSONFixture)
+        #expect(snapshot.pacMode == nil)
+        #expect(snapshot.bypassDomains == nil)
+    }
+
     @Test func autostartStatusJSONDecodesAndGatesEnabled() async throws {
         // installed 未 loaded：plist 在但需下次登录生效 → 开关口径为关（enabled 双真语义）
         let fake = FakeRunner(FakeRunner.Reply(output: #"{"installed":true,"loaded":false}"#, exitCode: 0))

@@ -91,11 +91,18 @@ func Run(ctx context.Context, home paths.Home, opts StartOptions) error {
 
 // postHandshake 完成握手后的步骤 7/8：系统代理写入 + desired=running + ready 输出
 // （M1：ready 行追加 panel 入口 URL；M2：generation 自增并返回本实例代际，M2-plan §2.3）。
+// PAC 形态 + 网关降级（批④ §3.3 评审二轮 P2-3）：跳过系统代理写入并显著警告
+// "PAC 未生效"，不 fail start——fail-start 会把网关降级升级为整机失败，违反 F4
+// 降级哲学；其余写入失败照旧 fullShutdown（写入半途失败不留半应用态）。
 func postHandshake(ctx context.Context, home paths.Home, mgr *core.Manager, opts StartOptions, settings store.Settings, panelURL string) (int, error) {
 	if opts.ApplySysProxy {
-		if _, err := applySysProxy(home, settings.MixedPort); err != nil {
-			_ = fullShutdown(home, mgr, 0)
-			return 0, err
+		if _, err := applySysProxy(home, settings.MixedPort, formFromSettings(settings)); err != nil {
+			if errors.Is(err, errPACGatewayUnreachable) {
+				fmt.Println("warning: PAC 未生效（网关降级）——系统代理未写入；检查 panel_enabled/ui 后重启 Tradewind")
+			} else {
+				_ = fullShutdown(home, mgr, 0)
+				return 0, err
+			}
 		}
 	}
 	st, err := store.LoadState(home)

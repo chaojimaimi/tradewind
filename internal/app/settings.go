@@ -13,8 +13,9 @@ import (
 	"github.com/chaojimaimi/tradewind/internal/sysproxy"
 )
 
-// settingsKeys 是 `settings set` 的白名单键（壳通用页可写集，M3-plan §11.2-5）。
-var settingsKeys = []string{"mixed_port", "gateway_port", "panel_enabled", "allow_lan", "log_retention_days"}
+// settingsKeys 是 `settings set` 的白名单键（壳通用页可写集，M3-plan §11.2-5；
+// 批④ §3.1 增 pac_mode/bypass_domains）。
+var settingsKeys = []string{"mixed_port", "gateway_port", "panel_enabled", "allow_lan", "log_retention_days", "pac_mode", "bypass_domains"}
 
 // SettingsGet 编排 `tradewind settings [get]`：--json 输出机器可读单行 JSON
 // （壳通用页初始值数据源），否则打印人读表。
@@ -53,6 +54,16 @@ func printSettingsTable(s store.Settings) {
 	fmt.Printf("mode:               %s\n", s.Mode)
 	fmt.Printf("log_level:          %s\n", s.LogLevel)
 	fmt.Printf("log_retention_days: %d\n", s.LogRetentionDays)
+	fmt.Printf("pac_mode:           %t\n", s.PacMode)
+	fmt.Printf("bypass_domains:     %s\n", bypassDomainsDisplay(s.BypassDomains))
+}
+
+// bypassDomainsDisplay 人读 bypass 列表（空=未设置，生效值取 sysproxy 缺省集）。
+func bypassDomainsDisplay(domains []string) string {
+	if len(domains) == 0 {
+		return "(default)"
+	}
+	return strings.Join(domains, ",")
 }
 
 // SettingsSet 编排 `tradewind settings set <key> <value>`：
@@ -135,7 +146,9 @@ func applySettingsMutationWith(ctx context.Context, home paths.Home, mutate func
 
 // retargetSysProxy mixed_port 变更后的系统代理迁移。
 // WHY 不复用 SysProxyOn：applied=true 时它是幂等 no-op，直接再调不生效；
-// 这里直接 Apply 新端口并保留既有备份态（备份仍指向用户原始网络配置，还原语义不变）。
+// 这里直接按会话 Form（SysProxyState.Form）重放对应形态写入并保留既有备份态
+// （备份仍指向用户原始网络配置，还原语义不变）；bypass 用 settings 生效值。
+// 仅 mixed_port 变更触发——gateway_port 是 skipKernelReload 键不重放（批④ §3.2）。
 // 失败显式报错不静默（系统代理仍指旧端口属用户可感知故障），不做自动回滚
 // （回滚到旧端口同样指向已死端口，无意义）。
 func retargetSysProxy(home paths.Home, port int, runner sysproxy.Runner) error {
@@ -146,6 +159,10 @@ func retargetSysProxy(home paths.Home, port int, runner sysproxy.Runner) error {
 	if !st.SysProxy.Applied {
 		return nil // 未应用系统代理：无需迁移
 	}
+	settings, err := store.LoadSettings(home)
+	if err != nil {
+		return err
+	}
 	svcs, err := sysproxy.ActiveServices(runner)
 	if err != nil {
 		return fmt.Errorf("app: retarget sysproxy: %w; 系统代理迁移失败，请手动开关一次系统代理", err)
@@ -153,7 +170,14 @@ func retargetSysProxy(home paths.Home, port int, runner sysproxy.Runner) error {
 	if len(svcs) == 0 {
 		return errors.New("app: retarget sysproxy: no active network services; 系统代理迁移失败，请手动开关一次系统代理")
 	}
-	if err := sysproxy.Apply(runner, svcs, "127.0.0.1", port); err != nil {
+	form := st.SysProxy.Form
+	if form == sysproxy.FormPAC {
+		pacURL := fmt.Sprintf("http://127.0.0.1:%d/pac", settings.GatewayPort)
+		err = sysproxy.ApplyPAC(runner, svcs, pacURL, sysproxy.EffectiveBypass(settings.BypassDomains))
+	} else {
+		err = sysproxy.Apply(runner, svcs, "127.0.0.1", port, sysproxy.EffectiveBypass(settings.BypassDomains))
+	}
+	if err != nil {
 		return fmt.Errorf("app: retarget sysproxy: %w; 系统代理迁移失败，请手动开关一次系统代理", err)
 	}
 	fmt.Printf("system proxy retargeted to 127.0.0.1:%d (backup preserved)\n", port)
@@ -176,20 +200,43 @@ func settingsSetKey(s *store.Settings, key, value string) error {
 		case "log_retention_days":
 			s.LogRetentionDays = n
 		}
-	case "panel_enabled", "allow_lan":
+	case "panel_enabled", "allow_lan", "pac_mode":
 		b, err := parseSettingBool(value)
 		if err != nil {
 			return fmt.Errorf("app: settings set: %s wants on|off, got %q", key, value)
 		}
-		if key == "panel_enabled" {
+		switch key {
+		case "panel_enabled":
 			s.PanelEnabled = b
-		} else {
+		case "allow_lan":
 			s.AllowLan = b
+		case "pac_mode":
+			s.PacMode = b
 		}
+	case "bypass_domains":
+		// 逗号分隔（批④ §3.1）：空=恢复缺省（nil → 生效值取 sysproxy 缺省集）；
+		// 逐条 trim、丢弃空段。白名单/条数校验在 Settings.Validate（SaveSettings 落盘
+		// 前必经），CLI 层保留本函数的解析报错文案。
+		s.BypassDomains = parseBypassDomains(value)
 	default:
 		return fmt.Errorf("app: settings set: unknown key %q (valid: %s)", key, strings.Join(settingsKeys, "|"))
 	}
 	return nil
+}
+
+// parseBypassDomains 解析逗号分隔的 bypass 列表（空串=恢复缺省 nil）。
+func parseBypassDomains(value string) []string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(trimmed, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 // parseSettingBool 解析开关值（on|off 主形态，兼容 true/false/1/0）。

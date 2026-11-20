@@ -126,6 +126,7 @@ func stGeneration(home paths.Home) int {
 }
 
 // restoreSysProxyIfApplied 按 state.json 备份精确还原系统代理（applied=false 即无操作）。
+// autoproxy 还原段按备份记录的会话 Form 分流（Restore 决策表，批④ §3.3）。
 func restoreSysProxyIfApplied(home paths.Home) error {
 	st, err := store.LoadState(home)
 	if err != nil {
@@ -135,7 +136,7 @@ func restoreSysProxyIfApplied(home paths.Home) error {
 		return nil
 	}
 	fmt.Println("restoring system proxy from backup...")
-	if err := sysproxy.Restore(sysproxy.SystemRunner(), st.SysProxy.Services); err != nil {
+	if err := sysproxy.Restore(sysproxy.SystemRunner(), st.SysProxy.Services, st.SysProxy.Form); err != nil {
 		return fmt.Errorf("app: restore sysproxy: %w", err)
 	}
 	fmt.Println("system proxy restored")
@@ -182,8 +183,8 @@ func cleanupResidues(home paths.Home) error {
 	return store.SaveState(home, st)
 }
 
-// applySysProxy start 路径的系统代理写入（真实 runner）。
+// applySysProxy start 路径的系统代理写入（真实 runner；form 按 settings 推导）。
 // 实现已抽到 app/sysproxy.go 的 applySysProxyRunner（sysproxy on 与 start 共用一份语义）。
-func applySysProxy(home paths.Home, port int) ([]store.ServiceBackup, error) {
-	return applySysProxyRunner(home, port, sysproxy.SystemRunner())
+func applySysProxy(home paths.Home, port int, form string) ([]store.ServiceBackup, error) {
+	return applySysProxyRunner(home, port, sysproxy.SystemRunner(), form)
 }

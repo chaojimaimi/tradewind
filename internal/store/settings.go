@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 
 	"github.com/chaojimaimi/tradewind/internal/paths"
 )
@@ -33,6 +34,13 @@ type Settings struct {
 	// WHY 指针：bool 零值 false 无法区分"显式关闭"与"旧版 settings 缺键"，
 	// 而该功能默认开启（M2-plan §2.2），误降级会改变拉取路径。
 	UpdateViaProxy *bool `yaml:"update_via_proxy,omitempty" json:"update_via_proxy,omitempty"`
+	// PacMode 系统代理写入形态：false=手工三项代理（legacy 语义），true=PAC 自动
+	// 代理（指向面板网关 /pac）。缺省 false=旧 settings.yaml 零回归。
+	PacMode bool `yaml:"pac_mode,omitempty" json:"pac_mode,omitempty"`
+	// BypassDomains 绕过域名列表（nil/空=未设置 → 生效值取 sysproxy 缺省集）。
+	// 校验（白名单正则+条数上限）下沉 Validate：手改 settings.yaml 经 LoadSettings
+	// 是唯一闸门，PAC JS 注入面在 /pac 合成前被拦（批④ §3.1）。
+	BypassDomains []string `yaml:"bypass_domains,omitempty" json:"bypass_domains,omitempty"`
 }
 
 // UpdateViaProxyEnabled 返回订阅拉取经自身代理的生效值（nil → true）。
@@ -80,8 +88,28 @@ func (s Settings) Validate() error {
 	if s.MixedPort == s.GatewayPort {
 		return fmt.Errorf("store: mixed_port and gateway_port must differ (both %d)", s.MixedPort)
 	}
+	// bypass 白名单（批④ §3.1 评审 P2-2/P2-4）：每条 pattern 仅允许域名/通配/
+	// CIDR/<local> 字符集，引号/分号/空格/& 全拒（PAC JS 注入面），最多 64 条。
+	// 层次与 mixed_port 互斥同先例：只挂 CLI 层则手改 YAML 可直达 /pac 注入。
+	if len(s.BypassDomains) > MaxBypassDomains {
+		return fmt.Errorf("store: bypass_domains has %d entries, max %d",
+			len(s.BypassDomains), MaxBypassDomains)
+	}
+	for _, d := range s.BypassDomains {
+		if !bypassPatternRe.MatchString(d) {
+			return fmt.Errorf("store: invalid bypass_domains entry %q", d)
+		}
+	}
 	return nil
 }
+
+// MaxBypassDomains 是 bypass_domains 的条数上限（壳 TextEditor 大输入防线）。
+const MaxBypassDomains = 64
+
+// bypassPatternRe 是单条 bypass pattern 的白名单正则：域名/点分通配/CIDR（如
+// 169.254/16）/<local> 字符集；长度 1-253（域名上限）。引号、分号、空格、&、
+// 换行等一切 JS 语法字符不在集内。
+var bypassPatternRe = regexp.MustCompile(`^[A-Za-z0-9._*?<>/-]{1,253}$`)
 
 // LoadSettings 读取设置；文件不存在时返回默认值。
 // 旧版 settings.yaml 缺 gateway_port（或显式 0）→ 归一为默认 39097（M1-plan §4.1）；

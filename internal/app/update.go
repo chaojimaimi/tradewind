@@ -123,7 +123,10 @@ func proxyClient(mixedPort int) (*http.Client, error) {
 // fetchTimeout 与 subscription 包内单次拉取超时一致（此处显式声明避免导出内部常量）。
 const fetchTimeout = 30 * time.Second
 
-// updateOne 拉取 + 校验 + 覆写订阅原文件与 extra（拉取失败则该项保持原样）。
+// updateOne 拉取 + 校验 + 语义预检 + 覆写订阅原文件与 extra（拉取失败则该项保持原样）。
+// 语义预检（批④ §2.2 评审 P1-3）插在 SaveProfileFile 之前：用 res.Body 构造候选过
+// mihomo -t——"落盘后校验"失败会留下换血后的订阅文件，校验必须前置于写盘；
+// 失败=更新中止，旧文件旧 current 原样。
 // 成功拉取即刷新 Updated（无论内容是否变更）——调度器 due 判据依赖该语义（v1.2）。
 func updateOne(ctx context.Context, home paths.Home, settings store.Settings, item *store.ProfileItem) error {
 	res, err := fetchForUpdate(ctx, home, settings, item.URL)
@@ -131,6 +134,9 @@ func updateOne(ctx context.Context, home paths.Home, settings store.Settings, it
 		return err
 	}
 	if err := subscription.Validate(res.Body); err != nil {
+		return err
+	}
+	if err := precheckCandidateBytes(home, item.UID, res.Body); err != nil {
 		return err
 	}
 	if err := store.SaveProfileFile(home, item.File, res.Body); err != nil {
