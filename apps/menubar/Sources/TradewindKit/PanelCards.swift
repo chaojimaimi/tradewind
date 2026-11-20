@@ -408,18 +408,20 @@ enum LatencyColor {
 /// 前两钮等宽（flex:1），⏻ 自然宽（flex:0）+ 危险红（.btn.danger）。
 struct PopoverFootView: View {
     @ObservedObject var model: PanelModel
+    /// 设置窗口激活回调（M3 批② c2）：经闭包注入避免 PanelCards 依赖窗口层；
+    /// nil 时维持批①.5 弱化禁用态（壳装配未接线时的兜底）
+    var onOpenSettings: (() -> Void)?
 
     var body: some View {
         HStack(spacing: 8) {
             FootButton(fillsWidth: true, action: { Task { await model.openPanel() } }) {
                 Label("网页面板", systemImage: "globe")
             }
-            FootButton(fillsWidth: true, action: {}) {
-                // 设置…：功能归批②，保持禁用但视觉为正常按钮弱化态（文本 tertiary，非系统灰块）
-                Text("设置…").foregroundStyle(.tertiary)
+            FootButton(fillsWidth: true, action: { onOpenSettings?() }) {
+                Text("设置…")
             }
-            .disabled(true)
-            .help("M3 交付：随原生设置窗口")
+            .disabled(onOpenSettings == nil)
+            .help(onOpenSettings == nil ? "M3 交付：随原生设置窗口" : "打开 Tradewind 设置窗口")
             // ⏻ 保留 SF Symbol "power"（偏差 #3：demo 文本字形 ⏻ 弃用防字体回退 tofu，观感等价）
             FootButton(horizontalPadding: 10, action: { Task { await model.stopCoreAndQuit() } }) {
                 Image(systemName: "power").foregroundStyle(Theme.bad)

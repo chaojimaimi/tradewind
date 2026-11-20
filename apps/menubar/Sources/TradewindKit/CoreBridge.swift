@@ -5,11 +5,25 @@ protocol CommandLineRunning {
     /// 执行 CLI 子命令并返回 stdout；tolerate 中的非零退出码不算失败
     /// （status 的退出码契约 0/1：1=内核异常但 JSON 仍有效，M2-plan §2.5）。
     func run(_ args: [String], tolerate: Set<Int32>) async throws -> String
+    /// 加长超时变体（M3-plan §11.2-4 评审 P1-3）：settings/autostart/subs 写编排
+    /// 持 mutation.lock 最长 35s + reload 失败降级重启 15s，默认 10s SIGKILL
+    /// 会制造半完成态。默认实现转发常规 run（fake 无进程可杀，超时仅真实执行器
+    /// 需要语义；单测以覆写本方法断言注入的超时值）。
+    func runWithTimeout(_ args: [String], timeout: TimeInterval, tolerate: Set<Int32>) async throws -> String
 }
 
 extension CommandLineRunning {
     func run(_ args: [String]) async throws -> String {
         try await run(args, tolerate: [])
+    }
+
+    func runWithTimeout(_ args: [String], timeout: TimeInterval) async throws -> String {
+        try await runWithTimeout(args, timeout: timeout, tolerate: [])
+    }
+
+    /// 协议默认转发：调用方不感知实现差异（真实执行器覆写为有界等待）。
+    func runWithTimeout(_ args: [String], timeout: TimeInterval, tolerate: Set<Int32>) async throws -> String {
+        try await run(args, tolerate: tolerate)
     }
 }
 
@@ -41,11 +55,16 @@ struct CommandLineRunner: CommandLineRunning {
     /// status 的 ~50-200ms 与 networksetup 的数百 ms 全压在主线程忙等）。
     /// struct 值类型捕获进 @Sendable 闭包安全（仅含 String 常量）。
     func run(_ args: [String], tolerate: Set<Int32>) async throws -> String {
-        try await Task.detached { try self.runBlocking(args, tolerate: tolerate) }.value
+        try await Task.detached { try self.runBlocking(args, tolerate: tolerate, timeout: Self.defaultTimeout) }.value
     }
 
-    /// 同步实现体（仅经 `run` 的 detached 任务在后台线程执行，非隔离）。
-    private func runBlocking(_ args: [String], tolerate: Set<Int32>) throws -> String {
+    /// 加长超时路径（M3-plan §11.2-4）：整体等待上限由调用方传入而非 defaultTimeout。
+    func runWithTimeout(_ args: [String], timeout: TimeInterval, tolerate: Set<Int32>) async throws -> String {
+        try await Task.detached { try self.runBlocking(args, tolerate: tolerate, timeout: timeout) }.value
+    }
+
+    /// 同步实现体（仅经 detached 任务在后台线程执行，非隔离）。
+    private func runBlocking(_ args: [String], tolerate: Set<Int32>, timeout: TimeInterval) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = args
@@ -58,9 +77,9 @@ struct CommandLineRunner: CommandLineRunning {
         } catch {
             throw CoreBridgeError.cliFailed(command: args.first ?? "tradewind")
         }
-        let output = readAll(stdout, timeout: Self.defaultTimeout)
-        let errText = readAll(stderr, timeout: Self.defaultTimeout)
-        waitForExitOrKill(process, timeout: Self.defaultTimeout)
+        let output = readAll(stdout, timeout: timeout)
+        let errText = readAll(stderr, timeout: timeout)
+        waitForExitOrKill(process, timeout: timeout)
         if process.terminationStatus != 0 && !tolerate.contains(process.terminationStatus) {
             throw CoreBridgeError.cliFailed(command: args.first ?? "tradewind")
         }
@@ -178,5 +197,62 @@ final class CoreBridge {
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         try process.run()
+    }
+
+    // MARK: 设置窗口桥（M3-plan §11.2-10：全部经 CLI 机器可读输出，壳不写 YAML）
+
+    /// 写编排操作的加长超时（M3-plan §11.2-4 评审 P1-3）：CLI 持 mutation.lock
+    /// 最长 35s + reload 失败降级重启 15s，默认 10s SIGKILL 会制造半完成态。
+    static let writeTimeout: TimeInterval = 45
+
+    /// `settings get --json`：通用页初始值数据源（读操作，常规 10s 足够）。
+    func settingsGetJSON() async throws -> SettingsSnapshot {
+        let output = try await runner.run(["settings", "get", "--json"])
+        return try SettingsSnapshot.decode(output.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// `settings set <key> <value>`：45s 加长超时（写编排含热重载/降级重启链）。
+    func settingsSet(key: String, value: String) async throws {
+        _ = try await runner.runWithTimeout(["settings", "set", key, value], timeout: Self.writeTimeout)
+    }
+
+    /// `settings reset`：恢复默认，走同一写编排（mixed_port 定制时含 retarget 联动）。
+    func settingsReset() async throws {
+        _ = try await runner.runWithTimeout(["settings", "reset"], timeout: Self.writeTimeout)
+    }
+
+    /// `subs interval <target> <mode>`（c3 订阅页同用）；45s（持 mutation.lock）。
+    func subsInterval(target: String, mode: String) async throws {
+        _ = try await runner.runWithTimeout(["subs", "interval", target, mode], timeout: Self.writeTimeout)
+    }
+
+    /// 当前订阅的自动更新间隔写入（通用页 interval select 的动作）。
+    /// WHY 壳侧定位 current：Go resolveProfile 仅按 uid/name 精确匹配（subs.go:170），
+    /// 不支持 "current" 关键字（c1 实况）——经 status --json 的 profile.uid 解析
+    /// （机器可读输出契约不变）；无当前订阅显式报错，不静默写错条目。
+    func subsIntervalCurrent(mode: String) async throws {
+        let report = try await status()
+        guard !report.profile.uid.isEmpty else {
+            throw CoreBridgeError.noCurrentProfile
+        }
+        try await subsInterval(target: report.profile.uid, mode: mode)
+    }
+
+    /// `autostart status --json`：开机自启开关初始值数据源（读操作）。
+    func autostartStatusJSON() async throws -> AutostartStatus {
+        let output = try await runner.run(["autostart", "status", "--json"])
+        return try AutostartStatus.decode(output.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// `autostart on|off`：launchctl load/unload（on 含 manual 实例迁移 stop）。
+    func autostart(on: Bool) async throws {
+        _ = try await runner.runWithTimeout(["autostart", on ? "on" : "off"], timeout: Self.writeTimeout)
+    }
+
+    /// `list --json`：间隔 select 初值数据源（当前条目定位）。
+    /// 完整订阅卡解码模型归 c3 SubsModel，届时替换/扩展本条目结构。
+    func listJSON() async throws -> [ProfileIntervalEntry] {
+        let output = try await runner.run(["list", "--json"])
+        return try ProfileIntervalEntry.decodeArray(output.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 }

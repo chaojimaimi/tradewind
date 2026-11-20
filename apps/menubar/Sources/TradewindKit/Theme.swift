@@ -86,6 +86,26 @@ enum Theme {
         color(scheme == .light ? controlSelectedLightRGBA : controlSelectedDarkRGBA)
     }
 
+    // MARK: 设置窗口 tokens（M3 批② c2）
+
+    /// 品牌深色（--brand-deep）：light hsl(196,80%,30%) / dark hsl(191,80%,40%)，
+    /// HSL→RGB 预计算（同 brand 口径；About 图标渐变底 demo .about-icon）
+    static func brandDeep(_ scheme: ColorScheme) -> Color {
+        scheme == .light
+            ? Color(.sRGB, red: 0.058_8, green: 0.411_8, blue: 0.541_2) // ≈ #0F698A
+            : Color(.sRGB, red: 0.078_4, green: 0.603_9, blue: 0.721_6) // ≈ #149AB8
+    }
+
+    /// 设置窗口侧栏底（--mat-side）合成近似（批①.5 §3.2 不透明色值口径）：
+    /// light rgba(238,242,246,.72) 叠 --mat-win rgba(250,251,253,.86) ≈ #F1F4F8；
+    /// dark rgba(24,26,30,.62) 叠 rgba(38,41,46,.78) ≈ #1D2024
+    static let settingsSideLightRGBA: RGBA = (0xF1 / 255.0, 0xF4 / 255.0, 0xF8 / 255.0, 1)
+    static let settingsSideDarkRGBA: RGBA = (0x1D / 255.0, 0x20 / 255.0, 0x24 / 255.0, 1)
+
+    static func settingsSideBackground(_ scheme: ColorScheme) -> Color {
+        color(scheme == .light ? settingsSideLightRGBA : settingsSideDarkRGBA)
+    }
+
     /// Color 统一由 RGBA 常量构造（sRGB）
     private static func color(_ rgba: RGBA) -> Color {
         Color(.sRGB, red: rgba.red, green: rgba.green, blue: rgba.blue, opacity: rgba.alpha)

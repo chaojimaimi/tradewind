@@ -5,11 +5,15 @@ import SwiftUI
 /// 降级横幅置于状态行下（控制面仍可用）。卡片视图实现见 PanelCards.swift。
 struct ShellRootView: View {
     @ObservedObject var model: PanelModel
+    /// 设置窗口激活回调（M3 批② c2）：App 层闭包注入（先收 popover 再开窗）；
+    /// nil 时"设置…"保持弱化禁用态（PopoverFootView 兜底口径）
+    var onOpenSettings: (() -> Void)?
     @Environment(\.colorScheme) private var scheme
 
     /// WHY 可选注入：PanelModel.live() 是 MainActor 隔离方法，不能作默认参数求值。
-    init(model: PanelModel) {
+    init(model: PanelModel, onOpenSettings: (() -> Void)? = nil) {
         self.model = model
+        self.onOpenSettings = onOpenSettings
     }
 
     var body: some View {
@@ -22,7 +26,7 @@ struct ShellRootView: View {
             ToggleGroupCard(model: model)
             SpeedCardView(traffic: model.traffic)
             GroupsCardView(model: model)
-            PopoverFootView(model: model)
+            PopoverFootView(model: model, onOpenSettings: onOpenSettings)
         }
         .padding(14)
         .frame(width: Theme.popoverWidth)
@@ -108,7 +112,8 @@ private struct DegradedBanner: View {
     }
 }
 
-private struct ToastView: View {
+/// 操作结果提示胶囊（popover 与设置窗口共用；M3 批② c2 起去 private）
+struct ToastView: View {
     let text: String
 
     var body: some View {

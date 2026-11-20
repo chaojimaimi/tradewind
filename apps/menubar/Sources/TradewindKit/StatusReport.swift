@@ -53,4 +53,6 @@ enum CoreBridgeError: Error, Equatable {
     case cliFailed(command: String)
     case decode(String)
     case badPanelURL(String)
+    /// 无当前订阅（subsIntervalCurrent 的 current 定位落空；status --json profile.uid 为空）
+    case noCurrentProfile
 }

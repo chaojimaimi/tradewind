@@ -24,6 +24,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let popover = NSPopover()
     /// 面板状态与 WS 速率（壳的数据中枢；菜单栏图标与 popover 速率卡同源于此）
     private lazy var model: PanelModel = .live()
+    /// 设置窗口懒创建单例（M3 批② c2 §11.2-2）：关闭=orderOut 保活，复开零重建。
+    /// WHY 自持独立桥：PanelModel.bridge 私有，设置页读写链路自成一体（c3/c4 复用）。
+    private lazy var settingsWindow = SettingsWindowController(
+        model: SettingsModel(bridge: try? CoreBridge.live()))
     private var cancellables = Set<AnyCancellable>()
     /// 周期刷新（M2-plan §8：壳每次操作前探测；v0.4.6 起随 popover 开合变频）
     private var refreshTimer: Timer?
@@ -31,7 +35,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         popover.behavior = .transient // 系统行为：点击面板外自动收起
-        popover.contentViewController = NSHostingController(rootView: ShellRootView(model: model))
+        // 设置…回调闭包注入（M3 批② c2）：popover 收起在 openSettings 内先行执行
+        popover.contentViewController = NSHostingController(
+            rootView: ShellRootView(model: model, onOpenSettings: { [weak self] in
+                self?.openSettings()
+            }))
         popover.delegate = self
         setupStatusItem()
         observeModel()
@@ -93,6 +101,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quitShell() {
         NSApp.terminate(nil) // 壳退出即终止进程；内核由 start 进程守护，不受影响
+    }
+
+    // MARK: 设置窗口（M3 批② c2）
+
+    /// 打开设置窗口（M3-plan §11.2-2）：**先收 popover** —— outsideClickMonitor 是
+    /// 全局监视器不接收本进程事件（popoverDidClose 注释），不收起则 popover 悬挂在
+    /// 设置窗口之上；再 key 化窗口并激活应用（accessory 应用惯例）。
+    private func openSettings() {
+        if popover.isShown {
+            popover.performClose(nil)
+        }
+        settingsWindow.showSettings()
     }
 
     // MARK: 状态观察（图标三态）
