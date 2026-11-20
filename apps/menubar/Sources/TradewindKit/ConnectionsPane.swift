@@ -46,8 +46,10 @@ enum ConnectionTableLayout {
     /// WHY 显式元组类型：@AppStorage 初值取元组成员时泛型重载解析失败
     /// （"no exact matches in call to initializer"），显式 CGFloat 消歧
     static let defaults: (host: CGFloat, rule: CGFloat, node: CGFloat) = (150, 118, 104)
-    /// 三列文本宽 clamp 范围
-    static let hostRange: ClosedRange<CGFloat> = 100...600
+    /// 三列文本宽 clamp 范围。host 下界 94：全列拖至最小的总槽 88+96+96+148+110=538
+    /// 恰等于标准可视宽，"填满不横滚"分支在固定 780 窗内可达（下界 100 时恒余 6px
+    /// 横滚，评审 P3-2）
+    static let hostRange: ClosedRange<CGFloat> = 94...600
     static let ruleRange: ClosedRange<CGFloat> = 80...300
     static let nodeRange: ClosedRange<CGFloat> = 80...260
 }
@@ -184,15 +186,21 @@ struct ConnectionsPane: View {
         .background(Theme.cardBackground(scheme))
         .clipShape(RoundedRectangle(cornerRadius: Theme.radiusCard))
         .overlay(cardStroke)
+        // 空态不参与横滚（评审 P2）：恒溢出分支下内容宽 656 > 可视 538，空态若在
+        // 横滚内容内居中会右偏 59pt 且随滚动漂移——overlay 按可视卡宽居中、零偏移
+        .overlay {
+            if store.filtered(query: query).isEmpty {
+                emptyState
+            }
+        }
     }
 
-    /// 行区：空态按可视宽居中；有行时行内容宽 = tableWidth（垂滚内嵌横滚两轴正交）
+    /// 行区：有行时行内容宽 = tableWidth（垂滚内嵌横滚两轴正交）；空态经外层
+    /// overlay 呈现（见 tableCard 注），此处置空
     private func rowsArea(hostSlot: CGFloat, tableWidth: CGFloat) -> some View {
         ScrollView(showsIndicators: true) {
             let rows = store.filtered(query: query)
-            if rows.isEmpty {
-                emptyState
-            } else {
+            if !rows.isEmpty {
                 LazyVStack(spacing: 0) {
                     ForEach(rows) { connection in
                         ConnectionRow(connection: connection, formatter: timeFormatter,
@@ -262,7 +270,11 @@ struct ConnectionsPane: View {
                     .frame(width: 1)
             }
             .onHover { hovering in hoveredHandle = hovering ? column : nil }
-            .gesture(DragGesture(minimumDistance: 0)
+            // WHY .global 坐标系（评审 P1）：默认 .local 以把手自身空间度量
+            // translation——拖动写宽→列变宽→把手（列 trailing overlay）右移，
+            // translation 被把手位移抵消一半，稳态收敛为半速拖动；.global 相对
+            // 窗口不动，1:1 跟手
+            .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .global)
                 .onChanged { value in
                     let base = dragStartWidth ?? CGFloat(width.wrappedValue)
                     dragStartWidth = base

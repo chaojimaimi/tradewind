@@ -38,12 +38,32 @@ import Testing
         #expect(width > available)
     }
 
-    /// 文本宽 clamp：越上界/越下界收敛到边界，区间内原值不动
+    /// 文本宽 clamp：越上界/越下界收敛到边界，区间内原值不动（range 锁真实
+    /// hostRange 常量——下界 94 见 ConnectionTableLayout.hostRange 注，评审 P3-2）
     @Test func clampedBoundsAndInRange() {
-        let range: ClosedRange<CGFloat> = 100...600
-        #expect(ConnectionTableLayout.clamped(50, to: range) == 100)
+        let range = ConnectionTableLayout.hostRange
+        #expect(range.lowerBound == 94)
+        #expect(ConnectionTableLayout.clamped(50, to: range) == 94)
         #expect(ConnectionTableLayout.clamped(999, to: range) == 600)
         #expect(ConnectionTableLayout.clamped(237, to: range) == 237)
+    }
+
+    /// 全列拖至最小总槽恰等于可视宽（评审 P3-2）：88+96+96+148+110=538——
+    /// "填满不横滚"分支在固定 780 窗内可达（host 下界 94 的存在依据）
+    @Test func minimumSlotsReachExactFitAtStandardViewport() {
+        let total = ConnectionTableLayout.timeSlot
+            + (ConnectionTableLayout.hostRange.lowerBound + 16)
+            + (ConnectionTableLayout.ruleRange.lowerBound + 16)
+            + (ConnectionTableLayout.nodeRange.lowerBound + 16)
+            + ConnectionTableLayout.trafficSlot
+        #expect(total == 538)
+        let hostSlot = ConnectionTableLayout.hostSlot(
+            hostPref: ConnectionTableLayout.hostRange.lowerBound,
+            othersTotal: total - ConnectionTableLayout.hostRange.lowerBound - 16,
+            available: 538)
+        #expect(hostSlot == 110)
+        #expect(ConnectionTableLayout.tableWidth(
+            othersTotal: total - 110, hostSlot: hostSlot, available: 538) == 538)
     }
 
     /// 缺省总槽算术（§14.4 目验 3）：88+166+134+120+148=656 > 538——缺省即横滚
