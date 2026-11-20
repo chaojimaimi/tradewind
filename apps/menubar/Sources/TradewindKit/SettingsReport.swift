@@ -77,3 +77,16 @@ func decodeJSON<T: Decodable>(_ type: T.Type, line: String, label: String) throw
         throw CoreBridgeError.decode("\(label): \(error.localizedDescription)")
     }
 }
+
+// MARK: - 壳版本展示（M3-plan §12 c1：关于页版本号修复）
+
+/// 壳版本展示清洗（F1a：build.sh 注入 git describe 值含 v 前缀，AboutPane 再手写
+/// "v" 前缀导致 "vv0.5.0-m3b1" 双写）。剥单个前导 "v" 后 AboutPane 统一加 "v"。
+enum ShellVersion {
+    /// 剥单个前导 "v"——仅当 v 后随数字（git describe 注入值）；"dev"/纯哈希原样返回
+    /// （评审 P3：非版本语义的注入值不做假设性改写）
+    static func display(_ raw: String) -> String {
+        guard raw.count > 1, raw.first == "v", let d = raw.dropFirst().first, d.isNumber else { return raw }
+        return String(raw.dropFirst())
+    }
+}

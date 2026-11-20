@@ -50,29 +50,27 @@ struct EnhancePane: View {
 
 // MARK: - 页 5 关于（M3-plan §11.3：品牌 mark + 版本 + 内核 + Bundle ID + 仓库 + 许可 + 数据目录）
 
-/// 关于页：品牌 mark 用 SF "wind" 白字压 brand 渐变圆角方块（demo .about-icon 结构；
-/// Bundle 无 SVG 渲染能力，菜单栏 PNG 资产为 16/32 点阵放大发虚，故取矢量字形）。
+/// 关于页：品牌位图取 icns 128pt@2x 派生（256×256，与 Dock 图标同构；§12 c1 取代
+/// v0.4.13 前"SF wind 压渐变方块"的早期近似——用户拍板品牌资产=深色底板+青渐变标形）。
 struct AboutPane: View {
     @ObservedObject var model: SettingsModel
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         VStack(spacing: 0) {
-            // demo .about-icon：84×84 圆角 20，brand-deep→brand 渐变 + 白色 46pt 字形
-            RoundedRectangle(cornerRadius: 20)
-                .fill(LinearGradient(
-                    colors: [Theme.brandDeep(scheme), Theme.brand(scheme)],
-                    startPoint: .topLeading, endPoint: .bottomTrailing))
-                .frame(width: 84, height: 84)
-                .overlay {
-                    Image(systemName: "wind")
-                        .font(.system(size: 40))
-                        .foregroundStyle(.white)
-                }
+            // 品牌 mark（demo .about-icon 84×84 圆角 20 观感）：真品牌位图源=icns
+            // 128pt@2x 派生，与 Dock 图标同构。100pt = icns 画布自带 ~10% 留白的补偿
+            // （alpha 包围盒实测 25-230/256），底板实高 ≈80pt ≈ demo 84pt 观感；shadow
+            // 对照 demo .about-icon box-shadow 0 12px 30px（CSS blur 30 → radius 15、
+            // y 偏移 12 直取）。
+            Image("tradewind-about-icon", bundle: .module)
+                .resizable()
+                .frame(width: 100, height: 100)
+                .shadow(color: Theme.brand(scheme).opacity(0.35), radius: 15, x: 0, y: 12)
                 .padding(.bottom, 14)
             Text("Tradewind 信风")
                 .font(.system(size: 19, weight: .bold))
-            Text("v\(shellVersion)")
+            Text("v\(ShellVersion.display(shellVersion))")
                 .font(.system(size: 12))
                 .foregroundStyle(Theme.muted(scheme))
                 .padding(.top, 2)
