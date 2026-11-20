@@ -4,10 +4,10 @@ import Testing
 
 // MARK: - c3 订阅管理页测试（M3-plan §11.3 页 1 / §11.4）
 //
-// 覆盖：CoreBridge 订阅桥 calls/65s 超时断言（含 --force 与 add flags 前置形态）、
-// list --json 全量卡解码（omitempty 缺键容忍——ProfileIntervalEntry 同款 fixture
-// 形态）、流量条阈值/格式化纯函数、SubsModel 编排（load/add/delete current 重拉/
-// busy 防抖/updateAll remote 过滤）。
+// 覆盖：CoreBridge 订阅桥 calls/65s 超时断言（含 --force、rename 位置参数与 add
+// flags 前置形态）、list --json 全量卡解码（omitempty 缺键容忍——ProfileIntervalEntry
+// 同款 fixture 形态）、流量条阈值/格式化纯函数、SubsModel 编排（load/add/rename/
+// delete current 重拉/busy 防抖/updateAll remote 过滤）。
 
 /// 真机 `list --json` 输出形态采样：双条目——remote 当前订阅（全字段）+ file 型
 /// 本地订阅（omitempty 缺 allow_auto_update/update_interval 键，expire=0 未知）。
@@ -58,6 +58,15 @@ private let subsListAfterMutation =
         #expect(fake.calls == [["subs", "delete", "b89ed456", "--force"],
                                ["subs", "delete", "a1b2c3d4"]])
         #expect(fake.timeouts == [65, 65])
+    }
+
+    /// rename 无 flag（M3-plan §14 R1）：位置参数直取四元素数组（cmdSubs rename
+    /// 不经 FlagSet），newName 以 "-" 开头也原样传递，65s writeTimeout（持 mutation.lock）
+    @Test func subsRenameSendsPositionalArgsWithExtendedTimeout() async throws {
+        let fake = TimeoutRecordingRunner()
+        try await CoreBridge(runner: fake).subsRename(target: "b89ed456", name: "-新名字")
+        #expect(fake.calls == [["subs", "rename", "b89ed456", "-新名字"]])
+        #expect(fake.timeouts == [65])
     }
 }
 
@@ -247,6 +256,31 @@ private let subsListAfterMutation =
         await model.delete(entry)
         #expect(fake.calls == [["list", "--json"]]) // 无任何写调用
         model.testHooksSetBusy(false)
+    }
+
+    /// 重命名空名：壳侧前置校验（同 add 口径），不落 CLI
+    @Test func renameRejectsBlankNameWithoutCLICall() async {
+        let (model, fake) = await loadedModel([.init(output: subsListFixture, exitCode: 0)])
+        let ok = await model.rename(model.subs[0], to: "   ")
+        #expect(!ok)
+        #expect(fake.calls == [["list", "--json"]]) // 仅 load 一次
+        #expect(model.toast?.contains("名称不能为空") == true)
+    }
+
+    /// 重命名成功：trim 后按位置参数序落 CLI（target=uid 优先、name=新名）+ 重拉权威态
+    @Test func renameTrimsSendsPositionalArgsAndReloads() async {
+        let (model, fake) = await loadedModel([
+            .init(output: subsListFixture, exitCode: 0), // load
+            .init(output: "", exitCode: 0), // subs rename
+            .init(output: subsListAfterMutation, exitCode: 0), // 重拉
+        ])
+        let ok = await model.rename(model.subs[0], to: " 新名字 ")
+        #expect(ok)
+        #expect(fake.calls == [["list", "--json"],
+                               ["subs", "rename", "b89ed456", "新名字"],
+                               ["list", "--json"]]) // 位置参数序 + 写后重拉
+        #expect(model.subs.map(\.uid) == ["a1b2c3d4"]) // 重拉后的权威态
+        #expect(model.toast == "已重命名为 新名字")
     }
 
     /// 全部更新仅触 remote（type=url）订阅；file 型无远端可拉跳过；整组一个

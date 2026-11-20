@@ -4,7 +4,7 @@ import SwiftUI
 //
 // 结构：顶部说明 + 按钮行 [＋ 添加订阅][↻ 全部更新] + 订阅卡列表。
 // 卡片：名称+“当前”chip / 元信息+更新时间 / 流量条（>85% warn 色）/ 到期 foot /
-// 操作按钮（更新 / 设为当前[非当前] / 删除[danger]）。
+// 操作按钮（更新 / 改名[改名 sheet 预填现名，§14 R1] / 设为当前[非当前] / 删除[danger]）。
 // 删除 confirm 用 SwiftUI .alert（GeneralPane 同款选型：窗口句柄取 NSAlert
 // 不可靠）；删 current 直接传 --force 且文案含裸内核态警示（UI 二次确认语义）。
 // WHY 不自建 ScrollView：宿主 ShellSettingsView.paneContent 已提供整页滚动
@@ -16,6 +16,8 @@ struct SubscriptionsPane: View {
     @State private var showAddSheet = false
     /// 删除确认目标（nil=无；SwiftUI .alert 的 isPresented 由其派生）
     @State private var deleteTarget: SubsCardEntry?
+    /// 重命名目标（nil=无；RenameSheet 的 isPresented 由其派生，§14 R1）
+    @State private var renameTarget: SubsCardEntry?
     /// 卡片共享日期 formatter（@State 免逐卡重造）
     @State private var dateFormatter = SubsPaneLogic.makeCardDateFormatter()
 
@@ -36,6 +38,14 @@ struct SubscriptionsPane: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .sheet(isPresented: $showAddSheet) {
             AddSubSheet(model: model)
+        }
+        .sheet(isPresented: Binding(
+            get: { renameTarget != nil },
+            set: { if !$0 { renameTarget = nil } }
+        )) {
+            if let target = renameTarget {
+                RenameSheet(entry: target, model: model)
+            }
         }
         .alert(deleteTitle, isPresented: Binding(
             get: { deleteTarget != nil },
@@ -109,6 +119,7 @@ struct SubscriptionsPane: View {
                 ForEach(model.subs, id: \.uid) { entry in
                     SubCardView(entry: entry, dateFormatter: dateFormatter,
                                 onUpdate: { model.taskUpdate(entry) },
+                                onRename: { renameTarget = entry },
                                 onUse: { model.taskUse(entry) },
                                 onDelete: { deleteTarget = entry })
                         .disabled(model.busy)
@@ -139,6 +150,7 @@ private struct SubCardView: View {
     let entry: SubsCardEntry
     let dateFormatter: DateFormatter
     let onUpdate: () -> Void
+    let onRename: () -> Void
     let onUse: () -> Void
     let onDelete: () -> Void
     @Environment(\.colorScheme) private var scheme
@@ -204,6 +216,8 @@ private struct SubCardView: View {
     private var actionButtons: some View {
         HStack(spacing: 6) { // demo .sub-actions gap 6
             FootButton(horizontalPadding: 10) { onUpdate() } label: { Text("↻ 更新") }
+            // ✎ 改名（§14 R1）：纯索引写（name 不进合成配置），改名 sheet 预填现名
+            FootButton(horizontalPadding: 10) { onRename() } label: { Text("✎ 改名") }
             if !entry.current {
                 FootButton(horizontalPadding: 10) { onUse() } label: { Text("设为当前") }
             }
@@ -333,6 +347,58 @@ private struct AddSubSheet: View {
         if await model.add(url: url, name: name) {
             dismiss()
         } else {
+        }
+    }
+}
+
+// MARK: - 重命名 sheet（M3-plan §14 R1；版式照 AddSubSheet：420px + 名称 + 取消/保存）
+
+private struct RenameSheet: View {
+    let entry: SubsCardEntry
+    @ObservedObject var model: SubsModel
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var scheme
+    @State private var name: String
+
+    init(entry: SubsCardEntry, model: SubsModel) {
+        self.entry = entry
+        self.model = model
+        _name = State(initialValue: entry.name) // 预填现名
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("重命名订阅")
+                .font(.system(size: 14, weight: .bold))
+                .padding(.bottom, 8)
+            fieldLabel("名称")
+            TextField("订阅名称", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12))
+            HStack {
+                Spacer()
+                Button("取消") { dismiss() }
+                Button("保存") { Task { await submit() } }
+                    .disabled(model.busy)
+            }
+            .padding(.top, 16)
+        }
+        .padding(18)
+        .frame(width: 420)
+    }
+
+    private func fieldLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 12))
+            .foregroundStyle(Theme.secondary(scheme))
+            .padding(.top, 10)
+            .padding(.bottom, 2)
+    }
+
+    /// 保存提交：空名前置校验（toast 不落 CLI，sheet 留存）；成功收起 sheet。
+    private func submit() async {
+        if await model.rename(entry, to: name) {
+            dismiss()
         }
     }
 }

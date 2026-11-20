@@ -224,6 +224,22 @@ final class SubsModel: ObservableObject {
         }
     }
 
+    /// 重命名订阅（卡片 ✎ 改名；M3-plan §14 R1，纯索引写无热重载）。
+    /// 名称空白为壳侧前置校验（同 add 口径），不落 CLI；与其他条目重名由 Go 侧
+    /// 拒绝（resolveProfile 同名歧义的防线，rename 不得制造重名）。
+    @discardableResult
+    func rename(_ entry: SubsCardEntry, to newName: String) async -> Bool {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            showToast("名称不能为空")
+            return false
+        }
+        return await performWrite(success: "已重命名为 \(trimmed)", failure: "重命名失败") {
+            try await self.bridge?.subsRename(target: self.writeTarget(entry), name: trimmed)
+            await self.reloadList()
+        }
+    }
+
     /// 测试钩子：置 busy 模拟在途（busy 防抖断言；生产置位在各写动作内部）。
     func testHooksSetBusy(_ value: Bool) { busy = value }
 

@@ -302,4 +302,12 @@ final class CoreBridge {
         if force { args.append("--force") }
         _ = try await runner.runWithTimeout(args, timeout: Self.writeTimeout)
     }
+
+    /// `subs rename <target> <new_name>`：订阅卡 ✎ 改名（纯索引写，Go 不触发
+    /// reload）。WHY 与 cmdSubs rename 直取形态对应——rename 无 flag 项，壳侧
+    /// 全位置参数传四元素数组，subsAdd 的 flags 前置教训不适用； newName 以
+    /// "-" 开头也不会被误解析（Go 侧不经 flag.FlagSet）。
+    func subsRename(target: String, name: String) async throws {
+        _ = try await runner.runWithTimeout(["subs", "rename", target, name], timeout: Self.writeTimeout)
+    }
 }
