@@ -196,8 +196,10 @@ final class PanelModel: ObservableObject {
     /// 主开关：开=detached start（壳是观察者），关=stop（优雅还原）。
     /// 乐观更新（v0.4.7）：入口即置 pendingRunning 翻转 UI；CLI 失败清除（视觉回退），
     /// 终态统一清 pending 交接权威口径。WHY 见 pendingRunning 定义处。
+    /// WHY 入口 busy 守卫（批② c5，M3-plan §11.2-7）：快捷键与 popover 开关共享本路径，
+    /// busy 在途时拒绝重入——toggle 期间 popover 点击与快捷键连按都被防抖。
     func toggleMaster(on: Bool) async {
-        guard let bridge else { return }
+        guard let bridge, !busy else { return }
         pendingRunning = on
         busy = true
         defer { busy = false }
@@ -225,6 +227,19 @@ final class PanelModel: ObservableObject {
             showToast(on ? "启动失败" : "停止失败")
         }
         pendingRunning = nil
+    }
+
+    /// 全局快捷键启停动作（M3-plan §11.2-7，批② c5）：方向判定用**现场 status 探测**
+    /// （评审 P2：收起态 report 每 30s 才刷新一次，按缓存判定在 stale 窗口会双 start/
+    /// 误 stop），随后复用 toggleMaster——busy 防抖、乐观翻转、有界轮询、toast 全部
+    /// 与 popover 主开关同路（共享 busy：toggle 期间 popover 点击同样被拒）。
+    func toggleFromHotkey() async {
+        guard let bridge, !busy else { return }
+        guard let report = try? await bridge.status() else {
+            showToast("状态探测失败：快捷键未执行")
+            return
+        }
+        await toggleMaster(on: !report.core.running)
     }
 
     /// 出站模式切换（PATCH 热生效；settings 回写由 CLI 保证崩溃不回退）。

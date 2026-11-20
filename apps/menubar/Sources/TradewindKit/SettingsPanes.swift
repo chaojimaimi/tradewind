@@ -63,6 +63,9 @@ struct GeneralPane: View {
     @ObservedObject var model: SettingsModel
     @Environment(\.colorScheme) private var scheme
     @State private var confirmReset = false
+    /// 壳偏好（增强 #1，M3-plan §11.7）：@AppStorage 直写 UserDefaults 即时生效，
+    /// App 层 KVO 察觉后刷新/清空菜单栏速率 title——不走 SettingsModel/CLI 写链路
+    @AppStorage(ShellPrefs.menubarRateKey) private var menubarRate = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -75,6 +78,7 @@ struct GeneralPane: View {
                 portSection(settings)
                 subsSection(settings)
                 launchSection(settings)
+                shellSection
                 resetSection
             } else if model.loadFailed {
                 Text("设置读取失败，请关闭窗口后重开")
@@ -191,6 +195,28 @@ struct GeneralPane: View {
             rowDivider
             SettingsRow(label: "日志保留", subtitle: "按天数自动清理滚动日志") {
                 NumberValueField(model: model, field: .logRetention, snapshot: settings)
+            }
+        }
+    }
+
+    // MARK: 壳偏好（M3-plan §11.2-1 双轨制：UserDefaults 直写，不经 SettingsModel/CLI）
+
+    /// 增强 #1/#2（M3-plan §11.7，demo 均无此字段）：菜单栏速率 opt-in 开关 +
+    /// 启停快捷键只读展示。两行不受 model.busy 影响（壳偏好无 CLI 写编排）。
+    private var shellSection: some View {
+        SettingsSection(title: "菜单栏与快捷键") {
+            SettingsRow(label: "菜单栏速率",
+                        subtitle: "状态栏图标旁显示实时 ↓↑ 速率，关闭仅保留图标") {
+                SwitchPill(isOn: $menubarRate, small: true, accessibilityLabel: "菜单栏速率")
+            }
+            rowDivider
+            // 增强 #2：固定 ⌥⇧T 只读——改键 UI 裁剪（§11.1-H），hotkey_enabled 写逻辑
+            // 保留但 UI 不给开关，避免热卸载歧义（M3-plan §11.2-7）
+            SettingsRow(label: "启停快捷键",
+                        subtitle: "全局切换 Tradewind 启动/停止") {
+                Text("⌥⇧T")
+                    .font(.system(size: 11).monospaced())
+                    .foregroundStyle(.secondary)
             }
         }
     }

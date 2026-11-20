@@ -441,4 +441,75 @@ final class StubURLProtocol: URLProtocol {
         #expect(model.report?.core.running == false)
         #expect(model.effectiveRunning == false)
     }
+
+    /// ③ 入口 busy 守卫（批② c5）：busy 在途时 toggleMaster 拒绝重入——popover 开关
+    /// 视图层本就 .disabled(busy)，此处锁模型层契约（快捷键路径无视图，全靠此守卫）
+    @Test func toggleMasterRejectedWhileBusy() async {
+        StubURLProtocol.handler = { _ in (200, Self.proxiesJSON) }
+        let fake = FakeRunner()
+        let bridge = CoreBridge(runner: fake)
+        var spawns = 0
+        bridge.startDetached = { spawns += 1 }
+        let model = PanelModel(bridge: bridge, session: StubURLProtocol.install())
+        model.busy = true
+        await model.toggleMaster(on: true)
+        #expect(spawns == 0)
+        #expect(fake.calls.isEmpty)
+    }
+
+    // MARK: 批② c5 快捷键 toggle（M3-plan §11.2-7：现场 status 探测定向 + busy 防抖共享）
+
+    /// ① 探测报告 stopped → start：即使 model.report 为 nil/陈旧也以现场探测为准
+    /// （评审 P2：收起态 report 30s 刷新，缓存判定会在 stale 窗口双 start）
+    @Test func hotkeyToggleStartsWhenFreshProbeReportsStopped() async {
+        let stopped = Self.statusWithPanel.replacingOccurrences(
+            of: "\"running\":true", with: "\"running\":false"
+        )
+        StubURLProtocol.handler = { _ in (200, Self.proxiesJSON) }
+        let fake = FakeRunner([
+            FakeRunner.Reply(output: stopped, exitCode: 0),              // 现场探测：未运行
+            FakeRunner.Reply(output: stopped, exitCode: 0),              // 轮询探测 1：false
+            FakeRunner.Reply(output: Self.statusWithPanel, exitCode: 0), // 轮询探测 2：true → break
+        ])
+        let bridge = CoreBridge(runner: fake)
+        var spawns = 0
+        bridge.startDetached = { spawns += 1 }
+        let model = PanelModel(bridge: bridge, session: StubURLProtocol.install())
+        await model.toggleFromHotkey()
+        #expect(spawns == 1) // detached start 已触发（不误 stop：无 ["stop"] 调用）
+        #expect(!fake.calls.contains(["stop"]))
+        #expect(model.effectiveRunning)
+    }
+
+    /// ② 探测报告 running → stop：调用序列 = 现场探测 → stop → 权威值刷新
+    @Test func hotkeyToggleStopsWhenFreshProbeReportsRunning() async {
+        StubURLProtocol.handler = { _ in (200, Self.proxiesJSON) }
+        let fake = FakeRunner([
+            FakeRunner.Reply(output: Self.statusWithPanel, exitCode: 0), // 现场探测：运行中
+            FakeRunner.Reply(output: "", exitCode: 0),                   // stop
+            FakeRunner.Reply(output: Self.statusWithPanel, exitCode: 0), // stop 后刷新 status
+        ])
+        let model = PanelModel(bridge: CoreBridge(runner: fake), session: StubURLProtocol.install())
+        await model.toggleFromHotkey()
+        #expect(fake.calls == [["status", "--json"], ["stop"], ["status", "--json"]])
+    }
+
+    /// ③ busy 在途快捷键整体拒绝：不探测、不 toggle（与 popover 共享 busy 防抖）
+    @Test func hotkeyToggleRejectedWhileBusy() async {
+        StubURLProtocol.handler = { _ in (200, Self.proxiesJSON) }
+        let fake = FakeRunner()
+        let model = PanelModel(bridge: CoreBridge(runner: fake), session: StubURLProtocol.install())
+        model.busy = true
+        await model.toggleFromHotkey()
+        #expect(fake.calls.isEmpty) // 连现场探测都不发起
+    }
+
+    /// ④ 现场探测失败：toast 显式提示（不静默），不进入 toggle
+    @Test func hotkeyToggleShowsToastWhenProbeFails() async {
+        let fake = FakeRunner(FakeRunner.Reply(output: "", exitCode: 2)) // 非契约退出码
+        let model = PanelModel(bridge: CoreBridge(runner: fake), session: StubURLProtocol.install())
+        await model.toggleFromHotkey()
+        #expect(model.toast != nil)
+        #expect(fake.calls == [["status", "--json"]]) // 仅探测，无启停调用
+    }
 }

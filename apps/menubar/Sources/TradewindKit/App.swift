@@ -39,6 +39,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables = Set<AnyCancellable>()
     /// 周期刷新（M2-plan §8：壳每次操作前探测；v0.4.6 起随 popover 开合变频）
     private var refreshTimer: Timer?
+    /// 全局启停快捷键 ⌥⇧T（M3 批② c5，M3-plan §11.2-7）；nil=未注册
+    /// （hotkey_enabled 关或注册失败），热开关经 UserDefaults KVO 动态装卸
+    private var hotKey: GlobalHotKey?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -51,8 +54,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.delegate = self
         setupStatusItem()
         observeModel()
+        observeShellPrefs()
         rescheduleRefresh() // 初值 30s：启动时 popover 未展开
         Task { await model.refresh() }
+        if ShellPrefs.hotkeyEnabled() { registerHotKey() } // 缺省 true（§11.2-7）
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -61,6 +66,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         model.traffic.persistNow() // 今日流量落盘（壳内累计的收尾）
+    }
+
+    deinit {
+        // 壳偏好 KVO 解除（observeShellPrefs 注册对；进程退出才 deinit，惯例防御）
+        for key in [ShellPrefs.hotkeyEnabledKey, ShellPrefs.menubarRateKey] {
+            UserDefaults.standard.removeObserver(self, forKeyPath: key)
+        }
     }
 
     // MARK: 状态栏装配
@@ -76,6 +88,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 事件永远到不了 statusItemClicked，Quit 菜单入口失效（M2 真机验收缺陷）
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         item.menu = nil // 事件全走 action：左键 popover / 右键菜单
+        // 速率 title 字体（M3 批② c5）：monospacedDigit 11px——等宽数字防
+        // "↓42.0 MB/s" 逐秒宽度抖动（opt-in title 与 image 共存，图像左、文本右）
+        button.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         statusItem = item
         refreshIcon()
     }
@@ -141,13 +156,78 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.refreshIcon() }
             .store(in: &cancellables)
+        // 菜单栏速率 opt-in（M3 批② c5，§11.2-8）：TrafficStore 的 /traffic WS 推送驱动。
+        // WHY 启动即订阅：traffic 是 let（publisher 自 PanelModel.init 存在），数据在
+        // model.refresh() 的 attach 之后才流入——pref 关时 refreshRateTitle 只做清空，
+        // 开销为零；订阅无需等 attach。
+        model.traffic.$down
+            .combineLatest(model.traffic.$up)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _, _ in self?.refreshRateTitle() }
+            .store(in: &cancellables)
     }
 
-    // WHY v0.4.5（2026-11-19 第四轮反馈）：菜单栏速率文本降级为默认关闭——运行态横向
-    // 速率文本占宽且随数值宽度抖动（"↓42.0 MB/s ↑0.8 MB/s"），用户反馈干扰菜单栏；
-    // 速率信息 popover 速率卡已有，title 恒空只留图标（三态着色不变）。
-    // RateText.statusItem 机制保留勿删：批②设置窗口将其转为 opt-in 设置项，届时在
-    // 此处接设置开关恢复 title 刷新（曾用的 traffic.$down 订阅已随 updateRateText 移除）。
+    // MARK: 菜单栏速率 opt-in（v0.4.5 默认关闭 → 批② c5 转设置开关，§11.2-8）
+
+    /// WHY v0.4.5（2026-11-19 第四轮反馈）默认关闭：运行态横向速率文本占宽且随数值
+    /// 宽度抖动，用户反馈干扰菜单栏。批② c5 起 opt-in（tradewind.shell.menubar_rate，
+    /// 通用页开关 @AppStorage 即时生效）：开关开且运行态时 title = RateText.statusItem
+    /// （停止态传 nil → nil 文本 → 清空，RateText 既有契约）；关时清空只留图标。
+    /// title 唯一写入点：WS 速率推送 + 图标刷新（运行态翻转即隐藏/显现）+ 偏好 KVO。
+    private func refreshRateTitle() {
+        guard let button = statusItem?.button else { return }
+        guard ShellPrefs.menubarRate() else {
+            if !button.title.isEmpty { button.title = "" } // 关：热清空（不等下条 WS 推送）
+            return
+        }
+        // WHY effectiveRunning：与图标同口径（v0.4.7 乐观值优先），toggle 期间 title 同步翻转
+        let running = model.effectiveRunning
+        let text = RateText.statusItem(down: running ? model.traffic.down : nil,
+                                       up: running ? model.traffic.up : nil) ?? ""
+        if button.title != text { button.title = text }
+    }
+
+    // MARK: 全局启停快捷键（M3 批② c5，§11.2-7）
+
+    /// 注册 ⌥⇧T。动作经 PanelModel.toggleFromHotkey：现场 status 探测定向 + 与
+    /// popover toggleMaster 共享 busy 防抖；注册失败经 onError toast 显式上报
+    /// （不静默，§11.6 冲突风险对策；OSStatus 无用户语义不回显错误码）。
+    private func registerHotKey() {
+        guard hotKey == nil else { return } // 已注册：热开关重复开启不重注册
+        let hotKey = GlobalHotKey(handler: { [weak self] in
+            guard let self else { return }
+            Task { await self.model.toggleFromHotkey() }
+        }, onError: { [weak self] _ in
+            self?.model.toast = "快捷键 ⌥⇧T 注册失败：可能与其他应用冲突"
+        })
+        self.hotKey = hotKey
+    }
+
+    /// 热卸载（hotkey_enabled 关闭时；热开关语义——不重启壳即时生效）
+    private func unregisterHotKey() {
+        hotKey?.unregister()
+        hotKey = nil
+    }
+
+    /// 壳偏好热开关观察（GeneralPane 经 @AppStorage 写 UserDefaults，KVO 即时送达）：
+    /// hotkey_enabled 关→热卸载快捷键；menubar_rate 开/关→立即刷新/清空速率 title。
+    private func observeShellPrefs() {
+        for key in [ShellPrefs.hotkeyEnabledKey, ShellPrefs.menubarRateKey] {
+            UserDefaults.standard.addObserver(self, forKeyPath: key, options: [.new], context: nil)
+        }
+    }
+
+    override func observeValue(forKeyPath keyPath: String?, of object: Any?,
+                               change: [NSKeyValueChangeKey: Any]?, context: UnsafeMutableRawPointer?) {
+        switch keyPath {
+        case ShellPrefs.hotkeyEnabledKey:
+            ShellPrefs.hotkeyEnabled() ? registerHotKey() : unregisterHotKey()
+        case ShellPrefs.menubarRateKey:
+            refreshRateTitle()
+        default:
+            super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
+        }
+    }
 
     /// WHY v0.4.6（2026-11-19 拍板 A+C 的 C）随 popover 开合变频：async 化后主线程已不阻塞，
     /// 降频进一步省 CPU 与子进程探测次数——展开态 5s 供面板/图标保持新鲜，收起态每 30s
@@ -173,6 +253,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.image = StatusIcon.image(state, scheme: scheme)
         button.alphaValue = StatusIcon.alpha(state)
         button.toolTip = statusTooltip(state)
+        // 速率 title 随运行态翻转即时隐藏/显现（停止态清空，opt-in 开时）
+        refreshRateTitle()
     }
 
     /// tooltip 三态文案：active=代理开 / idle=代理关 / stopped，悬停可辨（v0.4.6）。
