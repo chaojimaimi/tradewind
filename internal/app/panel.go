@@ -13,6 +13,7 @@ import (
 	"github.com/chaojimaimi/tradewind/internal/panel"
 	"github.com/chaojimaimi/tradewind/internal/paths"
 	"github.com/chaojimaimi/tradewind/internal/store"
+	"github.com/chaojimaimi/tradewind/internal/sysproxy"
 )
 
 // panelServer 持有网关的 http.Server 与监听器，供 start 生命周期管理。
@@ -48,6 +49,15 @@ func startGateway(home paths.Home, settings store.Settings) (*panelServer, strin
 		Token:    token,
 		SockPath: home.SockFile(),
 		Secret:   store.ReadSecret(home),
+		// /pac 实时合成源（批④ §3.2）：每请求重读 settings——mixed_port/bypass
+		// 变更即反映；LoadSettings/Validate 失败 → 网关 503（不兜底输出）
+		PACSource: func() (int, []string, error) {
+			s, err := store.LoadSettings(home)
+			if err != nil {
+				return 0, nil, err
+			}
+			return s.MixedPort, sysproxy.EffectiveBypass(s.BypassDomains), nil
+		},
 	})
 	ps := &panelServer{srv: &http.Server{Handler: gw}, ln: ln}
 	go func() {

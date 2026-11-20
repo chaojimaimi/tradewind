@@ -372,3 +372,122 @@ func TestIndexNoStoreAndConfigCacheBust(t *testing.T) {
 		t.Fatalf("asset = %d %q", rec.Code, rec.Body.String())
 	}
 }
+
+// --- /pac 开洞路由与 PAC 文本（批④ §3.2）---
+
+// TestPACScriptGolden bypass 变体 golden：通配/<local>/CIDR/缺省集逐字锚定。
+func TestPACScriptGolden(t *testing.T) {
+	got := PACScript(7897, []string{"127.0.0.1", "localhost", "*.local", "169.254/16", "<local>"})
+	want := "// Tradewind PAC (auto-generated from settings; do not edit)\n" +
+		"function FindProxyForURL(url, host) {\n" +
+		"  if (shExpMatch(host, \"127.0.0.1\")) return \"DIRECT\";\n" +
+		"  if (shExpMatch(host, \"localhost\")) return \"DIRECT\";\n" +
+		"  if (shExpMatch(host, \"*.local\")) return \"DIRECT\";\n" +
+		"  if (isInNet(host, \"169.254.0.0\", \"255.255.0.0\")) return \"DIRECT\";\n" +
+		"  if (isPlainHostName(host)) return \"DIRECT\";\n" +
+		"  return \"PROXY 127.0.0.1:7897\";\n" +
+		"}\n"
+	if got != want {
+		t.Fatalf("PACScript golden mismatch:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// TestPACScriptEmptyBypass 空 bypass：无 DIRECT 行，恒 PROXY（Empty 语义锚）。
+func TestPACScriptEmptyBypass(t *testing.T) {
+	got := PACScript(17890, nil)
+	if strings.Contains(got, "DIRECT") {
+		t.Fatalf("empty bypass must emit no DIRECT branches: %s", got)
+	}
+	if !strings.Contains(got, `return "PROXY 127.0.0.1:17890";`) {
+		t.Fatalf("missing PROXY line: %s", got)
+	}
+}
+
+// TestPACScriptInjectionSafe 注入拒绝（纵深防御 %q 转义 + 上游白名单双闸）：
+// 即使构造层漏进恶意串，引号也会被转义为字面量而非 JS 语法。
+func TestPACScriptInjectionSafe(t *testing.T) {
+	got := PACScript(7897, []string{"evil\";alert(1);//x"})
+	if strings.Contains(got, "evil\";alert") {
+		t.Fatalf("quote must be escaped: %s", got)
+	}
+	if !strings.Contains(got, `shExpMatch(host, "evil\";alert(1);//x")`) {
+		t.Fatalf("pattern must be inside quoted string literal: %s", got)
+	}
+}
+
+func TestPACCIDR(t *testing.T) {
+	cases := []struct {
+		in        string
+		net, mask string
+		ok        bool
+	}{
+		{"169.254/16", "169.254.0.0", "255.255.0.0", true},
+		{"10.0.0.0/8", "10.0.0.0", "255.0.0.0", true},
+		{"192.168.1.5/32", "192.168.1.5", "255.255.255.255", true},
+		{"0.0.0.0/0", "0.0.0.0", "0.0.0.0", true},
+		{"nope", "", "", false},
+		{"300.1/8", "", "", false},
+		{"10.0.0.0/33", "", "", false},
+		{"a.b.c.d/8", "", "", false},
+	}
+	for _, tc := range cases {
+		net, mask, ok := pacCIDR(tc.in)
+		if ok != tc.ok || (ok && (net != tc.net || mask != tc.mask)) {
+			t.Fatalf("pacCIDR(%q) = %q/%q/%v, want %q/%q/%v", tc.in, net, mask, ok, tc.net, tc.mask, tc.ok)
+		}
+	}
+}
+
+// TestPACHoleOpenNoAuth /pac 无 cookie 可达（requireCookie 之前开洞）、内容实时、
+// Content-Type 正确；非 GET 404；LoadSettings 失败 503。
+func TestPACHoleOpenNoAuth(t *testing.T) {
+	ui := t.TempDir()
+	port, bypass := 7897, []string{"*.local"}
+	g := NewGateway(Config{
+		Port: 39097, UIDir: ui, Token: testToken, SockPath: "/tmp/none.sock", Secret: "s",
+		PACSource: func() (int, []string, error) { return port, bypass, nil },
+	})
+	host := "127.0.0.1:39097"
+	rec := get(g, host, "/pac", nil) // 无 cookie
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/pac no-auth status = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/x-ns-proxy-autoconfig" {
+		t.Fatalf("content-type = %q", ct)
+	}
+	if !strings.Contains(rec.Body.String(), "PROXY 127.0.0.1:7897") {
+		t.Fatalf("body missing PROXY line: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "FindProxyForURL") {
+		t.Fatalf("body missing FindProxyForURL: %s", rec.Body.String())
+	}
+	// 实时合成：改源参数后同网关即刻反映
+	port = 17890
+	rec = get(g, host, "/pac", nil)
+	if !strings.Contains(rec.Body.String(), "PROXY 127.0.0.1:17890") {
+		t.Fatalf("PAC must be composed live: %s", rec.Body.String())
+	}
+	// 非 GET → 404（不泄露路由）
+	req := httptest.NewRequest(http.MethodPost, "/pac", nil)
+	req.Host = host
+	recPost := httptest.NewRecorder()
+	g.ServeHTTP(recPost, req)
+	if recPost.Code != http.StatusNotFound {
+		t.Fatalf("POST /pac status = %d, want 404", recPost.Code)
+	}
+	// PACSource 失败 → 503（显式失败，不兜底输出）
+	gErr := NewGateway(Config{
+		Port: 39097, UIDir: ui, Token: testToken, SockPath: "/tmp/none.sock", Secret: "s",
+		PACSource: func() (int, []string, error) { return 0, nil, fmt.Errorf("boom") },
+	})
+	recErr := get(gErr, host, "/pac", nil)
+	if recErr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("PACSource failure status = %d, want 503", recErr.Code)
+	}
+	// 无 PACSource（中间装配态）→ 404
+	gNil, hostNil := newTestGateway(t)
+	recNil := get(gNil, hostNil, "/pac", nil)
+	if recNil.Code != http.StatusNotFound {
+		t.Fatalf("nil PACSource status = %d, want 404", recNil.Code)
+	}
+}

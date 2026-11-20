@@ -112,6 +112,8 @@ func applySettingsMutationWith(ctx context.Context, home paths.Home, mutate func
 		return err
 	}
 	mixedPortBefore := settings.MixedPort
+	gatewayPortBefore := settings.GatewayPort
+	pacModeBefore := settings.PacMode
 	if err := mutate(&settings); err != nil {
 		return err
 	}
@@ -127,21 +129,31 @@ func applySettingsMutationWith(ctx context.Context, home paths.Home, mutate func
 		return err
 	}
 	if skipKernelReload {
+		// gateway_port 变更 × PAC 会话（批④ §3.2 评审二轮 P1-3）：网关仍监听旧端口
+		// 直到 start 重启——不重放（重放=指向无人监听端口，制造死链）；仅警告，
+		// 重启后 start 路径以新端口 Apply 自然收敛
+		if msg, needed := gatewayPortChangeWarning(home, settings, gatewayPortBefore); needed {
+			fmt.Println("warning: " + msg)
+		}
 		fmt.Println("settings saved (restart Tradewind to apply this change)")
 		return nil
 	}
 	if !CoreReachable(home) {
 		fmt.Println("settings saved (core not running; takes effect on next start)")
-		return nil // 内核未运行 → 不 retarget（系统代理不指向死端口）
+		// 内核未运行 → 不 retarget（系统代理不指向死端口）；但 sysproxy 已 applied 时
+		// pac_mode 翻转仍立即生效（系统代理在场，与内核无关）→ 形态重放照走
+		return switchSysProxyFormIfNeeded(home, runner, settings, pacModeBefore)
 	}
 	// 先 reload 后 retarget：PUT 已重绑端口而 sysproxy 仍指旧端口 = 断网陷阱窗口
 	if err := ReloadIfRunning(ctx, home); err != nil {
 		return err // 热重载失败且降级重启也失败：不 retarget，显式报错
 	}
 	if settings.MixedPort != mixedPortBefore {
-		return retargetSysProxy(home, settings.MixedPort, runner)
+		if err := retargetSysProxy(home, settings.MixedPort, runner); err != nil {
+			return err
+		}
 	}
-	return nil
+	return switchSysProxyFormIfNeeded(home, runner, settings, pacModeBefore)
 }
 
 // retargetSysProxy mixed_port 变更后的系统代理迁移。
@@ -181,6 +193,78 @@ func retargetSysProxy(home paths.Home, port int, runner sysproxy.Runner) error {
 		return fmt.Errorf("app: retarget sysproxy: %w; 系统代理迁移失败，请手动开关一次系统代理", err)
 	}
 	fmt.Printf("system proxy retargeted to 127.0.0.1:%d (backup preserved)\n", port)
+	return nil
+}
+
+// gatewayPortChangeWarning gateway_port 变更 × PAC 会话（applied 且 Form=pac）的
+// 仅警告判据：不重放期间 PAC 指向仍活着的旧端口，重启后 start 路径以新端口 Apply
+// 自然收敛。未 applied（无系统代理在场）时警告是噪音，不提示。
+func gatewayPortChangeWarning(home paths.Home, settings store.Settings, before int) (string, bool) {
+	if settings.GatewayPort == before {
+		return "", false
+	}
+	st, err := store.LoadState(home)
+	if err != nil || !st.SysProxy.Applied || st.SysProxy.Form != sysproxy.FormPAC {
+		return "", false
+	}
+	return "面板端口已改，重启后 PAC 自动指向新端口", true
+}
+
+// switchSysProxyFormIfNeeded pac_mode 翻转时的形态重放判定（批④ §3.3）：
+// 仅 sysproxy applied 时重放（retarget 同款）；未 applied = 预配置（内核未运行允许，
+// 下次 start 生效），写侧不探测网关。
+// 守卫探测条件（批④ §3.1）：仅当变更将立即生效（applied）时探测 gatewayReachable；
+// 新形态 PAC 且网关不可达 → 跳过重放 + 显著警告（设置已落盘，网关可用后
+// 重启 Tradewind 或手动开关一次系统代理收敛）。
+func switchSysProxyFormIfNeeded(home paths.Home, runner sysproxy.Runner, settings store.Settings, pacModeBefore bool) error {
+	if settings.PacMode == pacModeBefore {
+		return nil
+	}
+	st, err := store.LoadState(home)
+	if err != nil {
+		return err
+	}
+	if !st.SysProxy.Applied {
+		return nil
+	}
+	newForm := formFromSettings(settings)
+	if newForm == sysproxy.FormPAC && !gatewayReachable(settings.GatewayPort) {
+		fmt.Println("warning: PAC 未生效（面板网关不可达）——设置已保存；网关可用后重启 Tradewind 或手动开关一次系统代理")
+		return nil
+	}
+	return switchSysProxyForm(home, runner, st, settings, newForm)
+}
+
+// switchSysProxyForm 形态重放本体（崩溃安全序，批④风险表"PAC 与手工态混写"对策）：
+// 先按备份 Restore 全部（回到用户原始网络配置，含旧形态的 autoproxy 还原段）→
+// 按新 Form Apply。备份先行，中途 kill 的残留由下次启动 cleanupResidues 收敛。
+func switchSysProxyForm(home paths.Home, runner sysproxy.Runner, st store.State, settings store.Settings, newForm string) error {
+	svcs, err := sysproxy.ActiveServices(runner)
+	if err != nil {
+		return fmt.Errorf("app: switch sysproxy form: %w; 系统代理迁移失败，请手动开关一次系统代理", err)
+	}
+	if len(svcs) == 0 {
+		return errors.New("app: switch sysproxy form: no active network services; 系统代理迁移失败，请手动开关一次系统代理")
+	}
+	if err := sysproxy.Restore(runner, st.SysProxy.Services, st.SysProxy.Form); err != nil {
+		return fmt.Errorf("app: switch sysproxy form: %w; 系统代理迁移失败，请手动开关一次系统代理", err)
+	}
+	bypass := sysproxy.EffectiveBypass(settings.BypassDomains)
+	if newForm == sysproxy.FormPAC {
+		pacURL := fmt.Sprintf("http://127.0.0.1:%d/pac", settings.GatewayPort)
+		err = sysproxy.ApplyPAC(runner, svcs, pacURL, bypass)
+	} else {
+		err = sysproxy.Apply(runner, svcs, "127.0.0.1", settings.MixedPort, bypass)
+	}
+	if err != nil {
+		return fmt.Errorf("app: switch sysproxy form: %w; 系统代理迁移失败，请手动开关一次系统代理", err)
+	}
+	// 会话形态换轨持久化（Restore 决策表与 watcher 检测以 state Form 为准）
+	st.SysProxy.Form = newForm
+	if err := store.SaveState(home, st); err != nil {
+		return err
+	}
+	fmt.Printf("system proxy switched to %s form\n", newForm)
 	return nil
 }
 

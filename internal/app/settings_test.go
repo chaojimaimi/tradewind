@@ -12,6 +12,7 @@ import (
 	"github.com/chaojimaimi/tradewind/internal/core"
 	"github.com/chaojimaimi/tradewind/internal/paths"
 	"github.com/chaojimaimi/tradewind/internal/store"
+	"github.com/chaojimaimi/tradewind/internal/sysproxy"
 )
 
 // TestSettingsSetWhitelist 全部白名单键可写（未运行场景：仅落盘 + 重合成）。
@@ -377,5 +378,253 @@ func TestPostHandshakePACGatewayDowngradedSkips(t *testing.T) {
 	}
 	if st.Core.Desired != store.DesiredRunning {
 		t.Fatalf("desired = %q, want running (start continues)", st.Core.Desired)
+	}
+}
+
+// captureStdout 劫持 os.Stdout 捕获编排期输出（警告文案断言用）。
+func captureStdout(t *testing.T, run func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	done := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 4096)
+		var sb strings.Builder
+		for {
+			n, err := r.Read(buf)
+			sb.Write(buf[:n])
+			if err != nil {
+				break
+			}
+		}
+		done <- sb.String()
+	}()
+	run()
+	w.Close()
+	os.Stdout = old
+	return <-done
+}
+
+// TestSettingsSetPacFlipReplaysFormSwitch 批④ §3.3：applied 态 pac_mode 翻转 →
+// retarget 同款重放：先按备份 Restore 全部（含旧 manual 形态还原段），再按新形态
+// Apply（PAC：url+state on+bypass），state Form 换轨。
+func TestSettingsSetPacFlipReplaysFormSwitch(t *testing.T) {
+	var reloads []string
+	home, cleanup := stubFullCore(t, &reloads)
+	defer cleanup()
+	seedRuntimeInputs(t, home)
+	writeAppliedStateForm(t, home, sysproxy.FormManual) // applied、会话 manual
+
+	var fake fakeNetRunner
+	err := applySettingsMutationWith(context.Background(), home, func(s *store.Settings) error {
+		s.PacMode = true
+		return nil
+	}, &fake, false)
+	if err != nil {
+		t.Fatalf("pac flip replay: %v", err)
+	}
+	// 调用序：Restore 段（webproxystate off + bypass）在前，PAC 写入段在后
+	joined := make([]string, 0, len(fake.calls))
+	for _, c := range fake.calls {
+		joined = append(joined, strings.Join(c, " "))
+	}
+	restoreIdx, pacURLIdx := -1, -1
+	for i, c := range joined {
+		// 备份 Web{Enabled:true, Server:10.0.0.1:8888} → Restore 段重写 web 代理命令
+		if strings.HasPrefix(c, "-setwebproxy Wi-Fi 10.0.0.1 8888") {
+			restoreIdx = i
+		}
+		if strings.HasPrefix(c, "-setautoproxyurl") {
+			pacURLIdx = i
+		}
+	}
+	if restoreIdx == -1 || pacURLIdx == -1 || restoreIdx > pacURLIdx {
+		t.Fatalf("replay order = restore@%d pac@%d; calls %v", restoreIdx, pacURLIdx, joined)
+	}
+	hasStateOn := false
+	for _, c := range joined {
+		if strings.HasPrefix(c, "-setautoproxystate Wi-Fi on") {
+			hasStateOn = true
+		}
+	}
+	if !hasStateOn {
+		t.Fatalf("PAC apply missing state on: %v", joined)
+	}
+	st := appliedState(t, home)
+	if st.Form != sysproxy.FormPAC {
+		t.Fatalf("state form = %q, want pac (switch persisted)", st.Form)
+	}
+	// 备份态不变（还原语义仍指向用户原始网络配置）
+	if len(st.Services) != 1 || st.Services[0].Web.Server != "10.0.0.1" {
+		t.Fatalf("backup changed after form switch: %+v", st.Services)
+	}
+}
+
+// TestSettingsSetPacFlipToManualReplaysRestore 形态回切：pac → manual 重放为
+// Restore 全部（按 pac 形态补 autoproxy 还原段）+ 手工三项写入 + state Form 归位。
+func TestSettingsSetPacFlipToManualReplaysRestore(t *testing.T) {
+	var reloads []string
+	home, cleanup := stubFullCore(t, &reloads)
+	defer cleanup()
+	seedRuntimeInputs(t, home)
+	// 会话 pac + settings.pac_mode=true（翻转判定以写前 settings 为基线）
+	cur := store.DefaultSettings()
+	cur.PacMode = true
+	if err := store.SaveSettings(home, cur); err != nil {
+		t.Fatal(err)
+	}
+	backups := writeAppliedStateForm(t, home, sysproxy.FormPAC)
+	backups[0].AutoProxy = store.AutoProxyState{URL: "http://old.example/pac", Enabled: false}
+	st, _ := store.LoadState(home)
+	st.SysProxy.Services = backups
+	if err := store.SaveState(home, st); err != nil {
+		t.Fatal(err)
+	}
+
+	var fake fakeNetRunner
+	if err := applySettingsMutationWith(context.Background(), home, func(s *store.Settings) error {
+		s.PacMode = false
+		return nil
+	}, &fake, false); err != nil {
+		t.Fatalf("pac->manual replay: %v", err)
+	}
+	joined := make([]string, 0, len(fake.calls))
+	for _, c := range fake.calls {
+		joined = append(joined, strings.Join(c, " "))
+	}
+	restoreURLIdx, manualApplyIdx := -1, -1
+	for i, c := range joined {
+		if strings.HasPrefix(c, "-setautoproxyurl Wi-Fi http://old.example/pac") {
+			restoreURLIdx = i // 旧形态（pac）的 autoproxy 还原段
+		}
+		if strings.HasPrefix(c, "-setwebproxy Wi-Fi 127.0.0.1") {
+			manualApplyIdx = i // 新形态（manual）写入
+		}
+	}
+	if restoreURLIdx == -1 || manualApplyIdx == -1 || restoreURLIdx > manualApplyIdx {
+		t.Fatalf("replay order = restore@%d manual@%d; calls %v", restoreURLIdx, manualApplyIdx, joined)
+	}
+	if s := appliedState(t, home); s.Form != sysproxy.FormManual {
+		t.Fatalf("state form = %q, want manual", s.Form)
+	}
+}
+
+// TestSettingsSetPacFlipGatewayUnreachableSkips 守卫分支（写侧）：applied + 网关
+// 不可达 → 跳过重放（零 networksetup 调用）+ 显著警告；设置已落盘。
+func TestSettingsSetPacFlipGatewayUnreachableSkips(t *testing.T) {
+	var reloads []string
+	home, cleanup := stubFullCore(t, &reloads)
+	defer cleanup()
+	seedRuntimeInputs(t, home)
+	writeAppliedStateForm(t, home, sysproxy.FormManual)
+	stubGatewayReachable(t, false)
+
+	var out string
+	var fake fakeNetRunner
+	var err error
+	out = captureStdout(t, func() {
+		err = applySettingsMutationWith(context.Background(), home, func(s *store.Settings) error {
+			s.PacMode = true
+			return nil
+		}, &fake, false)
+	})
+	if err != nil {
+		t.Fatalf("guard skip must not error: %v", err)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("guard failure must replay nothing; calls %v", fake.calls)
+	}
+	if !strings.Contains(out, "PAC 未生效（面板网关不可达）") {
+		t.Fatalf("warning missing: %q", out)
+	}
+	if s := appliedState(t, home); s.Form != sysproxy.FormManual {
+		t.Fatalf("form must stay manual on skip: %q", s.Form)
+	}
+	// 设置已落盘（预配置语义）
+	settings, _ := store.LoadSettings(home)
+	if !settings.PacMode {
+		t.Fatal("pac_mode must persist (crash-safe) despite skipped replay")
+	}
+}
+
+// TestSettingsSetPacFlipNotAppliedPreconfig 未 applied（内核未运行）：预配置不探测
+// 网关、零 networksetup 调用（下次 start 生效）。
+func TestSettingsSetPacFlipNotAppliedPreconfig(t *testing.T) {
+	home := paths.Home(stubSocketDir(t))
+	seedRuntimeInputs(t, home)
+	stubGatewayReachable(t, false) // 若被探测会走 skip 分支——预配置路径根本不应探测
+
+	var fake fakeNetRunner
+	err := applySettingsMutationWith(context.Background(), home, func(s *store.Settings) error {
+		s.PacMode = true
+		return nil
+	}, &fake, false)
+	if err != nil {
+		t.Fatalf("preconfig: %v", err)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("preconfig must make zero networksetup calls; got %v", fake.calls)
+	}
+	settings, _ := store.LoadSettings(home)
+	if !settings.PacMode {
+		t.Fatal("pac_mode must persist")
+	}
+}
+
+// TestSettingsSetGatewayPortWarnsNoReplay 批④ §3.2 评审二轮 P1-3：applied PAC 会话
+// 下 gateway_port 变更 → 不重放（零 networksetup 调用）+ 仅警告文案。
+func TestSettingsSetGatewayPortWarnsNoReplay(t *testing.T) {
+	home := paths.Home(stubSocketDir(t))
+	seedRuntimeInputs(t, home)
+	writeAppliedStateForm(t, home, sysproxy.FormPAC)
+
+	var out string
+	var fake fakeNetRunner
+	var err error
+	out = captureStdout(t, func() {
+		err = applySettingsMutationWith(context.Background(), home, func(s *store.Settings) error {
+			s.GatewayPort = 19097
+			return nil
+		}, &fake, true)
+	})
+	if err != nil {
+		t.Fatalf("gateway_port change: %v", err)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("gateway_port change must not replay; calls %v", fake.calls)
+	}
+	if !strings.Contains(out, "面板端口已改，重启后 PAC 自动指向新端口") {
+		t.Fatalf("warning missing: %q", out)
+	}
+}
+
+// TestSettingsSetGatewayPortNoWarnWhenNotPAC 非 PAC 会话（manual/未 applied）下
+// gateway_port 变更不附加 PAC 警告（噪音消除）。
+func TestSettingsSetGatewayPortNoWarnWhenNotPAC(t *testing.T) {
+	home := paths.Home(stubSocketDir(t))
+	seedRuntimeInputs(t, home)
+	writeAppliedStateForm(t, home, sysproxy.FormManual)
+
+	var out string
+	var fake fakeNetRunner
+	var err error
+	out = captureStdout(t, func() {
+		err = applySettingsMutationWith(context.Background(), home, func(s *store.Settings) error {
+			s.GatewayPort = 19097
+			return nil
+		}, &fake, true)
+	})
+	if err != nil {
+		t.Fatalf("gateway_port change: %v", err)
+	}
+	if strings.Contains(out, "PAC") {
+		t.Fatalf("manual session must not emit PAC warning: %q", out)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("no replay expected; calls %v", fake.calls)
 	}
 }

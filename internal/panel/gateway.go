@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -19,6 +20,10 @@ type Config struct {
 	Token    string // panel token（凭据）
 	SockPath string // 内核 unix socket（反代目标）
 	Secret   string // 内核 secret（反代覆写 Authorization 用，永不出网关进程）
+	// PACSource 实时取 PAC 参数（mixed 端口 + bypass 生效值，批④ §3.2）。
+	// LoadSettings/Validate 失败由实现返回 error → /pac 显式 5xx（不兜底输出——
+	// 兜底输出会让注入防护被静默旁路）。nil = 不挂 /pac（仅中间装配状态）。
+	PACSource func() (mixedPort int, bypass []string, err error)
 }
 
 // Gateway 是面板网关 http.Handler：
@@ -52,6 +57,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	if r.URL.Path == "/pac" {
+		// 批④ §3.2：/pac 显式开洞——requireCookie 之前放行（无鉴权：内容只有
+		// 127.0.0.1:mixed_port 与 bypass 域名，无 token/路径信息；loopback 绑定 +
+		// allowHostOrigin 前置保持纵深防御）。macOS 系统代理按 URL 直接拉取，
+		// 无浏览器会话可携带 cookie，鉴权会令 PAC 恒拉取失败。
+		g.servePAC(w, r)
+		return
+	}
 	if r.URL.Path == "/ui" {
 		// 无尾斜杠：凭据校验通过后再规范化到 /ui/
 		// WHY 先校验：未认证的 301 会向本机其他进程泄露面板路径的存在性
@@ -78,6 +91,98 @@ func (g *Gateway) serveAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.proxy.ServeHTTP(w, r)
+}
+
+// servePAC 托管实时合成的 PAC 文件（批④ §3.2）。实时合成：settings 每请求重读，
+// mixed_port/bypass_domains 变更后无需重启网关即反映到 PAC 内容。
+// LoadSettings/Validate 失败 → 503 显式失败（不兜底输出：兜底会让 bypass 白名单
+// 校验被静默旁路，注入面重新打开）。
+func (g *Gateway) servePAC(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.NotFound(w, r) // 非 GET 不泄露该路由存在性（同 404 语义）
+		return
+	}
+	if g.cfg.PACSource == nil {
+		http.NotFound(w, r)
+		return
+	}
+	mixedPort, bypass, err := g.cfg.PACSource()
+	if err != nil {
+		http.Error(w, "pac unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	// WHY no-store：内容随 settings 实时变化且无版本化文件名，浏览器/系统缓存旧
+	// PAC 会让端口/绕过变更延迟生效（config.js 同款缓存哲学）
+	w.Header().Set("Content-Type", "application/x-ns-proxy-autoconfig")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write([]byte(PACScript(mixedPort, bypass)))
+}
+
+// PACScript 实时合成 FindProxyForURL（纯函数，golden 测试锚）：
+// bypass 命中 → DIRECT，其余 → PROXY 127.0.0.1:mixed_port。
+func PACScript(mixedPort int, bypass []string) string {
+	var b strings.Builder
+	b.WriteString("// Tradewind PAC (auto-generated from settings; do not edit)\n")
+	b.WriteString("function FindProxyForURL(url, host) {\n")
+	for _, d := range bypass {
+		fmt.Fprintf(&b, "  if (%s) return \"DIRECT\";\n", pacCondition(d))
+	}
+	fmt.Fprintf(&b, "  return \"PROXY 127.0.0.1:%d\";\n", mixedPort)
+	b.WriteString("}\n")
+	return b.String()
+}
+
+// pacCondition 单条 bypass pattern 的 JS 判定式。字符集白名单（store 校验层）
+// 已排除引号/分号/空格/&，%q 再转义一道（纵深防御，注入拒绝由测试钉死）。
+func pacCondition(pattern string) string {
+	switch {
+	case pattern == "<local>":
+		return "isPlainHostName(host)"
+	case strings.Contains(pattern, "/"): // CIDR 形态（如 169.254/16）
+		if net, mask, ok := pacCIDR(pattern); ok {
+			return fmt.Sprintf("isInNet(host, %q, %q)", net, mask)
+		}
+		return fmt.Sprintf("shExpMatch(host, %q)", pattern)
+	default:
+		// 通配（*.local）/域名/IP 字面量统一 shExpMatch：* ? 通配、字面量精确匹配
+		return fmt.Sprintf("shExpMatch(host, %q)", pattern)
+	}
+}
+
+// pacCIDR 解析 "169.254/16" 形态 → (网络地址, 子网掩码)。缺省八位组补零
+// （169.254 → 169.254.0.0）；非法（>4 段/越界/位数越界）返回 ok=false 退化 shExpMatch。
+func pacCIDR(pattern string) (string, string, bool) {
+	ipStr, bitsStr, found := strings.Cut(pattern, "/")
+	if !found {
+		return "", "", false
+	}
+	bits, err := strconv.Atoi(bitsStr)
+	if err != nil || bits < 0 || bits > 32 {
+		return "", "", false
+	}
+	octets := strings.Split(ipStr, ".")
+	if len(octets) == 0 || len(octets) > 4 {
+		return "", "", false
+	}
+	var nums [4]int
+	for i, o := range octets {
+		n, err := strconv.Atoi(o)
+		if err != nil || n < 0 || n > 255 {
+			return "", "", false
+		}
+		nums[i] = n
+	}
+	ip := uint32(nums[0])<<24 | uint32(nums[1])<<16 | uint32(nums[2])<<8 | uint32(nums[3])
+	// bits=0 → mask 0（Go 左移计数 ≥ 位宽得 0）；bits=32 → 全 1
+	mask := uint32(0)
+	if bits > 0 {
+		mask = ^uint32(0) << (32 - bits)
+	}
+	net := ip & mask
+	oct := func(v uint32) int { return int(v) }
+	return fmt.Sprintf("%d.%d.%d.%d", oct(net>>24&255), oct(net>>16&255), oct(net>>8&255), oct(net&255)),
+		fmt.Sprintf("%d.%d.%d.%d", oct(mask>>24&255), oct(mask>>16&255), oct(mask>>8&255), oct(mask&255)),
+		true
 }
 
 // isTokenEntry 判断路径是否凭据入口形态：/ui/<64hex>（带或不带尾斜杠）。
