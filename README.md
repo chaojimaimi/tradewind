@@ -1,5 +1,18 @@
 # Tradewind · 信风
 
+<p align="center">
+  <img src="apps/menubar/assets/brand-mark-mono.svg" width="120" alt="Tradewind 品牌标形">
+</p>
+
+<h1 align="center">Tradewind · 信风</h1>
+
+<p align="center">
+  <a href="#全部子命令"><img alt="status" src="https://img.shields.io/badge/status-M3%20%E4%BD%93%E9%AA%8C%E5%AE%8C%E5%96%84-2FB6DC"></a>
+  <img alt="platform" src="https://img.shields.io/badge/platform-macOS%2013%2B-lightgrey">
+  <img alt="core" src="https://img.shields.io/badge/core-mihomo%20v1.19.34-4FDCE4">
+  <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
+</p>
+
 个人代理管理工具（macOS 优先）：Go 控制面 + 外挂 mihomo 内核 + Swift 菜单栏壳。
 设计哲学：不自研代理内核，自建控制面；所有变更走"改配置 → 合成 → 热重载"单一管线。
 
