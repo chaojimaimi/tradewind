@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/chaojimaimi/tradewind/internal/core"
@@ -76,13 +77,23 @@ func Run(ctx context.Context, home paths.Home, opts StartOptions) error {
 		}
 		return err
 	}
-	// 日志清理（启动时一次，M2-plan §2.4）+ 后台调度器（30min tick，M2-plan §2.2）；
-	// 两者失败均不阻断 start（尽力而为的运维面）
+	// 日志清理（启动时一次，M2-plan §2.4）+ 后台调度器（30min tick，M2-plan §2.2）
+	// + 代理守护（30s tick，批④ §2.1）；三者失败均不阻断 start（尽力而为面）。
+	// watcher 收敛（评审二轮 P1-2）：waitLoop 两条关停路径的 fullShutdown 都发生在
+	// waitLoop 返回之前——收敛函数（cancel+WaitGroup.Wait）前移进两个调用点，
+	// 先收敛 watcher 再还原，杜绝守护与关停交错留 applied=false 死端口残留。
 	if err := cleanupLogs(home); err != nil {
 		fmt.Printf("log cleanup: %v\n", err)
 	}
 	startScheduler(ctx, home)
-	err = waitLoop(ctx, home, mgr, generation)
+	watcherCtx, cancelWatcher := context.WithCancel(ctx)
+	var watcherWG sync.WaitGroup
+	startWatcher(watcherCtx, home, &watcherWG)
+	convergeWatcher := func() {
+		cancelWatcher()
+		watcherWG.Wait()
+	}
+	err = waitLoop(ctx, home, mgr, generation, convergeWatcher)
 	if gw != nil {
 		gw.close()
 	}
@@ -103,6 +114,8 @@ func postHandshake(ctx context.Context, home paths.Home, mgr *core.Manager, opts
 				_ = fullShutdown(home, mgr, 0)
 				return 0, err
 			}
+		} else {
+			noteSysProxyApply() // grace 起点：watcher 30s 内不判抢改（防自家 Apply 误报）
 		}
 	}
 	st, err := store.LoadState(home)
@@ -131,18 +144,32 @@ func postHandshake(ctx context.Context, home paths.Home, mgr *core.Manager, opts
 
 // waitLoop 阻塞等待：SIGINT/SIGTERM → 优雅退出；内核 3 次重启耗尽 → 返回错误。
 // giveup 回调内已完成完整还原（绝不把系统代理留在指向死端口的状态）。
-func waitLoop(ctx context.Context, home paths.Home, mgr *core.Manager, generation int) error {
+// convergeWatcher（批④评审二轮 P1-2 挂点修正）：两条关停路径的 fullShutdown 都在
+// waitLoop 返回之前执行——signal 分支（本 select 内）与 giveup 回调（Monitor 回调，
+// 在监控 goroutine 上、waitLoop 仍阻塞、watcher 存活）都先收敛 watcher 再还原，
+// 共用 shutdownSequence 同一收敛前置序。
+func waitLoop(ctx context.Context, home paths.Home, mgr *core.Manager, generation int, convergeWatcher func()) error {
 	monCh := make(chan error, 1)
 	go func() {
-		monCh <- mgr.Monitor(ctx, func(error) { _ = fullShutdown(home, mgr, generation) })
+		monCh <- mgr.Monitor(ctx, func(error) {
+			_ = shutdownSequence(home, mgr, generation, convergeWatcher)
+		})
 	}()
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	select {
 	case sig := <-sigCh:
 		fmt.Printf("\ncaught %s, shutting down...\n", sig)
-		return fullShutdown(home, mgr, generation)
+		return shutdownSequence(home, mgr, generation, convergeWatcher)
 	case err := <-monCh:
 		return err
 	}
+}
+
+// shutdownSequence 关停统一收敛前置序（批④评审二轮 P1-2）：先收敛 watcher
+// （cancel+WaitGroup.Wait——在途 tick 完成后退出，此后零 tick）再 fullShutdown。
+// 绝不把系统代理留在指向死端口的状态（M1 "最大陷阱"的守护侧收口）。
+func shutdownSequence(home paths.Home, mgr *core.Manager, generation int, convergeWatcher func()) error {
+	convergeWatcher()
+	return fullShutdown(home, mgr, generation)
 }

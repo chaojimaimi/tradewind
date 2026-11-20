@@ -57,3 +57,25 @@ func (l *MutationLock) Release() {
 	_ = syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN)
 	_ = l.f.Close()
 }
+
+// ErrMutationBusy 是 TryAcquireMutationLock 的忙哨兵（watcher 据此跳过本 tick）。
+var ErrMutationBusy = errors.New("app: another mutation is in progress")
+
+// TryAcquireMutationLock 以 flock LOCK_EX|LOCK_NB 非阻塞获取 mutation.lock（F15：
+// flock 支持 LOCK_NB）；忙=返回 ErrMutationBusy——watcher tick 让路语义（绝不等待，
+// 批④评审 P1-2 并发防护第一件套）。与 acquireMutationLockFor 同一锁文件、同一
+// flock 语义，锁文件常驻不删除。
+func TryAcquireMutationLock(home paths.Home) (*MutationLock, error) {
+	f, err := os.OpenFile(home.MutationLockFile(), os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("app: open mutation.lock: %w", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, ErrMutationBusy
+		}
+		return nil, fmt.Errorf("app: flock mutation.lock: %w", err)
+	}
+	return &MutationLock{f: f}, nil
+}

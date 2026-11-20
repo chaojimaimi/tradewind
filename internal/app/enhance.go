@@ -345,6 +345,8 @@ func EnhanceClear(ctx context.Context, home paths.Home, slot, uid string, progre
 }
 
 // reloadAfterEnhance 校验通过后的收尾：重合成 + 热重载（未运行则仅落盘）。
+// WHY 显式合成保留 + PreSynthesized 变体（批④ P3-7）：本函数的显式 Synthesize 是
+// 内核未运行分支唯一的 runtime.yaml 落盘点（F14），收敛双实现到 PreSynthesized。
 func reloadAfterEnhance(ctx context.Context, home paths.Home, progress io.Writer, slot, action string) error {
 	secret, err := store.EnsureSecret(home)
 	if err != nil {
@@ -353,7 +355,7 @@ func reloadAfterEnhance(ctx context.Context, home paths.Home, progress io.Writer
 	if err := Synthesize(home, secret); err != nil {
 		return err
 	}
-	if err := ReloadIfRunningW(ctx, home, progress); err != nil {
+	if err := ReloadIfRunningPreSynthesizedW(ctx, home, progress); err != nil {
 		return err
 	}
 	fmt.Fprintf(progress, "enhance %s %s; config reloaded\n", slot, action)

@@ -7,6 +7,7 @@ import (
 
 	"github.com/chaojimaimi/tradewind/internal/paths"
 	"github.com/chaojimaimi/tradewind/internal/store"
+	"github.com/chaojimaimi/tradewind/internal/sysproxy"
 )
 
 func TestStatusJSONDegradedPanel(t *testing.T) {
@@ -106,5 +107,52 @@ func TestPanelURLOnlyPositive(t *testing.T) {
 	}
 	if url == "" {
 		t.Fatal("reachable gateway must yield URL")
+	}
+}
+
+// TestStatusJSONGuardKeys 批④ §2.1：status --json 透出 Form/HijackEvents/LastRestore
+// 三新键；applied=false 时 Form/事件 omitempty 缺键（旧壳解码兼容）。
+func TestStatusJSONGuardKeys(t *testing.T) {
+	home := paths.Home(stubSocketDir(t))
+	st := store.DefaultState()
+	st.SysProxy = store.SysProxyState{
+		Applied:      true,
+		Form:         sysproxy.FormPAC,
+		HijackEvents: 2,
+		LastRestore:  1737500000,
+	}
+	if err := store.SaveState(home, st); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Status(home)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	out, err := StatusReport(home, r)
+	if err != nil {
+		t.Fatalf("StatusReport: %v", err)
+	}
+	line, err := MarshalStatusJSON(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"form":"pac"`, `"hijack_events":2`, `"last_restore":1737500000`} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("status --json missing %s: %s", want, line)
+		}
+	}
+	// legacy 态（零值）三键缺省
+	home2 := paths.Home(stubSocketDir(t))
+	if err := store.SaveState(home2, store.DefaultState()); err != nil {
+		t.Fatal(err)
+	}
+	r2, _ := Status(home2)
+	out2, err := StatusReport(home2, r2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line2, _ := MarshalStatusJSON(out2)
+	if strings.Contains(line2, `"form"`) || strings.Contains(line2, `"hijack_events"`) || strings.Contains(line2, `"last_restore"`) {
+		t.Fatalf("legacy state must omit guard keys: %s", line2)
 	}
 }

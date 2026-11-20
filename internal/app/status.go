@@ -26,8 +26,13 @@ type Report struct {
 	// SysProxyApplied/Services 供 --json 结构化输出（人读版见 SysProxy 字符串）
 	SysProxyApplied  bool
 	SysProxyServices int
-	Profile          string
-	Traffic          string
+	// 会话形态与守护事件（批④ §2.1）：Form 空=legacy manual；HijackEvents/LastRestore
+	// 是代理守护的抢改事件计数与最近还原时间戳（壳 toast 数据源）
+	SysProxyForm         string
+	SysProxyHijackEvents int
+	SysProxyLastRestore  int64
+	Profile              string
+	Traffic              string
 }
 
 // ExitCode 供脚本判断（M0-plan §4）：0 正常 / 1 内核异常（desired=running 但不可达）。
@@ -45,11 +50,14 @@ func Status(home paths.Home) (Report, error) {
 		return Report{}, err
 	}
 	r := Report{
-		Desired:          st.Core.Desired,
-		PID:              st.Core.PID,
-		SysProxy:         map[bool]string{true: "applied", false: "not applied"}[st.SysProxy.Applied],
-		SysProxyApplied:  st.SysProxy.Applied,
-		SysProxyServices: len(st.SysProxy.Services),
+		Desired:              st.Core.Desired,
+		PID:                  st.Core.PID,
+		SysProxy:             map[bool]string{true: "applied", false: "not applied"}[st.SysProxy.Applied],
+		SysProxyApplied:      st.SysProxy.Applied,
+		SysProxyServices:     len(st.SysProxy.Services),
+		SysProxyForm:         st.SysProxy.Form,
+		SysProxyHijackEvents: st.SysProxy.HijackEvents,
+		SysProxyLastRestore:  st.SysProxy.LastRestore,
 	}
 	if st.SysProxy.Applied {
 		r.SysProxy = fmt.Sprintf("applied (%d services backed up)", len(st.SysProxy.Services))
@@ -69,9 +77,14 @@ type statusCoreJSON struct {
 }
 
 // statusSysProxyJSON 是 JSON 输出的 sys_proxy 段。
+// Form/HijackEvents/LastRestore 为批④新增（omitempty 对旧 state.json 零值缺键——
+// 壳侧解码模型按可选处理，版本偏斜兼容）。
 type statusSysProxyJSON struct {
-	Applied  bool `json:"applied"`
-	Services int  `json:"services"`
+	Applied      bool   `json:"applied"`
+	Services     int    `json:"services"`
+	Form         string `json:"form,omitempty"`
+	HijackEvents int    `json:"hijack_events,omitempty"`
+	LastRestore  int64  `json:"last_restore,omitempty"`
 }
 
 // statusProfileJSON 是 JSON 输出的 profile 段。
@@ -103,6 +116,8 @@ func StatusReport(home paths.Home, r Report) (StatusJSON, error) {
 		Mode: mode,
 		SysProxy: statusSysProxyJSON{
 			Applied: r.SysProxyApplied, Services: r.SysProxyServices,
+			Form: r.SysProxyForm, HijackEvents: r.SysProxyHijackEvents,
+			LastRestore: r.SysProxyLastRestore,
 		},
 	}
 	if idx, err := store.LoadIndex(home); err == nil {

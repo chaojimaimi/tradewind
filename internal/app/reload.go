@@ -44,6 +44,26 @@ func ReloadIfRunning(ctx context.Context, home paths.Home) error {
 // fmt.Println 破坏（内核运行中 stdout 变两行，壳端解码失败=保存成功却报失败），
 // enhance 编排传 progress（stderr）保持 stdout 纯净；其余调用点维持 stdout 不变。
 func ReloadIfRunningW(ctx context.Context, home paths.Home, progress io.Writer) error {
+	return reloadIfRunning(ctx, home, progress, true)
+}
+
+// ReloadIfRunningPreSynthesized 同 ReloadIfRunning，但跳过内部 Synthesize（仅 PUT/
+// 降级）——调用方已显式合成（批④ P3-7 方向反转：bareCoreFallback/reloadAfterEnhance
+// 的显式 Synthesize 是内核未运行分支唯一的 runtime.yaml 落盘点，F14；删显式合成=
+// 未运行时 runtime.yaml 停留旧内容，故保留显式并收敛双实现到本变体）。
+func ReloadIfRunningPreSynthesized(ctx context.Context, home paths.Home) error {
+	return reloadIfRunning(ctx, home, os.Stdout, false)
+}
+
+// ReloadIfRunningPreSynthesizedW 同 ReloadIfRunningPreSynthesized，输出走注入 writer。
+func ReloadIfRunningPreSynthesizedW(ctx context.Context, home paths.Home, progress io.Writer) error {
+	return reloadIfRunning(ctx, home, progress, false)
+}
+
+// reloadIfRunning 内核运行中 → （可选合成）+ PUT /configs?force=true 热重载；
+// 未运行 → 返回 nil（落盘由调用方负责）。热重载失败 → 降级重启：回收内核进程，
+// 由 start 进程的崩溃重启逻辑以新配置拉起（M0-plan §7.1 降级路径的最简形态）。
+func reloadIfRunning(ctx context.Context, home paths.Home, progress io.Writer, synthesize bool) error {
 	if !CoreReachable(home) {
 		return nil // 未运行：仅落盘
 	}
@@ -51,8 +71,10 @@ func ReloadIfRunningW(ctx context.Context, home paths.Home, progress io.Writer) 
 	if err != nil {
 		return err
 	}
-	if err := Synthesize(home, secret); err != nil {
-		return err
+	if synthesize {
+		if err := Synthesize(home, secret); err != nil {
+			return err
+		}
 	}
 	client := core.NewClient(home.SockFile(), secret)
 	reloadCtx, cancel := context.WithTimeout(ctx, reloadProbeTimeout)

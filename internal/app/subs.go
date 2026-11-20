@@ -259,7 +259,9 @@ func SubsDelete(ctx context.Context, home paths.Home, target string, force bool)
 }
 
 // bareCoreFallback 删 current 后的裸内核落位：Current 已置空，重合成纯模板 +
-// 运行中热重载（未运行由 ReloadIfRunning 跳过），并提示用户后续动作（M3-plan §11.2-5）。
+// 运行中热重载（未运行仅落盘），并提示用户后续动作（M3-plan §11.2-5）。
+// WHY 显式合成保留 + PreSynthesized 变体（批④ P3-7）：本函数的显式 Synthesize 是
+// 内核未运行分支唯一的 runtime.yaml 落盘点（F14），删掉会让未运行时停留旧内容。
 func bareCoreFallback(ctx context.Context, home paths.Home) error {
 	secret, err := store.EnsureSecret(home)
 	if err != nil {
@@ -268,7 +270,7 @@ func bareCoreFallback(ctx context.Context, home paths.Home) error {
 	if err := Synthesize(home, secret); err != nil {
 		return err
 	}
-	if err := ReloadIfRunning(ctx, home); err != nil {
+	if err := ReloadIfRunningPreSynthesized(ctx, home); err != nil {
 		return err
 	}
 	fmt.Println("current subscription deleted; Tradewind is now a bare core — import or `tradewind use` a subscription")
