@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // MARK: - 页 4 增强链（M3-plan §11.3：只读 P2 占位，demo :475-489 结构照录）
@@ -52,9 +53,19 @@ struct EnhancePane: View {
 
 /// 关于页：品牌位图取 icns 128pt@2x 派生（256×256，与 Dock 图标同构；§12 c1 取代
 /// v0.4.13 前"SF wind 压渐变方块"的早期近似——用户拍板品牌资产=深色底板+青渐变标形）。
+/// WHY 显式 NSImage 加载（m3b2 返修实锤）：SwiftUI `Image(name, bundle:)` 只认
+/// asset catalog 图像，对资源 bundle 里的散装 PNG 查不到（v0.5.0-m3b2 真机图标整块
+/// 丢失）；Bundle.module.url + NSImage(contentsOf:) 是确定路径（AboutBrandTests 锁点）。
 struct AboutPane: View {
     @ObservedObject var model: SettingsModel
     @Environment(\.colorScheme) private var scheme
+
+    /// 品牌位图（进程级单次加载；资源缺失时 nil 走兜底块，绝不静默空渲染）
+    private static let brandIcon: NSImage? = {
+        guard let url = Bundle.module.url(forResource: "tradewind-about-icon",
+                                          withExtension: "png") else { return nil }
+        return NSImage(contentsOf: url)
+    }()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -62,12 +73,21 @@ struct AboutPane: View {
             // 128pt@2x 派生，与 Dock 图标同构。100pt = icns 画布自带 ~10% 留白的补偿
             // （alpha 包围盒实测 25-230/256），底板实高 ≈80pt ≈ demo 84pt 观感；shadow
             // 对照 demo .about-icon box-shadow 0 12px 30px（CSS blur 30 → radius 15、
-            // y 偏移 12 直取）。
-            Image("tradewind-about-icon", bundle: .module)
-                .resizable()
-                .frame(width: 100, height: 100)
-                .shadow(color: Theme.brand(scheme).opacity(0.35), radius: 15, x: 0, y: 12)
-                .padding(.bottom, 14)
+            // y 偏移 12 直取）。兜底块=早期近似（资源不可能缺失，防御性可辨降级）。
+            if let icon = Self.brandIcon {
+                Image(nsImage: icon)
+                    .resizable()
+                    .frame(width: 100, height: 100)
+                    .shadow(color: Theme.brand(scheme).opacity(0.35), radius: 15, x: 0, y: 12)
+                    .padding(.bottom, 14)
+            } else {
+                RoundedRectangle(cornerRadius: 20)
+                    .fill(LinearGradient(colors: [Theme.brandDeep(scheme), Theme.brand(scheme)],
+                                         startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .frame(width: 100, height: 100)
+                    .overlay { Image(systemName: "wind").font(.system(size: 40)).foregroundStyle(.white) }
+                    .padding(.bottom, 14)
+            }
             Text("Tradewind 信风")
                 .font(.system(size: 19, weight: .bold))
             Text("v\(ShellVersion.display(shellVersion))")
