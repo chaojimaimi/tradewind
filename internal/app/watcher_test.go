@@ -531,7 +531,7 @@ func TestWaitLoopGiveupPathConvergesWatcher(t *testing.T) {
 		wg.Wait()
 	}
 
-	err := waitLoop(ctx, home, mgr, 1, converge)
+	err := waitLoop(ctx, home, mgr, 1, false, converge)
 	if err == nil || !strings.Contains(err.Error(), "restart failed") {
 		t.Fatalf("waitLoop = %v, want giveup error", err)
 	}
@@ -574,7 +574,7 @@ func TestWaitLoopSignalPathConvergesWatcher(t *testing.T) {
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- waitLoop(ctx, home, mgr, 1, converge) }()
+	go func() { done <- waitLoop(ctx, home, mgr, 1, false, converge) }()
 	time.Sleep(100 * time.Millisecond) // 让 waitLoop 进入 select
 	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
 		t.Fatalf("self sigint: %v", err)

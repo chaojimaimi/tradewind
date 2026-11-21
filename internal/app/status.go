@@ -93,6 +93,14 @@ type statusProfileJSON struct {
 	Name string `json:"name"`
 }
 
+// statusTunJSON 是 JSON 输出的 tun 段（批⑥ §4 三态数据源：enabled+running /
+// enabled+服务异常 / disabled；popover TUN 行与设置页开关初值）。旧 CLI 缺键 →
+// 壳侧解码模型按 nil 处理（version 偏斜兼容，Form/HijackEvents 同先例）。
+type statusTunJSON struct {
+	Enabled bool `json:"enabled"`
+	Running bool `json:"running"`
+}
+
 // StatusJSON 是 `status --json` 的顶层结构：mode 提顶层，panel_url 是壳
 // 数据面端口与 token 的唯一来源（免 YAML 解析）。降级时 panel_url 为空串，
 // 壳据此显示"面板数据不可用"（M2-plan §5）。
@@ -100,6 +108,7 @@ type StatusJSON struct {
 	Core     statusCoreJSON     `json:"core"`
 	Mode     string             `json:"mode"`
 	SysProxy statusSysProxyJSON `json:"sys_proxy"`
+	Tun      statusTunJSON      `json:"tun"`
 	Profile  statusProfileJSON  `json:"profile"`
 	PanelURL string             `json:"panel_url"`
 }
@@ -119,6 +128,11 @@ func StatusReport(home paths.Home, r Report) (StatusJSON, error) {
 			Form: r.SysProxyForm, HijackEvents: r.SysProxyHijackEvents,
 			LastRestore: r.SysProxyLastRestore,
 		},
+	}
+	// tun 三态（批⑥ §4）：Running 以 core.sock 健康为据（TUN 形态下即服务托管
+	// root core；settings 说开但 sock 不可达 = 服务异常态，壳据此提示）
+	if settings, err := store.LoadSettings(home); err == nil {
+		out.Tun = statusTunJSON{Enabled: settings.TunEnabled, Running: settings.TunEnabled && r.CoreHealthy}
 	}
 	if idx, err := store.LoadIndex(home); err == nil {
 		if item, ok := idx.CurrentItem(); ok {

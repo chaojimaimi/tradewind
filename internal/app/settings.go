@@ -302,6 +302,11 @@ func settingsSetKey(s *store.Settings, key, value string) error {
 		// 逐条 trim、丢弃空段。白名单/条数校验在 Settings.Validate（SaveSettings 落盘
 		// 前必经），CLI 层保留本函数的解析报错文案。
 		s.BypassDomains = parseBypassDomains(value)
+	case "tun_enabled":
+		// 双入口封死（批⑥ §2.2）：tun_enabled 由 `tradewind tun on|off` 编排管理
+		// （服务安装/spawn/就绪判定/回滚联动），CLI/UI 绕过编排直改会留"配置说
+		// TUN 开但服务没跑"的漂移态——显式报错并指引
+		return errors.New("app: settings set: tun_enabled is managed by `tradewind tun on|off` (编排含服务安装/回滚联动); refusing direct write")
 	default:
 		return fmt.Errorf("app: settings set: unknown key %q (valid: %s)", key, strings.Join(settingsKeys, "|"))
 	}

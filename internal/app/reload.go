@@ -100,6 +100,11 @@ func degradeRestartW(home paths.Home, secret string, progress io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if st.Core.Tun {
+		// TUN 形态降级分流（批⑥ §2.4）：root 内核用户态 SIGTERM 无效（F9）→
+		// 服务 stop + 服务 start（generation+1），killProcessGracefully 仅用户态保留
+		return degradeRestartTun(home, st, secret, progress)
+	}
 	if st.Core.PID <= 0 || !pidCommandIsCore(st.Core.PID, home) {
 		return fmt.Errorf("app: no manageable core process; run `tradewind start` to apply")
 	}
@@ -111,6 +116,36 @@ func degradeRestartW(home paths.Home, secret string, progress io.Writer) error {
 		return nil
 	}
 	return errors.New("app: core did not come back after degrade restart; run `tradewind start`")
+}
+
+// degradeRestartTun TUN 形态降级重启：服务 stop → 服务 start（generation+1——
+// 同 socket 串行请求，stop 已停核、start 新代际准入，幂等仲裁不拦）→ /version
+// 轮询就绪。服务不可达 → 显式报错指引（不静默半重启）。
+func degradeRestartTun(home paths.Home, st store.State, secret string, progress io.Writer) error {
+	if !serviceConfigInstalled() {
+		return errors.New("app: TUN core degrade needs the privileged service; run `tradewind tun status` or `tradewind tun reinstall`")
+	}
+	cl, err := tunNewClient(tunStartRequestTimeout)
+	if err != nil {
+		return err
+	}
+	if resp, err := cl.Stop(); err != nil {
+		return fmt.Errorf("app: tun degrade stop: %w; run `tradewind tun status`", err)
+	} else if !resp.OK {
+		return fmt.Errorf("app: tun degrade stop refused: %s", resp.Error)
+	}
+	resp, err := cl.Start(st.Core.Generation + 1)
+	if err != nil {
+		return fmt.Errorf("app: tun degrade start: %w; run `tradewind tun status`", err)
+	}
+	if !resp.OK {
+		return fmt.Errorf("app: tun degrade start refused: %s", resp.Error)
+	}
+	if !waitCoreReady(home, secret, degradeWaitTimeout) {
+		return errors.New("app: core did not come back after degrade restart; run `tradewind start`")
+	}
+	fmt.Fprintln(progress, "core restarted with new config")
+	return nil
 }
 
 // waitCoreReady 轮询 /version 直到就绪或超时。

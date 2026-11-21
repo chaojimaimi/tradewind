@@ -1,0 +1,326 @@
+// tun_run.go：start 进程 TUN 分流（批⑥ §2.1 三处分流 + §2.4 degrade 分流）。
+// 分流判据 = settings.TunEnabled（startCore/waitLoop）与 state.Core.Tun
+// （cleanupResidues/degrade）+ service.json 锚存在性（角态不进 EPERM kill）。
+package app
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/chaojimaimi/tradewind/internal/paths"
+	"github.com/chaojimaimi/tradewind/internal/service"
+	"github.com/chaojimaimi/tradewind/internal/store"
+)
+
+// 服务锚缝隙（测试指向桩路径——F19：macOS unix socket sun_path 104 字符上限，
+// 服务 sock 必须短路径桩）。
+var (
+	tunServiceSockPath   = service.DefaultSockPath
+	tunServiceConfigPath = service.DefaultConfigPath
+)
+
+// tunNewClient 服务客户端构造缝隙（默认直连生产锚；测试注入假客户端——绝不触真
+// /var/run socket）。锚缺失 → errTunServiceNotInstalled（调用方分流：no-op/报错）。
+var tunNewClient = func(timeout time.Duration) (tunServiceClientT, error) {
+	if !serviceConfigInstalled() {
+		return nil, errTunServiceNotInstalled
+	}
+	return service.NewClient(tunServiceSockPath, timeout), nil
+}
+
+var errTunServiceNotInstalled = errors.New("app: privileged service is not installed; run `tradewind tun install`")
+
+// serviceConfigInstalled service.json 锚存在性（分流判据之一：uninstall 半途等
+// 角态 → 不走服务请求，报错指引）。
+func serviceConfigInstalled() bool {
+	_, err := os.Stat(tunServiceConfigPath)
+	return err == nil
+}
+
+// startCoreViaService startCore TUN 分流（§2.1 分流 1）：合成后向服务请求 start
+// （携带 generation——postHandshake 同源自增，§3.1 携带方统一=start 进程）。
+// 服务端同步握手完成才返回；再 /version 双确认收口。返回 root pid（postHandshake
+// 写 state 用）。
+func startCoreViaService(ctx context.Context, home paths.Home, secret string) (int, error) {
+	if err := Synthesize(home, secret); err != nil {
+		return 0, err
+	}
+	st, err := store.LoadState(home)
+	if err != nil {
+		return 0, err
+	}
+	cl, err := tunNewClient(tunStartRequestTimeout)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := cl.Start(st.Core.Generation + 1)
+	if err != nil {
+		return 0, fmt.Errorf("app: tun service start: %w; run `tradewind tun status`", err)
+	}
+	if !resp.OK {
+		return 0, fmt.Errorf("app: tun service start refused: %s", resp.Error)
+	}
+	// 就绪双确认（语义同 F10：spawn 主体换成服务，/version 轮询收口）
+	if !waitCoreReady(home, secret, 10*time.Second) {
+		return 0, errors.New("app: core.sock not ready after service start")
+	}
+	fmt.Printf("core spawned via service (pid %d, root)\n", resp.PID)
+	return resp.PID, nil
+}
+
+// tunStopCoreForward 切换收敛路径的 root core 兜底 stop（tun on/off 共用）：未
+// 安装=无核 no-op；请求失败 → 显式失败（走回滚——快失败优先于 45s 假等）。
+func tunStopCoreForward(env tunEnv) error {
+	if !env.serviceAnchorExists() {
+		return nil
+	}
+	cl, err := env.serviceClient(tunStopRequestTimeout)
+	if err != nil {
+		return fmt.Errorf("app: tun service stop: %w", err)
+	}
+	resp, err := cl.Stop()
+	if err != nil {
+		return fmt.Errorf("app: tun service stop: %w", err)
+	}
+	if !resp.OK {
+		return errors.New(resp.Error)
+	}
+	return nil
+}
+
+// tunStopCoreNoOp 回滚步 2 的服务 stop：服务不可达/未安装 → 视为无 root core 可
+// 收敛的 no-op（评审三轮 P3——服务不可达本身即状态自洽），不阻塞回滚。
+func tunStopCoreNoOp(env tunEnv) error {
+	if !env.serviceAnchorExists() {
+		return nil
+	}
+	cl, err := env.serviceClient(tunStopRequestTimeout)
+	if err != nil {
+		return nil // 未安装 = 无 root core 可收敛
+	}
+	resp, err := cl.Stop()
+	if err != nil {
+		fmt.Printf("tun: service unreachable during rollback stop (%v); treated as no-op\n", err)
+		return nil
+	}
+	if !resp.OK {
+		return errors.New(resp.Error)
+	}
+	return nil
+}
+
+// tunStopServiceCore 关停/回滚收口路径的 root core 收敛：未安装（uninstall 半途
+// 等角态）→ 无核 no-op；请求失败 → 显式报错（root core 可能仍被服务托管，不静默）。
+func tunStopServiceCore() error {
+	if !serviceConfigInstalled() {
+		return nil
+	}
+	cl, err := tunNewClient(tunStopRequestTimeout)
+	if err != nil {
+		return err
+	}
+	resp, err := cl.Stop()
+	if err != nil {
+		return fmt.Errorf("app: tun service stop: %w", err)
+	}
+	if !resp.OK {
+		return errors.New(resp.Error)
+	}
+	return nil
+}
+
+// cleanupTunOrphan cleanupResidues TUN 分支（§2.1 分流 3）：root pid 用户态
+// SIGTERM=EPERM（F21）→ 走服务 stop 请求收敛。锚缺失（uninstall 半途等角态）→
+// 报错指引，不进注定 EPERM 的 kill 尝试（评审三轮 P3——否则 start 崩溃重拉一次
+// 即 EPERM 死循环）。服务不可达 → 警告继续（后续 service start 幂等 no-op 收编）。
+func cleanupTunOrphan(pid int) error {
+	if !serviceConfigInstalled() {
+		return fmt.Errorf("app: orphan root core (pid %d) but service anchor missing; run `tradewind tun status` or `tradewind tun reinstall`", pid)
+	}
+	cl, err := tunNewClient(tunStopRequestTimeout)
+	if err != nil {
+		return err
+	}
+	resp, err := cl.Stop()
+	if err != nil {
+		fmt.Printf("cleanup: service unreachable (%v); root core (pid %d) left for service-start adoption\n", err, pid)
+		return nil
+	}
+	if !resp.OK {
+		return fmt.Errorf("app: cleanup tun service stop: %s", resp.Error)
+	}
+	return nil
+}
+
+// tunHealthInterval 健康轮询周期（§2.1 分流 2：每 5s 探 core.sock；变量缝供测试缩短）。
+var tunHealthInterval = 5 * time.Second
+
+// tunHealthLoop 服务健康轮询：失联连续 2 次（10s，覆盖服务端 1s 首退避重启窗口）
+// → osascript 通知一次/失联周期（恢复即复位）。WHY 只通知不自愈：自愈职责=服务端
+// Monitor 复用 + launchd KeepAlive 双层兜底，start 进程不自动重启服务。
+func tunHealthLoop(ctx context.Context, home paths.Home) {
+	streak, notified := 0, false
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(tunHealthInterval):
+		}
+		if CoreReachable(home) {
+			streak, notified = 0, false
+			continue
+		}
+		streak++
+		if streak >= 2 && !notified {
+			notified = true
+			if err := runNotifier("Tradewind", "TUN 服务异常，请检查 tradewind tun status"); err != nil {
+				fmt.Printf("watcher: notify: %v\n", err)
+			}
+		}
+	}
+}
+
+// waitLoopTun TUN 形态等待循环（§2.1 分流 2）：无 mgr 子进程，Monitor 分支替换为
+// 服务健康轮询（后台通知环）。SIGINT/SIGTERM：收敛 watcher/健康环 → 服务 stop →
+// 完整还原 → 退出。
+func waitLoopTun(ctx context.Context, home paths.Home, generation int, convergeWatcher func()) error {
+	healthCtx, cancelHealth := context.WithCancel(ctx)
+	go tunHealthLoop(healthCtx, home)
+	converge := func() {
+		cancelHealth()
+		convergeWatcher()
+	}
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	select {
+	case sig := <-sigCh:
+		fmt.Printf("\ncaught %s, shutting down...\n", sig)
+		return shutdownSequenceTun(home, generation, converge)
+	case <-ctx.Done():
+		return shutdownSequenceTun(home, generation, converge)
+	}
+}
+
+// shutdownSequenceTun TUN 关停统一收敛前置序（对齐 shutdownSequence 同一收敛前置
+// 序）：先收敛 watcher/健康环，再 generation 归属校验（F13——被新实例接管 → root
+// core 归新会话所有，服务 core 跨代共享，绝不误杀）→ 快照 → 还原 sysproxy →
+// 服务 stop → markStopped（Tun 清零=stopped 无形态残留，§3.4）。
+func shutdownSequenceTun(home paths.Home, generation int, convergeWatcher func()) error {
+	convergeWatcher()
+	if generation > 0 && !generationIsMine(home, generation) {
+		fmt.Printf("shutdown: state taken over by newer instance (generation %d); skip restore and service stop\n",
+			stGeneration(home))
+		return nil
+	}
+	var errs []error
+	if err := snapshotBeforeStop(home); err != nil {
+		errs = append(errs, err)
+	}
+	if err := restoreSysProxyIfApplied(home); err != nil {
+		errs = append(errs, err)
+	}
+	if err := tunStopServiceCore(); err != nil {
+		errs = append(errs, err)
+	}
+	if err := markStopped(home); err != nil {
+		errs = append(errs, err)
+	}
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("app: shutdown: %w", err)
+	}
+	return nil
+}
+
+// tunProbeServiceCore 单次服务就绪探针：status pid>0 + core.sock /version 双确认。
+func tunProbeServiceCore(ctx context.Context, home paths.Home) (int, error) {
+	cl, err := tunNewClient(tunStatusTimeout)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := cl.Status()
+	if err != nil {
+		return 0, fmt.Errorf("app: tun service status: %w", err)
+	}
+	if !resp.OK || resp.PID <= 0 {
+		return 0, errors.New("app: service reports no managed core")
+	}
+	if !CoreReachable(home) {
+		return 0, errors.New("app: core.sock not reachable")
+	}
+	return resp.PID, nil
+}
+
+// TunStatus 编排 `tradewind tun status`（§2.2）：合并四方——settings.tun_enabled /
+// 服务 status（未安装=清晰降级文案）/ helper sha256 陈旧提示（R4）/ core.sock 健康。
+func TunStatus(home paths.Home) error {
+	lines, err := tunStatusLines(home)
+	if err != nil {
+		return err
+	}
+	for _, line := range lines {
+		fmt.Println(line)
+	}
+	return nil
+}
+
+// tunStatusLines 状态行组装（人读输出与未来 --json 共用一份数据源）。
+func tunStatusLines(home paths.Home) ([]string, error) {
+	settings, err := store.LoadSettings(home)
+	if err != nil {
+		return nil, err
+	}
+	lines := []string{fmt.Sprintf("tun_enabled: %t", settings.TunEnabled)}
+	if !serviceConfigInstalled() {
+		lines = append(lines, "service:    not installed（`tradewind tun install` 安装特权服务；`tun on` 会自动安装）")
+	} else {
+		lines = append(lines, tunServiceStatusLine()...)
+		if !helperBinaryMatches() {
+			lines = append(lines, "warning: 服务二进制已陈旧（self-update 后），请执行 `tradewind tun reinstall`")
+		}
+	}
+	if CoreReachable(home) {
+		lines = append(lines, "core.sock:  healthy")
+	} else {
+		lines = append(lines, "core.sock:  unreachable")
+	}
+	return lines, nil
+}
+
+func tunServiceStatusLine() []string {
+	cl, err := tunNewClient(tunStatusTimeout)
+	if err != nil {
+		return []string{"service:    installed (status query failed)"}
+	}
+	resp, err := cl.Status()
+	if err != nil {
+		return []string{"service:    installed (unreachable)"}
+	}
+	if resp.PID > 0 {
+		return []string{fmt.Sprintf("service:    running, core pid=%d version=%s", resp.PID, resp.Version)}
+	}
+	return []string{"service:    running, no managed core"}
+}
+
+// helperBinaryMatches 比对安装位 helper 与当前 CLI 的 sha256（R4 self-update 陈旧
+// 检测）；任一侧缺失/不可读 = 不匹配（走安装/重装指引）。
+func helperBinaryMatches() bool {
+	exe, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	want, err := sha256SumFile(exe)
+	if err != nil {
+		return false
+	}
+	got, err := sha256SumFile(service.HelperInstallPath)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(want, got)
+}

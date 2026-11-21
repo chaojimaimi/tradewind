@@ -156,7 +156,10 @@ func markStopped(home paths.Home) error {
 
 // cleanupResidues 启动期双残留清理（M0-plan §5.1 步骤 2，防 kill -9 遗患）：
 // a. 系统代理 applied==true → 按备份精确还原；
-// b. 孤儿内核 pid 存活且身份匹配 → SIGTERM 回收（5s 后 SIGKILL）。
+// b. 孤儿内核 pid 存活且身份匹配 → 回收（TUN 形态分流服务请求，批⑥ §2.1 分流 3
+//
+//	——root pid 用户态 SIGTERM=EPERM（F21），不分流则 start 崩溃重拉死循环）。
+//
 // 注：残留 core.sock 无需处理——mihomo 在 listen 前 unlink 自清理。
 func cleanupResidues(home paths.Home) error {
 	st, err := store.LoadState(home)
@@ -171,11 +174,19 @@ func cleanupResidues(home paths.Home) error {
 		st.SysProxy.Applied = false
 	}
 	if st.Core.PID > 0 && processAlive(st.Core.PID) && pidCommandIsCore(st.Core.PID, home) {
-		fmt.Printf("cleanup: killing orphan core (pid %d)\n", st.Core.PID)
-		if err := killProcessGracefully(st.Core.PID); err != nil {
-			return err
+		if st.Core.Tun {
+			// TUN 形态：服务 stop 请求收敛（锚缺失 = 角态报错指引，不进 EPERM kill）
+			if err := cleanupTunOrphan(st.Core.PID); err != nil {
+				return err
+			}
+			st.Core.PID = 0
+		} else {
+			fmt.Printf("cleanup: killing orphan core (pid %d)\n", st.Core.PID)
+			if err := killProcessGracefully(st.Core.PID); err != nil {
+				return err
+			}
+			st.Core.PID = 0
 		}
-		st.Core.PID = 0
 	}
 	if st.Core.Desired != store.DesiredStopped {
 		st.Core.Desired = store.DesiredStopped

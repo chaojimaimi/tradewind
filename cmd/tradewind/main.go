@@ -30,6 +30,8 @@ Usage:
   tradewind delay [GROUP]                             latency test, default group from last selection
   tradewind mode [rule|global|direct]                 show or switch outbound mode (hot-applied when running)
   tradewind sysproxy on|off                           runtime system proxy toggle (idempotent; on requires core running)
+  tradewind tun on|off|status                         TUN mode via the privileged service (on installs it on first use; 45s readiness window)
+  tradewind tun install|uninstall|reinstall           manage the root helper/launchd daemon explicitly
   tradewind list [--json]                             list subscriptions (uid/name/type/updated/traffic/expire)
   tradewind use <UID|NAME>                            switch the current subscription (snapshot + hot reload)
   tradewind subs delete <UID|NAME> [--force]          delete a subscription (current one needs --force)
@@ -89,6 +91,8 @@ func dispatch(home paths.Home, args []string) error {
 		err = cmdMode(home, args[1:])
 	case "sysproxy":
 		err = cmdSysProxy(home, args[1:])
+	case "tun":
+		err = cmdTun(home, args[1:])
 	case "list":
 		err = cmdList(home, args[1:])
 	case "use":
@@ -293,6 +297,31 @@ func cmdSysProxy(home paths.Home, args []string) error {
 		return app.SysProxyOn(home)
 	}
 	return app.SysProxyOff(home)
+}
+
+// cmdTun 分发 `tradewind tun on|off|status|install|uninstall|reinstall`（批⑥ §2.2）。
+func cmdTun(home paths.Home, args []string) error {
+	fs := flag.NewFlagSet("tun", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	ctx := context.Background()
+	switch fs.Arg(0) {
+	case "on":
+		return app.TunOn(ctx, home)
+	case "off":
+		return app.TunOff(ctx, home)
+	case "status":
+		return app.TunStatus(home)
+	case "install":
+		return app.TunInstall(home)
+	case "uninstall":
+		return app.TunUninstall(home)
+	case "reinstall":
+		return app.TunReinstall(home)
+	default:
+		return errors.New("usage: tradewind tun on|off|status|install|uninstall|reinstall")
+	}
 }
 
 func cmdList(home paths.Home, args []string) error {

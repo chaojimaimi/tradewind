@@ -40,6 +40,10 @@ var runNotifier = func(title, body string) error {
 type watcher struct {
 	home   paths.Home
 	runner sysproxy.Runner
+	// TUN 健康通知状态（批⑥ §2.3）：连续失联 tick 计数 + 失联周期内已通知位
+	// （恢复即复位——通知一次/失联周期，不刷屏）。
+	tunFailStreak int
+	tunNotified   bool
 }
 
 // newWatcher 可注入 runner 的构造（单测）。
@@ -78,6 +82,10 @@ func (w *watcher) loop(ctx context.Context) {
 // ① mutation.lock LOCK_NB 非阻塞获取——忙（别的编排/CLI on-off/关停收敛在途）=
 // 本 tick 跳过，无死锁无交错；② 持锁后重读 state：applied==false → 本 tick 中止
 // （用户主动 off/裸跑不被打扰）；③ 检测（Form 分流）④ 恢复。检测与恢复全程持锁。
+// TUN 健康通知分支（批⑥ §2.3）：挂点必须在 Applied 整 tick 早退之前（F14——
+// sysproxy off 正是 TUN 常见形态），tun_enabled && 失联连续跨 graceWindow（2 tick）
+// → runNotifier 通知。WHY settings 在早退前加载：TUN 分支需要它；settings 损坏
+// 的副作用仅是本 tick 报错（loop 记日志），与守护尽力而为面一致。
 func (w *watcher) tick() error {
 	lock, err := TryAcquireMutationLock(w.home)
 	if errors.Is(err, ErrMutationBusy) {
@@ -92,16 +100,19 @@ func (w *watcher) tick() error {
 	if err != nil {
 		return err
 	}
+	settings, err := store.LoadSettings(w.home)
+	if err != nil {
+		return err
+	}
+	if settings.TunEnabled {
+		w.tunWatch(CoreReachable(w.home))
+	}
 	if !st.SysProxy.Applied {
 		return nil
 	}
 	// grace：本进程最近写入窗口内不判抢改
 	if ts := sysProxyLastApplyUnix.Load(); ts > 0 && time.Since(time.Unix(ts, 0)) < graceWindow {
 		return nil
-	}
-	settings, err := store.LoadSettings(w.home)
-	if err != nil {
-		return err
 	}
 	form := st.SysProxy.Form
 	if form == "" {
@@ -115,6 +126,24 @@ func (w *watcher) tick() error {
 		return nil
 	}
 	return w.restore(st, settings, form)
+}
+
+// tunWatch TUN 失联判定（批⑥ §2.3）：连续跨 graceWindow（复用 30s 语义 = 2 个
+// tick）→ runNotifier 通知（osascript 通知先例）；自愈职责在服务端 Monitor +
+// launchd KeepAlive，watcher 只补"两者都失效"的可见性。
+func (w *watcher) tunWatch(reachable bool) {
+	if reachable {
+		w.tunFailStreak, w.tunNotified = 0, false
+		return
+	}
+	w.tunFailStreak++
+	if w.tunFailStreak >= 2 && !w.tunNotified {
+		w.tunNotified = true
+		fmt.Println("watcher: TUN core unreachable for 2 consecutive ticks")
+		if err := runNotifier("Tradewind", "TUN 服务异常，请检查 tradewind tun status"); err != nil {
+			fmt.Printf("watcher: notify: %v\n", err) // best-effort：日志留痕
+		}
+	}
 }
 
 // detect 按会话 Form 分流检测期望态（批④ §2.1）：

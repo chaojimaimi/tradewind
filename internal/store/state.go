@@ -60,10 +60,15 @@ type SysProxyState struct {
 // Generation 每次 start 自增：防 KeepAlive 快速循环下新旧实例的 state 覆写交错
 // （关停路径检测到 generation 与自身不符 → 放弃 state 写入与系统代理还原，
 // 所有权归新实例，M2-plan §2.3）。
+// Tun 是本实例内核形态（批⑥ §3.4）：true=root 特权服务托管——cleanupResidues/
+// degradeRestart/waitLoop 分流统一读它判形态（root pid 用户态 SIGTERM=EPERM，
+// 必须走服务请求）。写入点钉死：postHandshake 全量重建 CoreState 处显式写
+// Tun=settings.TunEnabled；markStopped 全量重建清零=有意语义（stopped 无形态残留）。
 type CoreState struct {
 	Desired    string `json:"desired"`
 	PID        int    `json:"pid"`
 	Generation int    `json:"generation"`
+	Tun        bool   `json:"tun,omitempty"`
 }
 
 // State 是 state.json 的顶层结构：内核期望状态 + 系统代理备份。

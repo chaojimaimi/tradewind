@@ -362,7 +362,7 @@ func TestPostHandshakePACGatewayDowngradedSkips(t *testing.T) {
 	settings := store.DefaultSettings()
 	settings.PacMode = true
 	opts := StartOptions{ApplySysProxy: true}
-	generation, err := postHandshake(context.Background(), home, mgr, opts, settings, "")
+	generation, err := postHandshake(context.Background(), home, mgr, 0, opts, settings, "")
 	if err != nil {
 		t.Fatalf("postHandshake with downgraded gateway = %v, want nil (skip, not fail start)", err)
 	}

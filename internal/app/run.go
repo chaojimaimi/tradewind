@@ -55,22 +55,37 @@ func Run(ctx context.Context, home paths.Home, opts StartOptions) error {
 	if err := core.VerifyBinary(home.Bin(), home.Sidecar()); err != nil {
 		return err
 	}
-	mgr, err := startCore(home, secret)
+	// settings 前移（批⑥ §2.1 分流 1）：TUN 判据在 startCore 之前——此时无内核
+	// 在跑、无系统代理改动，失败直接返回无需还原
+	settings, err := store.LoadSettings(home)
 	if err != nil {
 		return err
 	}
-	settings, err := store.LoadSettings(home)
-	if err != nil {
-		_ = fullShutdown(home, mgr, 0)
-		return err
+	tun := settings.TunEnabled
+	var mgr *core.Manager
+	rootPID := 0
+	if tun {
+		// §2.1 sysproxy 语义钉死：TUN 模式 spawn 恒不带 sysproxy（评审二轮 P3，
+		// on/off 两侧统一）——postHandshake 不写 sysproxy，恢复由编排显式执行；
+		// 手动 start 同样不隐式 apply（两套机制不并存）
+		opts.ApplySysProxy = false
+		rootPID, err = startCoreViaService(ctx, home, secret)
+		if err != nil {
+			return err
+		}
+	} else {
+		mgr, err = startCore(home, secret)
+		if err != nil {
+			return err
+		}
 	}
 	// 网关降级（disabled/ui 缺失/端口被占）→ (nil,"")：start 继续运行（M1-plan §5.2）
 	gw, panelURL, err := startGateway(home, settings)
 	if err != nil {
-		_ = fullShutdown(home, mgr, 0)
+		_ = earlyFailureShutdown(home, mgr, tun)
 		return err
 	}
-	generation, err := postHandshake(ctx, home, mgr, opts, settings, panelURL)
+	generation, err := postHandshake(ctx, home, mgr, rootPID, opts, settings, panelURL)
 	if err != nil {
 		if gw != nil {
 			gw.close()
@@ -93,25 +108,39 @@ func Run(ctx context.Context, home paths.Home, opts StartOptions) error {
 		cancelWatcher()
 		watcherWG.Wait()
 	}
-	err = waitLoop(ctx, home, mgr, generation, convergeWatcher)
+	err = waitLoop(ctx, home, mgr, generation, tun, convergeWatcher)
 	if gw != nil {
 		gw.close()
 	}
 	return err
 }
 
+// earlyFailureShutdown start 早期失败收敛（TUN 分流）：用户态走既有 fullShutdown；
+// TUN 形态 mgr 为 nil，追加服务 stop 收敛 root core——start 进程死亡后 root core
+// 不能无人托管（无人轮询健康、无人收敛）。
+func earlyFailureShutdown(home paths.Home, mgr *core.Manager, tun bool) error {
+	if tun {
+		if err := tunStopServiceCore(); err != nil {
+			fmt.Printf("warning: tun service stop after early failure: %v\n", err)
+		}
+	}
+	return fullShutdown(home, mgr, 0)
+}
+
 // postHandshake 完成握手后的步骤 7/8：系统代理写入 + desired=running + ready 输出
 // （M1：ready 行追加 panel 入口 URL；M2：generation 自增并返回本实例代际，M2-plan §2.3）。
 // PAC 形态 + 网关降级（批④ §3.3 评审二轮 P2-3）：跳过系统代理写入并显著警告
 // "PAC 未生效"，不 fail start——fail-start 会把网关降级升级为整机失败，违反 F4
-// 降级哲学；其余写入失败照旧 fullShutdown（写入半途失败不留半应用态）。
-func postHandshake(ctx context.Context, home paths.Home, mgr *core.Manager, opts StartOptions, settings store.Settings, panelURL string) (int, error) {
+// 降级哲学；其余写入失败照旧收敛（写入半途失败不留半应用态）。
+// TUN 分流（批⑥ §2.1）：mgr 为 nil，PID 记服务 status 返回的 root pid（tunPID）；
+// CoreState.Tun 显式写入（§3.4 写入点钉死——遗漏则分流判据永假）。
+func postHandshake(ctx context.Context, home paths.Home, mgr *core.Manager, tunPID int, opts StartOptions, settings store.Settings, panelURL string) (int, error) {
 	if opts.ApplySysProxy {
 		if _, err := applySysProxy(home, settings.MixedPort, formFromSettings(settings)); err != nil {
 			if errors.Is(err, errPACGatewayUnreachable) {
 				fmt.Println("warning: PAC 未生效（网关降级）——系统代理未写入；检查 panel_enabled/ui 后重启 Tradewind")
 			} else {
-				_ = fullShutdown(home, mgr, 0)
+				_ = earlyFailureShutdown(home, mgr, settings.TunEnabled)
 				return 0, err
 			}
 		} else {
@@ -120,21 +149,28 @@ func postHandshake(ctx context.Context, home paths.Home, mgr *core.Manager, opts
 	}
 	st, err := store.LoadState(home)
 	if err != nil {
-		_ = fullShutdown(home, mgr, 0)
+		_ = earlyFailureShutdown(home, mgr, settings.TunEnabled)
 		return 0, err
 	}
 	generation := st.Core.Generation + 1
-	st.Core = store.CoreState{Desired: store.DesiredRunning, PID: mgr.PID(), Generation: generation}
+	pid := tunPID
+	if !settings.TunEnabled && mgr != nil {
+		pid = mgr.PID()
+	}
+	st.Core = store.CoreState{Desired: store.DesiredRunning, PID: pid, Generation: generation, Tun: settings.TunEnabled}
 	if !opts.ApplySysProxy {
 		st.SysProxy.Applied = false
 	}
 	if err := store.SaveState(home, st); err != nil {
-		_ = fullShutdown(home, mgr, 0)
+		_ = earlyFailureShutdown(home, mgr, settings.TunEnabled)
 		return 0, err
 	}
 	version, _ := core.NewClient(home.SockFile(), store.ReadSecret(home)).Version(ctx)
 	ready := fmt.Sprintf("ready: core=%s pid=%d mixed=127.0.0.1:%d sysproxy=%v",
-		version, mgr.PID(), settings.MixedPort, opts.ApplySysProxy)
+		version, pid, settings.MixedPort, opts.ApplySysProxy)
+	if settings.TunEnabled {
+		ready += " via=service"
+	}
 	if panelURL != "" {
 		ready += " panel=" + panelURL
 	}
@@ -148,7 +184,11 @@ func postHandshake(ctx context.Context, home paths.Home, mgr *core.Manager, opts
 // waitLoop 返回之前执行——signal 分支（本 select 内）与 giveup 回调（Monitor 回调，
 // 在监控 goroutine 上、waitLoop 仍阻塞、watcher 存活）都先收敛 watcher 再还原，
 // 共用 shutdownSequence 同一收敛前置序。
-func waitLoop(ctx context.Context, home paths.Home, mgr *core.Manager, generation int, convergeWatcher func()) error {
+// TUN 分流（批⑥ §2.1 分流 2）：tun=true → waitLoopTun（健康轮询替换 Monitor）。
+func waitLoop(ctx context.Context, home paths.Home, mgr *core.Manager, generation int, tun bool, convergeWatcher func()) error {
+	if tun {
+		return waitLoopTun(ctx, home, generation, convergeWatcher)
+	}
 	monCh := make(chan error, 1)
 	go func() {
 		monCh <- mgr.Monitor(ctx, func(error) {
