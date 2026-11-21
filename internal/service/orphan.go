@@ -5,6 +5,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -63,10 +64,17 @@ func killProcessGracefully(pid int) error {
 // chownDataDirBack root core 退出后递归 chown 回 data_uid（批⑥ §3.1/R10/F22）：
 // root mihomo 会以 root 属主创建/改写 cache.db、geoip*、日志——不回收则 tun off
 // 后用户态 core EACCES。root→用户方向回收安全；非 root（测试）为同 uid no-op。
+// WHY 跳过 symlink（batch6 review P1-1）：os.Chown 走 chown(2) 跟随符号链接——
+// 用户可在 dataDir 植入指向 /etc/sudoers 等文件的 symlink，任一回收路径触发时
+// root 会把目标文件 chown 给用户 uid（本地提权面）。mihomo 产物均为普通文件，
+// 跳过无副作用（WalkDir 本就不展开 symlink，Type 判定即可拦住全部 symlink 条目）。
 func chownDataDirBack(dataDir string, uid int) error {
 	return filepath.WalkDir(dataDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			return nil // symlink 条目一律不动（含悬空链——chown 跟随后 ENOENT 也会误伤）
 		}
 		if chErr := os.Chown(path, uid, -1); chErr != nil {
 			return fmt.Errorf("service: chown %s: %w", path, chErr)

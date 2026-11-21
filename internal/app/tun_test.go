@@ -530,13 +530,15 @@ func TestTunUninstallStopsServiceFirst(t *testing.T) {
 	}
 }
 
-// TestTunInstallScriptContent 安装脚本纯函数断言（§3.3）：两动作 + root 属主 +
+// TestTunInstallScriptContent 安装脚本纯函数断言（§3.3）：rm+cp 新 inode（P2-1——
+// KeepAlive 恒运行下 cp 原地覆写运行中 helper = ETXTBSY）+ root 属主 +
 // 内联 argv + 单引号转义（含空格用户名场景）。
 func TestTunInstallScriptContent(t *testing.T) {
 	script := tunInstallScript("/Applications/Tradewind.app/cli",
 		"/Users/le e/Library/Application Support/tradewind", 501)
 	for _, want := range []string{
 		"mkdir -p '/Library/PrivilegedHelperTools'",
+		"rm -f '/Library/PrivilegedHelperTools/io.github.chaojimaimi.tradewind.service'",
 		"cp '/Applications/Tradewind.app/cli' '/Library/PrivilegedHelperTools/io.github.chaojimaimi.tradewind.service'",
 		"chown root:wheel '/Library/PrivilegedHelperTools/io.github.chaojimaimi.tradewind.service'",
 		"chmod 0755 '/Library/PrivilegedHelperTools/io.github.chaojimaimi.tradewind.service'",
@@ -546,12 +548,17 @@ func TestTunInstallScriptContent(t *testing.T) {
 			t.Fatalf("script missing %q:\n%s", want, script)
 		}
 	}
-	if strings.Count(script, "\n") != 5 {
-		t.Fatalf("script must be exactly 5 lines (minimal exposure):\n%s", script)
+	// rm 必须先于 cp（新 inode 语义）
+	if strings.Index(script, "rm -f") > strings.Index(script, "cp ") {
+		t.Fatalf("rm must precede cp:\n%s", script)
+	}
+	if strings.Count(script, "\n") != 6 {
+		t.Fatalf("script must be exactly 6 lines (minimal exposure):\n%s", script)
 	}
 }
 
-// TestTunUninstallScriptContent 卸载脚本：bootout + 四路径 rm（helper/plist/锚/pid）。
+// TestTunUninstallScriptContent 卸载脚本：bootout + 五路径 rm（helper/plist/锚/pid/
+// 服务日志——P3-2 残留清理）。
 func TestTunUninstallScriptContent(t *testing.T) {
 	script := tunUninstallScript()
 	if !strings.Contains(script, "launchctl bootout system/io.github.chaojimaimi.tradewind.service") {
@@ -562,6 +569,7 @@ func TestTunUninstallScriptContent(t *testing.T) {
 		"rm -f '/Library/LaunchDaemons/io.github.chaojimaimi.tradewind.service.plist'",
 		"rm -f '/Library/Application Support/Tradewind/service.json'",
 		"rm -f '/Library/Application Support/Tradewind/core.pid'",
+		"rm -f '/Library/Logs/tradewind-service.log'",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("script missing %q:\n%s", want, script)
@@ -613,5 +621,56 @@ func TestEnsureGeoipMetadb(t *testing.T) {
 	}
 	if called {
 		t.Fatal("existing geoip.metadb must skip download")
+	}
+}
+
+// TestTunOnIdempotentRequiresRunningCore 幂等假成功封堵（batch6 review P2-2）：
+// settings 说开但 root core 未跑（kill 窗口残留）→ 落入 converge 补收敛（spawn），
+// 绝不输出 "already enabled" 假成功。
+func TestTunOnIdempotentRequiresRunningCore(t *testing.T) {
+	home := paths.Home(stubSocketDir(t))
+	seedTunOffHome(t, home)
+	if err := saveTunEnabled(home, tunSettings(t, home), true); err != nil {
+		t.Fatal(err)
+	}
+	env, svc, spawns, _, _ := newTunTestEnv(t)
+	// 两段式探针：幂等判定（首次）失败 = 触发 fall-through；converge 就绪判定
+	//（后续）成功 = 正向流闭环，不触发回滚
+	probes := 0
+	env.waitServiceCore = func(context.Context, paths.Home) (int, error) {
+		probes++
+		if probes == 1 {
+			return 0, errors.New("service reports no managed core")
+		}
+		return svc.startPID, nil
+	}
+
+	if err := tunOnWith(context.Background(), home, env); err != nil {
+		t.Fatalf("tunOnWith fall-through: %v", err)
+	}
+	if !tunSettings(t, home).TunEnabled {
+		t.Fatal("tun_enabled must stay on (fall-through keeps user intent)")
+	}
+	if *spawns != 1 {
+		t.Fatalf("spawn count = %d, want 1 (must converge, not fake no-op)", *spawns)
+	}
+}
+
+// TestTunOffIdempotentRequiresCoreDown 幂等假成功封堵（对称侧）：settings 说关但
+// core 仍可达（漂移态）→ 落入 converge 收敛（服务 stop + 用户态重拉）。
+func TestTunOffIdempotentRequiresCoreDown(t *testing.T) {
+	home := paths.Home(stubSocketDir(t))
+	seedTunOffHome(t, home)    // tun_enabled=false
+	listenVersionStub(t, home) // core 可达 = 漂移态
+	env, svc, spawns, _, _ := newTunTestEnv(t)
+
+	if err := tunOffWith(context.Background(), home, env); err != nil {
+		t.Fatalf("tunOffWith fall-through: %v", err)
+	}
+	if *spawns != 1 {
+		t.Fatalf("spawn count = %d, want 1 (drift must converge)", *spawns)
+	}
+	if svc.stopCount() != 1 {
+		t.Fatalf("service stops = %d, want 1 (root core convergence)", svc.stopCount())
 	}
 }

@@ -95,11 +95,15 @@ func shQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// tunInstallScript 生成安装提权脚本（纯函数——单测断言两动作与单引号转义）。
+// tunInstallScript 生成安装提权脚本（纯函数——单测断言动作与单引号转义）。
 func tunInstallScript(cliPath, dataDir string, dataUID int) string {
 	helper := shQuote(service.HelperInstallPath)
 	var b strings.Builder
 	b.WriteString("mkdir -p " + shQuote(filepath.Dir(service.HelperInstallPath)) + "\n")
+	// rm 先行（batch6 review P2-1）：KeepAlive 恒运行下 cp 原地覆写运行中二进制 =
+	// ETXTBSY 必败（reinstall 不可用），且违反红线（严禁 cp 原地覆写运行中二进制
+	// ——SIGKILL exit 137）；rm+cp 换新 inode（selfupdate replaceBinary 同款语义）。
+	b.WriteString("rm -f " + helper + "\n")
 	b.WriteString("cp " + shQuote(cliPath) + " " + helper + "\n")
 	b.WriteString("chown root:wheel " + helper + "\n")
 	b.WriteString("chmod 0755 " + helper + "\n")
@@ -107,8 +111,8 @@ func tunInstallScript(cliPath, dataDir string, dataUID int) string {
 	return b.String()
 }
 
-// tunUninstallScript 生成卸载提权脚本（纯函数）：bootout + rm helper/plist/锚
-// （core.pid 一并清理——孤儿收编判据随锚失效）。
+// tunUninstallScript 生成卸载提权脚本（纯函数）：bootout + rm helper/plist/锚/日志
+// （core.pid 一并清理——孤儿收编判据随锚失效；日志残留=batch6 review P3-2）。
 func tunUninstallScript() string {
 	var b strings.Builder
 	b.WriteString("launchctl bootout system/" + service.DaemonLabel + " 2>/dev/null || true\n")
@@ -117,6 +121,7 @@ func tunUninstallScript() string {
 		service.DaemonPlistPath,
 		service.DefaultConfigPath,
 		service.DefaultCorePIDPath,
+		service.DaemonLogPath,
 	} {
 		b.WriteString("rm -f " + shQuote(p) + "\n")
 	}

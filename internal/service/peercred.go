@@ -12,11 +12,13 @@ import (
 	"unsafe"
 )
 
-// darwin sys/un.h 常量与 xucred 布局（arm64/amd64 同为小端）：
+// darwin sys/un.h 常量与 xucred 布局（arm64/amd64 同为小端；现行 XNU 布局）：
 //
 //	struct xucred {
 //	    u_int  cr_version;   // 偏移 0
-//	    u_short cr_uid;      // 偏移 4（本实现取的字段）
+//	    uid_t  cr_uid;       // 偏移 4（本实现取的字段；uid_t=__uint32_t——
+//	                         // 旧实现误按 u_short 解析：uid>65535 误拒 +
+//	                         // 低 16 位碰撞误放行，batch6 review P1-2）
 //	    short  cr_ngroups;
 //	    gid_t  cr_groups[16];
 //	    void  *_cr_unused1;
@@ -24,8 +26,9 @@ import (
 const (
 	solLocal      = 0x0 // SOL_LOCAL
 	localPeercrd  = 0x1 // LOCAL_PEERCRED
-	xucredSize    = 80  // xucred 全长（getsockopt 要求缓冲 ≥ 结构体大小）
+	xucredSize    = 88  // xucred 全长（cr_uid 为 uid_t=4 字节后的布局；getsockopt 要求缓冲 ≥ 结构体大小）
 	xucredUIDOff  = 4   // cr_uid 偏移（cr_version 之后）
+	xucredUIDSize = 4   // cr_uid 宽度（uid_t=__uint32_t）
 	xucredVersion = 0   // XUCRED_VERSION
 )
 
@@ -62,11 +65,21 @@ func peerUIDFD(fd int) (int, error) {
 	if errno != 0 {
 		return 0, fmt.Errorf("service: getsockopt LOCAL_PEERCRED: %w", errno)
 	}
-	if length < xucredUIDOff+2 {
-		return 0, fmt.Errorf("service: xucred too short (%d bytes)", length)
+	// 防御性钳制：内核返回长度异常大于缓冲时按缓冲截取（避免 buf[:length] 越界）
+	if length > uint32(len(buf)) {
+		length = uint32(len(buf))
+	}
+	return xucredUID(buf[:length])
+}
+
+// xucredUID 从 getsockopt 缓冲解析 cr_uid（uid_t=__uint32_t；可注入缓冲单测——
+// 真连接只返回本进程 uid，>65535 的解析差异无法在非 root 测试中端到端覆盖）。
+func xucredUID(buf []byte) (int, error) {
+	if len(buf) < xucredUIDOff+xucredUIDSize {
+		return 0, fmt.Errorf("service: xucred too short (%d bytes)", len(buf))
 	}
 	if version := binary.LittleEndian.Uint32(buf[0:4]); version != xucredVersion {
 		return 0, fmt.Errorf("service: unexpected xucred version %d", version)
 	}
-	return int(binary.LittleEndian.Uint16(buf[xucredUIDOff : xucredUIDOff+2])), nil
+	return int(binary.LittleEndian.Uint32(buf[xucredUIDOff : xucredUIDOff+xucredUIDSize])), nil
 }

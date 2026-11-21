@@ -173,6 +173,10 @@ func (s *Server) dispatch(req Request) Response {
 
 // handleStart：幂等 no-op 先行（core 托管中 → 不重复 spawn，防端口冲突握手循环，
 // 评审 P1-5；陈旧代际的 no-op 请求同样安全返回），再 generation 仲裁，再 spawn。
+// 已知边界（batch6 review P3-1 登记，本版不修）：mu 跨服务端同步握手（spawnCore
+// 内 WaitReady 最长 ~20s）——崩溃重启竞态下 stop/status 请求会排队等锁一次，
+// 客户端 10s/30s 档超时触发调用方回滚/指引（状态自洽，无半开态）。主流时序不撞
+// （幂等 no-op 快路径不持长锁）；无锁化重构留 plan 观察期评估。
 func (s *Server) handleStart(req Request) Response {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -205,6 +209,9 @@ func (s *Server) handleStop() Response {
 }
 
 // handleStatus：托管 pid + /version 探活（version 空/pid=0 = 内核未运行）。
+// 已知边界（batch6 review P3-1 登记，本版不修）：mu 跨 2s 探活——排队上界 2s，
+// 远小于客户端 status 档（5s），主流时序不阻塞；与 handleStart 的长持锁同源，
+// 观察期一并评估。
 func (s *Server) handleStatus() Response {
 	s.mu.Lock()
 	defer s.mu.Unlock()

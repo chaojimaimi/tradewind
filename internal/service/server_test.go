@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"os/exec"
@@ -375,4 +376,81 @@ func probeAlive(sockPath string) bool {
 	defer cancel()
 	_, err := cl.Version(ctx)
 	return err == nil
+}
+
+// TestChownDataDirBackSkipsSymlinks chown 提权面封堵（batch6 review P1-1）：
+// dataDir 内植入 symlink（悬空 + 指向外部文件），回收回调必须跳过——旧实现
+// os.Chown 走 chown(2) 跟随 symlink：悬空链必败（ENOENT 污染回收）、root 下
+// 指向 /etc/sudoers 等会被 chown 给用户 uid（本地提权）。
+func TestChownDataDirBackSkipsSymlinks(t *testing.T) {
+	base := shortTempDir(t)
+	dataDir := filepath.Join(base, "data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "cache.db"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(base, "target.txt") // dataDir 之外——绝不被触碰
+	if err := os.WriteFile(target, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(base, "missing-target"), filepath.Join(dataDir, "dangling")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dataDir, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	// 旧实现：dangling symlink 令 chown(2) ENOENT → 整个回收报错（行为可辨锚）
+	if err := chownDataDirBack(dataDir, os.Getuid()); err != nil {
+		t.Fatalf("chown back with symlinks: %v (symlink must be skipped)", err)
+	}
+	info, err := os.Lstat(target)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		t.Fatalf("external target must stay untouched: mode=%v err=%v", info.Mode(), err)
+	}
+}
+
+// TestXucredUIDDecodesUint32 cr_uid 32 位解析（batch6 review P1-2）：uid_t=
+// __uint32_t——>65535 的 uid 必须完整解析；旧 Uint16 读法在该样例上只取低 16 位
+// （碰撞误判），本样例构造为两法可辨。
+func TestXucredUIDDecodesUint32(t *testing.T) {
+	buf := make([]byte, xucredSize)
+	binary.LittleEndian.PutUint32(buf[0:4], xucredVersion)
+	const uid = 16777216 // >65535（2^24）
+	binary.LittleEndian.PutUint32(buf[xucredUIDOff:xucredUIDOff+xucredUIDSize], uid)
+	got, err := xucredUID(buf)
+	if err != nil {
+		t.Fatalf("xucredUID: %v", err)
+	}
+	if got != uid {
+		t.Fatalf("uid = %d, want %d (uint32 parse)", got, uid)
+	}
+	low16 := int(binary.LittleEndian.Uint16(buf[xucredUIDOff : xucredUIDOff+2]))
+	if low16 == uid {
+		t.Fatal("sample must distinguish uint16 vs uint32 parse")
+	}
+}
+
+// TestXucredUIDRejectsShortBufferAndBadVersion 解析防御面：短缓冲/版本不符拒绝。
+func TestXucredUIDRejectsShortBufferAndBadVersion(t *testing.T) {
+	if _, err := xucredUID(make([]byte, 6)); err == nil {
+		t.Fatal("short buffer: want error")
+	}
+	buf := make([]byte, xucredSize)
+	binary.LittleEndian.PutUint32(buf[0:4], 7) // 非 XUCRED_VERSION
+	if _, err := xucredUID(buf); err == nil {
+		t.Fatal("bad version: want error")
+	}
+}
+
+// TestAllowedUIDsMatchLargeUID 白名单匹配 >65535 uid（P1-2 配套：白名单与解析
+// 同为 int 全宽，uint16 截断不可 resurrect）。
+func TestAllowedUIDsMatchLargeUID(t *testing.T) {
+	if !containsInt([]int{501, 16777216}, 16777216) {
+		t.Fatal("large uid in whitelist must match")
+	}
+	if containsInt([]int{501}, 16777216) {
+		t.Fatal("uid not in whitelist must not match")
+	}
 }

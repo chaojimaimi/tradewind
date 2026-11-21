@@ -129,9 +129,16 @@ func tunOnWith(ctx context.Context, home paths.Home, env tunEnv) error {
 	if err != nil {
 		return err
 	}
+	preTun := settings.TunEnabled // 切换前值（幂等 fall-through 时 == true——回滚不得翻转）
 	if settings.TunEnabled {
-		fmt.Println("tun: already enabled; nothing to do") // 幂等（评审三轮 P3，防双发 bounce）
-		return nil
+		// 幂等需实际形态探针（batch6 review P2-2）：仅 settings 说开不算——壳端
+		// 90s SIGTERM 恰落在步 4 落盘后步 6 spawn 前的 kill 窗口时，重试会输出
+		// "already enabled" 假成功而 TUN 全无。服务双探针（status pid>0 + /version）
+		// 确认 root core 在跑才 no-op；探测失败 = 落入 converge 补收敛（绝不假成功）。
+		if _, err := env.waitServiceCore(ctx, home); err == nil {
+			fmt.Println("tun: already enabled; nothing to do") // 幂等（评审三轮 P3，防双发 bounce）
+			return nil
+		}
 	}
 	if err := tunPreflightOn(ctx, home, env); err != nil {
 		return err
@@ -139,7 +146,7 @@ func tunOnWith(ctx context.Context, home paths.Home, env tunEnv) error {
 	if err := saveTunEnabled(home, settings, true); err != nil {
 		return err
 	}
-	return tunConverge(ctx, home, env, settings, preApplied, true)
+	return tunConverge(ctx, home, env, settings, preApplied, true, preTun)
 }
 
 func tunOffWith(ctx context.Context, home paths.Home, env tunEnv) error {
@@ -152,14 +159,20 @@ func tunOffWith(ctx context.Context, home paths.Home, env tunEnv) error {
 	if err != nil {
 		return err
 	}
+	preTun := settings.TunEnabled // 切换前值（显式传参——同 P2-2 次生修正）
 	if !settings.TunEnabled {
-		fmt.Println("tun: already disabled; nothing to do") // 幂等（同上）
-		return nil
+		// 幂等需实际形态探针（batch6 review P2-2，对称侧）：core 仍可达 = 漂移态
+		// （kill 窗口/旧会话残留——配置说关但 core 在跑）→ 落入 converge 收敛；
+		// 不可达才是目标态，no-op 返回（绝不无谓 spawn）。
+		if !CoreReachable(home) {
+			fmt.Println("tun: already disabled; nothing to do") // 幂等（评审三轮 P3，防双发 bounce）
+			return nil
+		}
 	}
 	if err := saveTunEnabled(home, settings, false); err != nil {
 		return err
 	}
-	return tunConverge(ctx, home, env, settings, preApplied, false)
+	return tunConverge(ctx, home, env, settings, preApplied, false, preTun)
 }
 
 // tunSnapshot 读取切换前形态（settings.tun_enabled + state.SysProxy.Applied）——
@@ -199,25 +212,28 @@ func tunPreflightOn(ctx context.Context, home paths.Home, env tunEnv) error {
 // tunConverge 切换收敛（§2.2 步 5-8）：杀旧 start（超时 → 垂死等待）→ 服务 stop
 // 兜底收敛 root core（kill -9 场景旧 start 未及收敛；已起则停、未起 no-op）→
 // detached spawn --no-sysproxy → 就绪判定 → sysproxy 意图恢复。任一步失败 → 回滚。
-func tunConverge(ctx context.Context, home paths.Home, env tunEnv, settings store.Settings, preApplied, on bool) error {
+func tunConverge(ctx context.Context, home paths.Home, env tunEnv, settings store.Settings, preApplied, on, preTun bool) error {
+	// preTun 显式传参（batch6 review P2-2 次生修正）：幂等 fall-through 时 preTun
+	// == on（切换前即目标态、仅缺实际形态）——回滚必须按真实切换前值回写，旧的
+	// "!on" 推导会把用户已开的 tun_enabled 翻成 false。
 	if err := env.stopStart(home); err != nil {
 		if !tunDyingWait(home) {
 			// 旧 start 仍持 flock，继续 spawn 会撞幂等 exit 0——放弃并指引
 			// （settings 回写一致、无漂移，仅缺手动 start 收敛）
-			_ = saveTunEnabled(home, settings, !on)
+			_ = saveTunEnabled(home, settings, preTun)
 			return errors.New("app: 旧 start 进程未在超时+垂死窗口内退出，settings 已回写；请手动执行 `tradewind start` 收敛")
 		}
-		return tunRollback(ctx, home, env, settings, preApplied, !on, false)
+		return tunRollback(ctx, home, env, settings, preApplied, preTun, false)
 	}
 	if err := tunStopCoreForward(env); err != nil {
-		return tunRollback(ctx, home, env, settings, preApplied, !on, false)
+		return tunRollback(ctx, home, env, settings, preApplied, preTun, false)
 	}
 	if err := env.spawnStart(); err != nil {
-		return tunRollback(ctx, home, env, settings, preApplied, !on, false)
+		return tunRollback(ctx, home, env, settings, preApplied, preTun, false)
 	}
 	pid, readyErr := tunWaitReady(ctx, home, env, on)
 	if readyErr != nil {
-		return tunRollback(ctx, home, env, settings, preApplied, !on, true)
+		return tunRollback(ctx, home, env, settings, preApplied, preTun, true)
 	}
 	if err := tunRestoreSysProxy(home, env, settings, preApplied); err != nil {
 		return tunRollback(ctx, home, env, settings, preApplied, !on, true)
