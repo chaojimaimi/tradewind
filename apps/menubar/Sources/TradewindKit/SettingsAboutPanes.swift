@@ -174,10 +174,17 @@ struct EnhanceEditSheet: View {
 /// 丢失）；Bundle.module.url + NSImage(contentsOf:) 是确定路径（AboutBrandTests 锁点）。
 struct AboutPane: View {
     @ObservedObject var model: SettingsModel
-    /// 更新区块模型（批③ B1：SettingsModel 不动约束下的并行 @StateObject；
-    /// 独立桥解析，与 SettingsModel 同源 CLIPath 语义）
-    @StateObject private var update = UpdateModel.live()
+    /// 更新服务（batch5 §3.2：Sparkle 薄包装；测试注入 startsUpdater=false 实例，
+    /// 生产默认 @StateObject 自管——SettingsModel 不动约束不变）
+    @StateObject private var updateService: UpdateService
     @Environment(\.colorScheme) private var scheme
+
+    /// WHY 显式 init：默认 @StateObject 自管生产装配（updater 启动 + 每日自动检查），
+    /// 测试注入 startsUpdater=false 实例（F11 壳测试不触网）。
+    init(model: SettingsModel, updateService: UpdateService? = nil) {
+        self.model = model
+        _updateService = StateObject(wrappedValue: updateService ?? UpdateService())
+    }
 
     /// 品牌位图（进程级单次加载；资源缺失时 nil 走兜底块，绝不静默空渲染）
     private static let brandIcon: NSImage? = {
@@ -242,68 +249,24 @@ struct AboutPane: View {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
     }
 
-    // MARK: 更新区块（批③ §2.4：三态展示 + 立即更新；比对对象是 CLI 版本非壳版本）
+    // MARK: 更新区块（batch5 §3.2：Sparkle 标准窗接管——CLI 三态区块退役，F10；
+    // CLI `version --check`/`self-update` 命令保留为守护/CLI 场景 fallback，DESIGN #22）
 
-    /// 三态渲染：idle=检查按钮 / 已是最新（灰）/ 发现新版（brand）+ 立即更新 /
-    /// 失败（bad 色文案=error 字段，含 token 缺失引导）。dev 态壳仍可用
-    ///（注明"以 CLI 版本为准"）。
-    @ViewBuilder
+    /// "检查更新"按钮 → UpdateService（弹 Sparkle 标准窗）；不可检查时禁用
+    ///（canCheckForUpdates 恒 false 态：updater 未就绪/feed 配置缺失）。
     private var updateSection: some View {
-        SettingsSection(title: "检查更新（以 CLI 版本为准）") {
-            switch update.checkState {
-            case .idle:
-                SettingsRow(label: "检查可用新版本",
-                            subtitle: "比对 GitHub 最新 release 与当前 CLI 构建") {
-                    updateButton("检查更新", disabled: update.busy) {
-                        Task { await update.checkForUpdate() }
-                    }
-                }
-            case .upToDate(let version):
-                SettingsRow(label: "已是最新 \(version)",
-                            subtitle: "与 GitHub 最新 release 一致") {
-                    updateButton("重新检查", disabled: update.busy) {
-                        Task { await update.checkForUpdate() }
-                    }
-                }
-            case .available(let version, _):
-                SettingsRow(label: "发现新版 \(version)",
-                            subtitle: "更新过程代理有数秒中断，内核自动重启") {
-                    HStack(spacing: 8) {
-                        updateButton("立即更新", disabled: update.busy) {
-                            Task { await update.applyUpdate() }
-                        }
-                        updateButton("重新检查", disabled: update.busy) {
-                            Task { await update.checkForUpdate() }
-                        }
-                    }
-                }
-            case .failed(let message):
-                SettingsRow(label: "检查失败", subtitle: nil) {
-                    EmptyView()
-                }
-                Divider().overlay(Theme.muted(scheme).opacity(0.2))
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(message)
-                        .font(.system(size: 11))
-                        .foregroundStyle(Theme.bad)
-                        .textSelection(.enabled)
-                    updateButton("重新检查", disabled: update.busy) {
-                        Task { await update.checkForUpdate() }
-                    }
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 9)
-            }
-            if let updatedTo = update.lastUpdatedTo {
-                Divider().overlay(Theme.muted(scheme).opacity(0.2))
-                SettingsRow(label: "已更新至 \(updatedTo)", subtitle: "重启 Tradewind app 后关于页版本号随之刷新") {
-                    EmptyView()
+        SettingsSection(title: "检查更新") {
+            SettingsRow(label: "检查可用新版本",
+                        subtitle: "自动检查已启用（每日）；有更新时窗口内完成下载与安装") {
+                updateButton("检查更新", disabled: !updateService.canCheckForUpdates) {
+                    updateService.checkForUpdates()
                 }
             }
         }
     }
 
-    /// 区块按钮（.btn 语义的小号形态；禁用由 busy 防抖 + CLI 可用性双闸）
+    /// 区块按钮（.btn 语义的小号形态；禁用由 disabled 参数传入——
+    /// UpdateService.canCheckForUpdates 闸门）
     private func updateButton(_ title: String, disabled: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
@@ -320,7 +283,7 @@ struct AboutPane: View {
                 )
         }
         .buttonStyle(.plain)
-        .disabled(disabled || !update.available)
+        .disabled(disabled)
         .accessibilityLabel(title)
     }
 

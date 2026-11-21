@@ -63,7 +63,7 @@ fi
 # Package.swift 尚无 Sparkle 依赖（batch5 c3 落地前现状）→ 静默跳过。
 SPARKLE_FW="$BINDIR/Sparkle.framework"
 if [ ! -d "$SPARKLE_FW" ]; then
-  SPARKLE_FW="$(find "$DIR/.build/artifacts" -maxdepth 4 -type d -name Sparkle.framework -path "*macos*" 2>/dev/null | head -1 || true)"
+  SPARKLE_FW="$(find "$DIR/.build/artifacts" -maxdepth 5 -type d -name Sparkle.framework -path "*macos*" 2>/dev/null | head -1 || true)"
 fi
 if [ -d "$SPARKLE_FW" ]; then
   echo "==> embed Sparkle.framework ($SPARKLE_FW)"

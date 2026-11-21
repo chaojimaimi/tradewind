@@ -354,29 +354,10 @@ final class CoreBridge {
         _ = try await runner.runWithTimeout(["subs", "rename", target, name], timeout: Self.writeTimeout)
     }
 
-    // MARK: 自升级（M3 批③ B1：--json 恒退出 0 契约，失败信息取 stdout error 字段）
-
-    /// 自升级编排超时（batch3 §2.4）：下载+校验+停内核+换装+拉回握手链，180s 留裕量
-    ///（F12 追加超时档；写编排持 mutation.lock + 下载最坏路径）。
-    static let updateTimeout: TimeInterval = 180
-
-    /// `version --check --json`（读档 10s 足够）：Go 侧恒退出 0，结果/错误均为
-    /// stdout 单行 JSON——解码模型按 error 字段分流三态（AboutPane 更新区块）。
-    func versionCheckJSON() async throws -> UpdateCheckReport {
-        let output = try await runner.run(["version", "--check", "--json"])
-        return try UpdateCheckReport.decode(output.trimmingCharacters(in: .whitespacesAndNewlines))
-    }
-
-    /// `self-update --json`（180s 档）：成功返回 updated_to；失败抛 cliMessage
-    ///（error 字段文案——CoreBridge.runBlocking 丢弃 stderr 是现行契约，toast 直接展示）。
-    func selfUpdate() async throws -> String {
-        let output = try await runner.runWithTimeout(
-            ["self-update", "--json"], timeout: Self.updateTimeout)
-        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        return try SelfUpdateReport.decode(trimmed).updatedToOrThrow()
-    }
-
     // MARK: 增强链桥（M3 批③ B2：双轨制 F11——壳一切经 CLI，绝不直接写槽文件）
+    // 自升级桥已退役（batch5 §3.2 终审 P2-1 删除集）：AboutPane 更新区块改走
+    // Sparkle（UpdateService）；CLI `version --check`/`self-update` 命令保留为
+    // 守护/CLI 场景 fallback（DESIGN #22），壳内不再消费其 --json 输出。
 
     /// `enhance show <slot> --json`（读档；恒退出 0 契约，exists=false 是空转态非错误）。
     func enhanceShow(slot: String) async throws -> EnhanceSlotReport {
