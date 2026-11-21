@@ -37,6 +37,11 @@ type Settings struct {
 	// PacMode 系统代理写入形态：false=手工三项代理（legacy 语义），true=PAC 自动
 	// 代理（指向面板网关 /pac）。缺省 false=旧 settings.yaml 零回归。
 	PacMode bool `yaml:"pac_mode,omitempty" json:"pac_mode,omitempty"`
+	// TunEnabled TUN 模式开关（批⑥ §3.2）：true 时 synth 注入 dns 白名单块 + tun 块
+	// （synth/dns.go 内置常量），start 进程转特权服务 spawn（路线②）。唯一写入入口
+	// 是 `tradewind tun on|off` 编排（settings set 白名单不收此键，防"配置说 TUN 开
+	// 但服务没跑"的漂移态）。缺省 false=旧 settings.yaml 零回归（PacMode 先例）。
+	TunEnabled bool `yaml:"tun_enabled,omitempty" json:"tun_enabled,omitempty"`
 	// BypassDomains 绕过域名列表（nil/空=未设置 → 生效值取 sysproxy 缺省集）。
 	// 校验（白名单正则+条数上限）下沉 Validate：手改 settings.yaml 经 LoadSettings
 	// 是唯一闸门，PAC JS 注入面在 /pac 合成前被拦（批④ §3.1）。

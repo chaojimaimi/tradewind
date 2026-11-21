@@ -226,3 +226,31 @@ func TestSettingsPacModeRoundTrip(t *testing.T) {
 		t.Fatalf("legacy file must stay default; got %+v", got)
 	}
 }
+
+func TestSettingsTunEnabledRoundTrip(t *testing.T) {
+	// tun_enabled yaml 往返（批⑥ §3.2）；缺省 false=旧 settings.yaml 零回归（PacMode 先例）
+	home := paths.Home(t.TempDir())
+	s := DefaultSettings()
+	s.TunEnabled = true
+	if err := SaveSettings(home, s); err != nil {
+		t.Fatalf("SaveSettings: %v", err)
+	}
+	got, err := LoadSettings(home)
+	if err != nil {
+		t.Fatalf("LoadSettings: %v", err)
+	}
+	if !got.TunEnabled {
+		t.Fatalf("round trip = %+v, want tun_enabled=true", got)
+	}
+	// 旧文件缺键 → false（omitempty 零回归锚）
+	if err := os.WriteFile(home.SettingsFile(), []byte("mixed_port: 7897\nmode: rule\nlog_level: info\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err = LoadSettings(home)
+	if err != nil {
+		t.Fatalf("LoadSettings legacy: %v", err)
+	}
+	if got.TunEnabled {
+		t.Fatalf("legacy file must default tun_enabled=false; got %+v", got)
+	}
+}

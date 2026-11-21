@@ -15,6 +15,8 @@ import (
 var updateGolden = flag.Bool("update-golden", false, "rewrite golden files")
 
 func testInjection() Injection {
+	// TunEnabled 缺省 false：TestSynthGolden 即"TUN off = 既有 golden 逐字节"的
+	// 零漂移锚（批⑥ §6.1——改行为必须显式更新 golden）
 	return Injection{
 		Settings: store.Settings{
 			MixedPort: 17890, GatewayPort: store.DefaultGatewayPort, PanelEnabled: true,
@@ -191,5 +193,144 @@ func TestSynthInjectsAllowLan(t *testing.T) {
 	}
 	if out["allow-lan"] != true {
 		t.Fatalf("allow-lan = %v, want true injected from settings", out["allow-lan"])
+	}
+}
+
+// --- TUN/DNS 合成（批⑥ §3.2）---
+
+func TestSynthGoldenTunOn(t *testing.T) {
+	// tun on 新 golden（与既有 golden 双版并存：off=零漂移锚、on=注入块逐字节锚）
+	sub, err := os.ReadFile(filepath.Join("testdata", "subscription.yaml"))
+	if err != nil {
+		t.Fatalf("read subscription fixture: %v", err)
+	}
+	inj := testInjection()
+	inj.Settings.TunEnabled = true
+	got, err := Synth(sub, inj, nil)
+	if err != nil {
+		t.Fatalf("Synth: %v", err)
+	}
+	golden := filepath.Join("testdata", "golden", "runtime-tun.yaml")
+	if *updateGolden {
+		if err := os.WriteFile(golden, got, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	want, err := os.ReadFile(golden)
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("tun-on output differs from golden:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+func TestSynthTunOffOmitsBlocks(t *testing.T) {
+	// tun off：零注入——模板 dns 段（redir-host）原样保留、无 tun 键
+	sub, _ := os.ReadFile(filepath.Join("testdata", "subscription.yaml"))
+	got, err := Synth(sub, testInjection(), nil)
+	if err != nil {
+		t.Fatalf("Synth: %v", err)
+	}
+	var out map[string]any
+	if err := yaml.Unmarshal(got, &out); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := out["tun"]; present {
+		t.Fatal("tun_enabled=false must not inject tun block")
+	}
+	dns, _ := out["dns"].(map[string]any)
+	if dns == nil || dns["enhanced-mode"] != "redir-host" {
+		t.Fatalf("dns = %v, want template redir-host preserved", out["dns"])
+	}
+}
+
+func TestSynthTunOnInjectsWhitelistAndTunBlock(t *testing.T) {
+	// 注入块键值逐项断言 + 黑名单逐条断言（批⑥ §6.1）
+	sub, _ := os.ReadFile(filepath.Join("testdata", "subscription.yaml"))
+	inj := testInjection()
+	inj.Settings.TunEnabled = true
+	got, err := Synth(sub, inj, nil)
+	if err != nil {
+		t.Fatalf("Synth: %v", err)
+	}
+	var out map[string]any
+	if err := yaml.Unmarshal(got, &out); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(fakeIPFilter); n < 25 || n > 30 {
+		t.Fatalf("fake-ip-filter has %d entries, want 25-30", n)
+	}
+	tun, _ := out["tun"].(map[string]any)
+	if tun == nil {
+		t.Fatal("tun block missing")
+	}
+	for k, want := range map[string]any{"enable": true, "stack": "system", "auto-route": true, "auto-detect-interface": true} {
+		if tun[k] != want {
+			t.Fatalf("tun.%s = %v, want %v", k, tun[k], want)
+		}
+	}
+	if hijack, _ := tun["dns-hijack"].([]any); len(hijack) != 1 || hijack[0] != "any:53" {
+		t.Fatalf("tun.dns-hijack = %v, want [any:53]", tun["dns-hijack"])
+	}
+	dns, _ := out["dns"].(map[string]any)
+	if dns == nil {
+		t.Fatal("dns block missing")
+	}
+	for k, want := range map[string]any{
+		"enable": true, "ipv6": false, "enhanced-mode": "fake-ip", "fake-ip-range": "198.18.0.1/16",
+	} {
+		if dns[k] != want {
+			t.Fatalf("dns.%s = %v, want %v", k, dns[k], want)
+		}
+	}
+	// 黑名单逐条：输出与常量精确一致（含序），且每条为纯域名通配（无 geosite:/URI scheme）
+	filter, _ := dns["fake-ip-filter"].([]any)
+	if len(filter) != len(fakeIPFilter) {
+		t.Fatalf("fake-ip-filter len = %d, want %d", len(filter), len(fakeIPFilter))
+	}
+	for i, item := range filter {
+		s, _ := item.(string)
+		if s != fakeIPFilter[i] {
+			t.Fatalf("fake-ip-filter[%d] = %q, want %q", i, s, fakeIPFilter[i])
+		}
+		if strings.Contains(s, "geosite:") || strings.Contains(s, "://") {
+			t.Fatalf("fake-ip-filter[%d] = %q must be pure domain (no geosite:/scheme)", i, s)
+		}
+	}
+	if ns, _ := dns["default-nameserver"].([]any); len(ns) != 2 || ns[0] != "223.5.5.5" {
+		t.Fatalf("dns.default-nameserver = %v, want aligned with template F5", dns["default-nameserver"])
+	}
+	if psn, _ := dns["proxy-server-nameserver"].([]any); len(psn) != 1 || psn[0] != "tls://223.5.5.5:853" {
+		t.Fatalf("dns.proxy-server-nameserver = %v, want tls://223.5.5.5:853", dns["proxy-server-nameserver"])
+	}
+	ff, _ := dns["fallback-filter"].(map[string]any)
+	if ff == nil || ff["geoip"] != true || ff["geoip-code"] != "CN" {
+		t.Fatalf("dns.fallback-filter = %v, want geoip CN", dns["fallback-filter"])
+	}
+}
+
+func TestSynthTunOnOverridesEnhanceMerge(t *testing.T) {
+	// 增强 merge 槽写 dns:/tun: 键被注入段覆盖（R7："settings 覆盖一切"链末语义）
+	sub, _ := os.ReadFile(filepath.Join("testdata", "subscription.yaml"))
+	inj := testInjection()
+	inj.Settings.TunEnabled = true
+	merge := []byte("dns:\n  enhanced-mode: redir-host\ntun:\n  enable: false\n")
+	got, err := Synth(sub, inj, &Enhance{GlobalMerge: merge})
+	if err != nil {
+		t.Fatalf("Synth with merge: %v", err)
+	}
+	var out map[string]any
+	if err := yaml.Unmarshal(got, &out); err != nil {
+		t.Fatal(err)
+	}
+	dns, _ := out["dns"].(map[string]any)
+	if dns == nil || dns["enhanced-mode"] != "fake-ip" {
+		t.Fatalf("dns.enhanced-mode = %v, want injected fake-ip to override merge", dns)
+	}
+	tun, _ := out["tun"].(map[string]any)
+	if tun == nil || tun["enable"] != true {
+		t.Fatalf("tun.enable = %v, want injected true to override merge", tun)
 	}
 }

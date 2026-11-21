@@ -71,6 +71,15 @@ func Synth(subscription []byte, inj Injection, enh *Enhance) ([]byte, error) {
 	// P0 #7：HTTP 控制器无条件保持关闭，控制面仅 unix socket
 	setMappingValue(root, "external-controller", scalarNode(""))
 
+	// TUN/DNS 注入（批⑥ §3.2）：注入段在增强链之后（"settings 覆盖一切"链末语义，
+	// F7）——tun_enabled=false 零注入（输出与现状逐字节一致，既有 golden 即零漂移锚）；
+	// true 注入 tun 块 + dns 白名单块（dns 键替换——模板最小 dns 段被完整覆盖，F5）。
+	// 用户增强 merge 槽写 dns:/tun: 键同被本段覆盖（R7：TUN 期间不可经增强链定制）。
+	if inj.Settings.TunEnabled {
+		setMappingValue(root, "tun", tunBlockNode())
+		setMappingValue(root, "dns", dnsBlockNode())
+	}
+
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
