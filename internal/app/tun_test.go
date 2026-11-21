@@ -674,3 +674,44 @@ func TestTunOffIdempotentRequiresCoreDown(t *testing.T) {
 		t.Fatalf("service stops = %d, want 1 (root core convergence)", svc.stopCount())
 	}
 }
+
+// TestTunOnFallThroughRestoreFailureRollbackKeepsIntent 回滚矩阵（batch6 review
+// 复评残留——第 5 处 tunRollback 调用点）：fall-through（settings 已开、core 未跑）
+// × tunRestoreSysProxy 失败交集下，回滚必须保持 TunEnabled=true——旧的 "!on" 推导
+// 在该点会把用户已开的 TUN 静默翻关重拉用户态（漂移态复活）。
+// WHY 现有族未覆盖：正常路径 preTun==!on 死等价，全绿不证明该点正确。
+func TestTunOnFallThroughRestoreFailureRollbackKeepsIntent(t *testing.T) {
+	home := paths.Home(stubSocketDir(t))
+	seedTunOffHome(t, home)
+	if err := saveTunEnabled(home, tunSettings(t, home), true); err != nil {
+		t.Fatal(err)
+	}
+	writeAppliedState(t, home) // 切换前 applied=true（fake runner 环境，红线安全）
+	env, svc, spawns, stopStarts, _ := newTunTestEnv(t)
+	// 两段式探针：幂等判定（首次）失败 = fall-through；就绪判定（后续）成功
+	probes := 0
+	env.waitServiceCore = func(context.Context, paths.Home) (int, error) {
+		probes++
+		if probes == 1 {
+			return 0, errors.New("service reports no managed core")
+		}
+		return svc.startPID, nil
+	}
+	// restore 必败（写入命令失败——applySysProxyRunner 回滚备份后显式报错）
+	env.sysproxyRunner = &fakeNetRunner{applyFailure: "permission denied"}
+	// 旧 start 优雅关停时序仿真（编排步 8 的前置：applied 清 false）
+	simulateGracefulStop(&env, stopStarts)
+
+	err := tunOnWith(context.Background(), home, env)
+	// restore 在正向与回滚两阶段持续失败 → 回滚步 4 手工指引（不静默）
+	if err == nil || !strings.Contains(err.Error(), "回滚") {
+		t.Fatalf("err = %v, want rollback guidance", err)
+	}
+	// THE 断言：回滚 settings 回写必须保持用户意图（旧 "!"on 推导在此写 false）
+	if !tunSettings(t, home).TunEnabled {
+		t.Fatal("tun_enabled must stay true after fall-through restore-failure rollback")
+	}
+	if *spawns != 2 {
+		t.Fatalf("spawn count = %d, want 2 (forward + rollback respawn)", *spawns)
+	}
+}

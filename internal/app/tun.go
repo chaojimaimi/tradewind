@@ -236,7 +236,10 @@ func tunConverge(ctx context.Context, home paths.Home, env tunEnv, settings stor
 		return tunRollback(ctx, home, env, settings, preApplied, preTun, true)
 	}
 	if err := tunRestoreSysProxy(home, env, settings, preApplied); err != nil {
-		return tunRollback(ctx, home, env, settings, preApplied, !on, true)
+		// 第 5 处调用点（batch6 review 复评残留）：restore 失败路径同用 preTun——
+		// fall-through × restore 失败交集下，"!on" 会让 tun on 把用户已开的 TUN
+		// 静默翻关重拉用户态、tun off 重造"settings 说开、零进程"漂移态。
+		return tunRollback(ctx, home, env, settings, preApplied, preTun, true)
 	}
 	tunSuccessPrint(on, pid)
 	return nil
