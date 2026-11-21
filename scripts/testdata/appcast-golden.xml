@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Tradewind</title>
+    <link>https://github.com/chaojimaimi/tradewind</link>
+    <description>Tradewind macOS app 自动更新 feed</description>
+    <language>en</language>
+    <item>
+      <title>Tradewind v9.9.9-test</title>
+      <pubDate>Fri, 20 Nov 2026 12:00:00 +0000</pubDate>
+      <sparkle:version>42</sparkle:version>
+      <sparkle:shortVersionString>v9.9.9-test</sparkle:shortVersionString>
+      <minimumSystemVersion>13.0</minimumSystemVersion>
+      <enclosure url="https://github.com/chaojimaimi/tradewind/releases/download/v9.9.9-test/Tradewind.app.zip" sparkle:edSignature="PLACEHOLDER_EDDSA_SIG" length="12345" type="application/octet-stream" />
+    </item>
+  </channel>
+</rss>
