@@ -32,6 +32,25 @@ apps/menubar/build.sh                 # → apps/menubar/dist/Tradewind.app
 发布物（GitHub Release）内含 `tradewind`、`Tradewind.app`、`bin/mihomo`、`ui/`（metacubexd）
 与许可文件。
 
+### 公开安装（Release 下载，免构建）
+
+无需克隆与构建，直接从 [Releases](https://github.com/chaojimaimi/tradewind/releases/latest) 下载
+`tradewind-<版本>-darwin-arm64.tar.gz` 并解压安装：
+
+```bash
+tar -xzf tradewind-<版本>-darwin-arm64.tar.gz
+mkdir -p /opt/homebrew/bin && cp tradewind /opt/homebrew/bin/   # 或 /usr/local/bin（PATH 内即可）
+cp -R Tradewind.app /Applications/
+```
+
+1. **首次打开 Gatekeeper 放行**：签名无公证，直接双击会被拦截——**右键点击
+   Tradewind.app → 打开 → 打开**（或 `xattr -cr /Applications/Tradewind.app` 后再双击）。
+2. 启动：点击菜单栏 Tradewind 图标，或终端 `tradewind start`（Ctrl+C 优雅退出并还原系统代理）。
+3. 升级：`tradewind self-update`（CLI+内核自动回滚；app 内关于页"检查更新"由 Sparkle 托管）。
+
+注：`version --check` / `self-update` 公开仓匿名可用（60 req/h/IP）；私有仓场景配置
+`release_token`：`gh auth token > ~/Library/Application\ Support/tradewind/release_token && chmod 600 ~/Library/Application\ Support/tradewind/release_token`。
+
 ### 数据目录
 
 `~/Library/Application Support/tradewind/`（测试/隔离用 `TRADEDWIND_HOME` 覆盖）。

@@ -71,20 +71,23 @@ func TestCheckUpdateDevBuildIsExplicitError(t *testing.T) {
 }
 
 func TestCheckUpdateTokenMissingMentionsGuidance(t *testing.T) {
+	// batch5 §2.1 匿名降级：release_token 缺失 → 匿名客户端照常查询（公开仓可达）
 	server := checkFakeAPI(t, "v9.9.9", 1, true)
 	pointCheckAtFake(t, "v0.5.0-m3b5", server)
-	const secret = "ghs_probe_token_do_not_echo"
 	home := paths.Home(t.TempDir())
-	_, err := CheckUpdate(context.Background(), home, &strings.Builder{})
-	if err == nil || !strings.Contains(err.Error(), "release_token") {
-		t.Fatalf("err = %v, want release_token guidance", err)
-	}
-	if strings.Contains(err.Error(), secret) {
-		t.Fatal("error must never echo token content")
-	}
-	// token 就位后走到列表查询（假 API 返回正常 release，应成功）
-	writeTokenFile(t, home, "ghs_probe_ok_token")
 	res, err := CheckUpdate(context.Background(), home, &strings.Builder{})
+	if err != nil || res.Latest != "v9.9.9" {
+		t.Fatalf("res = %+v, err = %v; want anonymous success", res, err)
+	}
+	// ③ 空文件 ≠ 可匿名：照旧报"token 缺失或无效"（文件存在≠可匿名）
+	writeTokenFile(t, home, "   \n")
+	_, err = CheckUpdate(context.Background(), home, &strings.Builder{})
+	if err == nil || !strings.Contains(err.Error(), "token 缺失或无效") {
+		t.Fatalf("err = %v, want blind wording", err)
+	}
+	// ① token 就位后照常成功
+	writeTokenFile(t, home, "ghs_probe_ok_token")
+	res, err = CheckUpdate(context.Background(), home, &strings.Builder{})
 	if err != nil || res.Latest != "v9.9.9" {
 		t.Fatalf("res = %+v, err = %v; want fake API reached", res, err)
 	}

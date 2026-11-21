@@ -256,13 +256,23 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-// --- ReadToken（600 强制 + 引导文案 + 不回显内容）---
+// --- ReadToken 四态（batch5 §2.1 匿名降级）---
+
+func TestReadTokenMissingFileFallsBackToAnonymous(t *testing.T) {
+	// ② 文件不存在 → 匿名降级：无错误、空串（客户端不带 Authorization 头）
+	home := paths.Home(t.TempDir())
+	token, err := ReadToken(home)
+	if err != nil {
+		t.Fatalf("missing file err = %v, want anonymous fallback", err)
+	}
+	if token != "" {
+		t.Fatalf("token = %q, want empty (anonymous)", token)
+	}
+}
 
 func TestReadTokenRequiresFileWith600(t *testing.T) {
+	// ④ 权限≠600 → 报错引导 chmod（权限纪律不降级）；① 600+非空 → token
 	home := paths.Home(t.TempDir())
-	if _, err := ReadToken(home); err == nil || !strings.Contains(err.Error(), "release_token") {
-		t.Fatalf("missing file err = %v, want guidance mentioning release_token", err)
-	}
 	path := filepath.Join(home.String(), "release_token")
 	if err := os.WriteFile(path, []byte("ghs_fake_test_token\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -292,5 +302,115 @@ func TestReadTokenEmptyFileIsBlindError(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), token) {
 		t.Fatalf("error leaks token literal: %q", err.Error())
+	}
+}
+
+// --- 匿名降级与 404 归因（batch5 §2.1）---
+
+func TestAnonymousClientSendsNoAuthorizationHeader(t *testing.T) {
+	// 匿名降级断言：Token 空 → 请求无 Authorization 头（公开仓匿名可达）
+	fake := newFakeGitHub(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(releasesBody(t, []Release{{Tag: "v0.5.0-m3e1"}}))
+	})
+	client := &Client{APIBase: fake.server.URL, Token: "", HTTP: fake.client}
+	rel, err := client.LatestRelease(context.Background())
+	if err != nil {
+		t.Fatalf("LatestRelease anonymous: %v", err)
+	}
+	if rel.Tag != "v0.5.0-m3e1" {
+		t.Fatalf("tag = %q", rel.Tag)
+	}
+	reqs := fake.recorded(t)
+	if len(reqs) == 0 {
+		t.Fatal("no requests recorded")
+	}
+	for _, req := range reqs {
+		if req.auth != "" {
+			t.Fatalf("anonymous request carries Authorization header: %q", req.auth)
+		}
+	}
+}
+
+func TestNotFoundWithoutTokenHintsTokenConfig(t *testing.T) {
+	// 404+匿名 → 归因文案引导配 token（GitHub 隐藏私有仓存在性，恒 404）
+	fake := newFakeGitHub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	client := &Client{APIBase: fake.server.URL, Token: "", HTTP: fake.client}
+	_, err := client.LatestRelease(context.Background())
+	if err == nil {
+		t.Fatal("404 without token: want error")
+	}
+	if !strings.Contains(err.Error(), "仓库私有或版本不存在") || !strings.Contains(err.Error(), "release_token") {
+		t.Fatalf("err = %v, want private-repo/token hint wording", err)
+	}
+}
+
+func TestNotFoundWithTokenKeepsStatusWording(t *testing.T) {
+	// 404+token → 沿用 status %d 既有文案（token 在位时 404=确定性答复）
+	fake := newFakeGitHub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	client := &Client{APIBase: fake.server.URL, Token: "test-token-value", HTTP: fake.client}
+	_, err := client.LatestRelease(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "status 404") {
+		t.Fatalf("err = %v, want default status wording", err)
+	}
+}
+
+// --- prerelease 两级过滤三态（F12）---
+
+func TestLatestReleasePrefersStableOverPrerelease(t *testing.T) {
+	// 一级：存在非 prerelease 条目 → 取最新正式版（列表时间倒序，--pre 不推普通用户）
+	fake := newFakeGitHub(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(releasesBody(t, []Release{
+			{Tag: "v0.6.0-m3e2-pre", Prerelease: true},
+			{Tag: "v0.5.0-m3e1"},
+		}))
+	})
+	client := &Client{APIBase: fake.server.URL, HTTP: fake.client}
+	rel, err := client.LatestRelease(context.Background())
+	if err != nil {
+		t.Fatalf("LatestRelease: %v", err)
+	}
+	if rel.Tag != "v0.5.0-m3e1" || rel.Prerelease {
+		t.Fatalf("tag = %q prerelease = %v, want newest stable", rel.Tag, rel.Prerelease)
+	}
+}
+
+func TestLatestReleaseAllPrereleaseFallsBackToFirst(t *testing.T) {
+	// 二级：全 prerelease（私有仓时代）→ 回落首条非 draft，行为不变
+	fake := newFakeGitHub(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(releasesBody(t, []Release{
+			{Tag: "v0.6.0-m3e2-pre", Prerelease: true},
+			{Tag: "v0.5.0-m3e1-pre", Prerelease: true},
+		}))
+	})
+	client := &Client{APIBase: fake.server.URL, HTTP: fake.client}
+	rel, err := client.LatestRelease(context.Background())
+	if err != nil {
+		t.Fatalf("LatestRelease: %v", err)
+	}
+	if rel.Tag != "v0.6.0-m3e2-pre" {
+		t.Fatalf("tag = %q, want first prerelease entry", rel.Tag)
+	}
+}
+
+func TestLatestReleaseDraftFilteredBeforeStablePick(t *testing.T) {
+	// draft 在前 + 正式版在后 → 先过滤 draft 再取正式版（两过滤次序钉死）
+	fake := newFakeGitHub(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(releasesBody(t, []Release{
+			{Tag: "v0.6.0-draft", Draft: true},
+			{Tag: "v0.6.0-m3e2-pre", Prerelease: true},
+			{Tag: "v0.5.0-m3e1"},
+		}))
+	})
+	client := &Client{APIBase: fake.server.URL, HTTP: fake.client}
+	rel, err := client.LatestRelease(context.Background())
+	if err != nil {
+		t.Fatalf("LatestRelease: %v", err)
+	}
+	if rel.Tag != "v0.5.0-m3e1" {
+		t.Fatalf("tag = %q, want stable after draft filtered", rel.Tag)
 	}
 }
