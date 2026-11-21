@@ -132,3 +132,75 @@ func TestMonitorReturnsNilOnContextCancel(t *testing.T) {
 	}
 	_ = m.Stop()
 }
+
+// TestSockPermParameterized SockPerm 参数化（批⑥ §3.1 评审 P1-4）：Config.SockPerm=0666
+// → 握手成功后 sock 权限收敛为 0666（特权服务侧 root 属主 sock，用户态 CLI 直连必需）；
+// 默认零值仍是 600（TestSpawnHandshakeSuccessAndStop 零回归锚）。
+func TestSockPermParameterized(t *testing.T) {
+	dir := shortTempDir(t)
+	cfg := stubConfig(t, dir, "normal")
+	cfg.SockPerm = 0o666
+	m := NewManager(cfg)
+	if err := m.Spawn(); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if err := m.WaitReady(context.Background()); err != nil {
+		t.Fatalf("WaitReady: %v", err)
+	}
+	info, err := os.Stat(m.cfg.SockPath)
+	if err != nil {
+		t.Fatalf("stat sock: %v", err)
+	}
+	if info.Mode().Perm() != 0o666 {
+		t.Fatalf("sock perm = %o, want 666 (SockPerm parameterized)", info.Mode().Perm())
+	}
+	_ = m.Stop()
+}
+
+// TestMonitorRestartKeepsSockPerm Monitor 自愈路径 SockPerm 贯通（评审 P1-4 要求的
+// "Monitor 重启后权限保持"断言）：Monitor 崩溃重启内部再走 Spawn+WaitReady
+// （manager.go 同一代码路径）——本测试以"崩溃退出后二次 Spawn+WaitReady"确定性
+// 复现该路径：同参数 SockPerm 必须保持 0666，否则服务端自愈后全线失联。
+// WHY 不直接驱动 Monitor 循环观测：fakecore listen（原始权限）到 WaitReady chmod
+// 之间存在 /version 已可达但权限未收敛的瞬态窗口，轮询断言会撞假阳性。
+func TestMonitorRestartKeepsSockPerm(t *testing.T) {
+	dir := shortTempDir(t)
+	cfg := stubConfig(t, dir, "crash-after-ms", "FAKE_CORE_CRASH_MS=1000")
+	cfg.SockPerm = 0o666
+	m := NewManager(cfg)
+	if err := m.Spawn(); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if err := m.WaitReady(context.Background()); err != nil {
+		t.Fatalf("first handshake: %v", err)
+	}
+	assertSockPerm(t, m.cfg.SockPath, 0o666)
+	// 等待崩溃退出（crash-after-ms 模式 1s 后自退，exit 通道由 cmd.Wait 关闭）
+	deadline := time.Now().Add(3 * time.Second)
+	for !m.exitClosed() && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !m.exitClosed() {
+		t.Fatal("stub core did not crash within 3s")
+	}
+	// 二次 Spawn+WaitReady = Monitor 重启内部路径（同 Manager 同参数）
+	if err := m.Spawn(); err != nil {
+		t.Fatalf("respawn: %v", err)
+	}
+	if err := m.WaitReady(context.Background()); err != nil {
+		t.Fatalf("respawn handshake: %v", err)
+	}
+	assertSockPerm(t, m.cfg.SockPath, 0o666)
+	_ = m.Stop()
+}
+
+func assertSockPerm(t *testing.T, sockPath string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(sockPath)
+	if err != nil {
+		t.Fatalf("stat sock: %v", err)
+	}
+	if info.Mode().Perm() != want {
+		t.Fatalf("sock perm = %o, want %o", info.Mode().Perm(), want)
+	}
+}

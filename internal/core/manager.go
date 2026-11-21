@@ -20,7 +20,10 @@ const (
 	DefaultStopGrace        = 5 * time.Second
 	logRotateSize           = 5 << 20 // core.log >5MB 轮转为 .1，保留 1 份
 	logTailSize             = 8 << 10 // fail-fast 时读取的日志尾部
-	sockPerm                = 0o600   // 握手成功后收敛 sock 权限（纵深防御，M0-plan §8）
+	// DefaultSockPerm 握手成功后 core.sock 收敛权限的默认值（纵深防御，M0-plan §8）。
+	// 特权服务侧经 Config.SockPerm 传 0666（root 属主 sock，用户态 CLI 直连必需，
+	// 批⑥ §3.1 SockPerm 参数化——Monitor 自愈重启走同参数，权限保持）。
+	DefaultSockPerm = 0o600
 )
 
 // Config 是内核管理器配置。零值字段使用默认值。
@@ -39,6 +42,10 @@ type Config struct {
 	StopGrace        time.Duration
 	// Env 覆盖子进程环境（默认继承父进程；测试注入桩内核模式用）
 	Env []string
+	// SockPerm 握手成功后 core.sock 的收敛权限（零值=默认 0600；特权服务传 0666——
+	// root 属主 sock，用户态 CLI 直连必需。Monitor 崩溃重启内部 Spawn+WaitReady
+	// 走同参数，自愈后权限保持，批⑥ §3.1 SockPerm 参数化）
+	SockPerm os.FileMode
 }
 
 func (c *Config) fillDefaults() {
@@ -50,6 +57,9 @@ func (c *Config) fillDefaults() {
 	}
 	if c.StopGrace <= 0 {
 		c.StopGrace = DefaultStopGrace
+	}
+	if c.SockPerm == 0 {
+		c.SockPerm = DefaultSockPerm
 	}
 }
 
@@ -121,7 +131,7 @@ func (m *Manager) WaitReady(ctx context.Context) error {
 			cancel()
 			if err == nil {
 				// mihomo 建 listener 时自 chmod 666（提前改会被覆盖），故成功后才收敛权限
-				if cErr := os.Chmod(m.cfg.SockPath, sockPerm); cErr != nil {
+				if cErr := os.Chmod(m.cfg.SockPath, m.cfg.SockPerm); cErr != nil {
 					return fmt.Errorf("core: chmod sock: %w", cErr)
 				}
 				return nil

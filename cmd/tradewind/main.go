@@ -12,6 +12,7 @@ import (
 
 	"github.com/chaojimaimi/tradewind/internal/app"
 	"github.com/chaojimaimi/tradewind/internal/paths"
+	"github.com/chaojimaimi/tradewind/internal/service"
 )
 
 func usage() {
@@ -104,6 +105,13 @@ func dispatch(home paths.Home, args []string) error {
 		err = cmdPanel(home, args[1:])
 	case "self-update":
 		err = cmdSelfUpdate(home, args[1:])
+	case "service":
+		// 隐藏子命令（不出 help）：root 特权服务常驻入口（launchd daemon 拉起，批⑥ §3.1）
+		err = cmdService(args[1:])
+	case "install":
+		// 隐藏子命令（不出 help）：helper 安装子命令——提权脚本以 root 调用，
+		// --data-dir/--data-uid 内联 argv 传入（argv 无秘密，批⑥ §3.3）
+		err = cmdServiceInstall(home, args[1:])
 	case "version", "--version", "-v":
 		// WHY 收编惯用 flag 形式：用户直觉输入 tradewind --version，而非子命令
 		err = cmdVersion(home, args[1:])
@@ -501,4 +509,26 @@ func cmdPanel(home paths.Home, args []string) error {
 		return app.PanelURLOnly(home)
 	}
 	return app.Panel(home)
+}
+
+// cmdService 分发隐藏 `tradewind service`：特权服务常驻主循环（root；SIGINT/SIGTERM
+// 优雅收敛）。须 root——launchd daemon 是唯一合法运行形态。
+func cmdService(_ []string) error {
+	return service.RunCLI()
+}
+
+// cmdServiceInstall 分发隐藏 `tradewind install`：helper 安装子命令（提权脚本调用）。
+// {data_dir, data_uid} 内联 argv（root 无法自证调用者数据目录，评审二轮 P2-c）；
+// argv 无秘密，密码红线不涉及。
+func cmdServiceInstall(_ paths.Home, args []string) error {
+	fs := flag.NewFlagSet("install", flag.ContinueOnError)
+	dataDir := fs.String("data-dir", "", "user data directory (absolute)")
+	dataUID := fs.Int("data-uid", 0, "data directory owner uid")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *dataDir == "" || *dataUID <= 0 {
+		return errors.New("usage: tradewind install --data-dir <abs path> --data-uid <uid>")
+	}
+	return service.Install(*dataDir, *dataUID, os.Stdout)
 }
