@@ -69,7 +69,7 @@ import Testing
 /// ProxyModeModel 编排（fake runner 绝不真拉 tradewind 进程）：读链、PAC 开关乐观
 /// 回显+失败回退、bypass 提交分类、busy 防抖。
 @MainActor @Suite struct ProxyModeModelTests {
-    private static func settingsJSON(pac: Bool, bypass: [String]?) -> String {
+    private static func settingsJSON(pac: Bool, bypass: [String]?, tun: Bool = false) -> String {
         let bypassPart: String
         switch bypass {
         case nil: bypassPart = ""
@@ -77,7 +77,8 @@ import Testing
         case let .some(list): bypassPart = #","bypass_domains":["# + list.map { "\"\($0)\"" }.joined(separator: ",") + "]"
         }
         return #"{"mixed_port":7897,"gateway_port":39097,"panel_enabled":true,"allow_lan":false,"mode":"rule","log_level":"info","log_retention_days":14,"pac_mode":"#
-            + (pac ? "true" : "false") + bypassPart + "}"
+            + (pac ? "true" : "false") + bypassPart
+            + #","tun_enabled":"# + (tun ? "true" : "false") + "}"
     }
 
     @Test func loadReadsPacKeysAndToleratesMissing() async {
@@ -178,5 +179,41 @@ import Testing
         #expect(model.currentBypass == nil)
         await model.setPacMode(true) // 无桥：静默拒绝
         #expect(!model.pacMode)
+    }
+
+    // MARK: TUN 开关（批⑥ §4）
+
+    @Test func loadReadsTunEnabledKey() async {
+        let fake = FakeRunner(FakeRunner.Reply(
+            output: Self.settingsJSON(pac: false, bypass: nil, tun: true) + "\n", exitCode: 0))
+        let model = ProxyModeModel(bridge: CoreBridge(runner: fake))
+        await model.load()
+        #expect(model.tunEnabled) // 开关初值来自 settings get --json（读取面）
+    }
+
+    @Test func setTUNWritesViaTunOrchestrationAndRefreshes() async {
+        // 写入口必须是 `tun on|off` 编排（90s 档）——settings set tun_enabled 在
+        // Go 侧被双入口封死，绝不出现在壳的调用里
+        let fake = FakeRunner(
+            FakeRunner.Reply(output: "", exitCode: 0), // tun on
+            FakeRunner.Reply(output: Self.settingsJSON(pac: false, bypass: nil, tun: true) + "\n", exitCode: 0))
+        let model = ProxyModeModel(bridge: CoreBridge(runner: fake))
+        await model.load()
+        await model.setTUN(true)
+        #expect(fake.calls.contains(["tun", "on"]))
+        #expect(!fake.calls.contains { $0 == ["settings", "set", "tun_enabled", "on"] })
+        #expect(model.tunEnabled) // 权威态回拉
+        #expect(model.toast == "TUN 模式已开启（特权服务托管内核）")
+    }
+
+    @Test func setTUNFailureRevertsEcho() async {
+        let fake = FakeRunner(
+            FakeRunner.Reply(output: Self.settingsJSON(pac: false, bypass: nil, tun: false) + "\n", exitCode: 0),
+            FakeRunner.Reply(output: "", exitCode: 1)) // tun on 失败
+        let model = ProxyModeModel(bridge: CoreBridge(runner: fake))
+        await model.load()
+        await model.setTUN(true)
+        #expect(!model.tunEnabled) // 失败回退乐观回显
+        #expect(model.toast == "TUN 模式切换失败")
     }
 }

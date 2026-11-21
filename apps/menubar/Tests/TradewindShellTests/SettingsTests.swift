@@ -74,6 +74,15 @@ private let statusWithoutProfileJSON =
         let snapshot = try SettingsSnapshot.decode(settingsJSONFixture)
         #expect(snapshot.pacMode == nil)
         #expect(snapshot.bypassDomains == nil)
+        #expect(snapshot.tunEnabled == nil) // 批⑥：tun_enabled 同可选语义
+    }
+
+    /// 批⑥ §4：tun_enabled 键解码（SettingsSnapshot 元数据；写入入口是 tun on|off
+    /// 编排——本键仅作开关初值读取，settings set 白名单在 Go 侧封死）
+    @Test func settingsGetJSONDecodesTunEnabledKey() throws {
+        let line = #"{"mixed_port":7897,"gateway_port":39097,"panel_enabled":true,"allow_lan":false,"mode":"rule","log_level":"info","log_retention_days":14,"pac_mode":false,"tun_enabled":true}"#
+        let snapshot = try SettingsSnapshot.decode(line)
+        #expect(snapshot.tunEnabled == true)
     }
 
     @Test func autostartStatusJSONDecodesAndGatesEnabled() async throws {

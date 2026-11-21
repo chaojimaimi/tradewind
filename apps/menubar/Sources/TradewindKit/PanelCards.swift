@@ -140,7 +140,9 @@ struct CurrentNodeCard: View {
     }
 }
 
-/// ③ 开关组（系统代理可用；TUN/代理守护 M2 禁用态 + P2 徽标，demo 显式偏差已声明）。
+/// ③ 开关组（系统代理 + TUN 可用，批⑥ §4 TUN 占位真化；代理守护 M2 禁用态 + P2
+/// 徽标，demo 显式偏差已声明）。TUN 与系统代理为独立开关（Go 编排保证切换不改
+/// sysproxy 意图）；on 无内核前置——编排自带服务首装/内核拉起（90s 档）。
 struct ToggleGroupCard: View {
     @ObservedObject var model: PanelModel
     @Environment(\.colorScheme) private var scheme
@@ -158,8 +160,16 @@ struct ToggleGroupCard: View {
                 disabled: !model.running || model.busy
             )
             Divider().overlay(Theme.muted(scheme).opacity(0.2))
-            ToggleRow(icon: "rectangle.on.rectangle", label: "TUN 模式", note: nil,
-                      isOn: .constant(false), disabled: true, badge: "P2")
+            ToggleRow(
+                icon: "rectangle.on.rectangle", label: "TUN 模式",
+                note: model.tunNote,
+                isOn: Binding(
+                    // 批⑥ effective 口径：同乐观模式（pendingTUN），权威值来自 status tun 段
+                    get: { model.effectiveTUN },
+                    set: { newValue in Task { await model.setTUN(on: newValue) } }
+                ),
+                disabled: model.busy
+            )
             Divider().overlay(Theme.muted(scheme).opacity(0.2))
             ToggleRow(icon: "shield.lefthalf.filled", label: "代理守护", note: nil,
                       isOn: .constant(false), disabled: true, badge: "P2")

@@ -31,9 +31,17 @@ struct StatusReport: Codable, Equatable {
         let name: String
     }
 
+    /// TUN 三态数据源（批⑥ §4：enabled+running / enabled+服务异常 / disabled）。
+    /// WHY 可选：旧 CLI 缺 tun 键 → nil（版本偏斜兼容，form/hijackEvents 同先例）。
+    struct Tun: Codable, Equatable {
+        let enabled: Bool
+        let running: Bool
+    }
+
     let core: Core
     let mode: String
     let sysProxy: SysProxy
+    let tun: Tun?
     let profile: Profile
     let panelURL: String
 
@@ -41,6 +49,7 @@ struct StatusReport: Codable, Equatable {
         case core
         case mode
         case sysProxy = "sys_proxy"
+        case tun
         case profile
         case panelURL = "panel_url"
     }

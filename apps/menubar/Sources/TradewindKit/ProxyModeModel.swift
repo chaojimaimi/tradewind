@@ -80,6 +80,9 @@ final class ProxyModeModel: ObservableObject {
     @Published private(set) var pacMode = false
     /// 当前生效 bypass（权威态；nil=未设置 → 生效值取 Go 缺省集）。
     @Published private(set) var currentBypass: [String]?
+    /// TUN 模式开关（批⑥ §4；nil=旧 CLI 未提供 → 按 false 渲染）。
+    /// WHY 走 bridge.setTUN 而非 settings set：Go 侧双入口封死（漂移态防护）。
+    @Published private(set) var tunEnabled = false
     @Published private(set) var busy = false
     /// 初始加载失败标记（区分"加载中"与失败态）。
     @Published private(set) var loadFailed = false
@@ -107,6 +110,7 @@ final class ProxyModeModel: ObservableObject {
             let snapshot = try await bridge.settingsGetJSON()
             pacMode = snapshot.pacMode ?? false
             currentBypass = snapshot.bypassDomains
+            tunEnabled = snapshot.tunEnabled ?? false
         } catch {
             loadFailed = true
             showToast("设置读取失败")
@@ -121,6 +125,19 @@ final class ProxyModeModel: ObservableObject {
                            failure: "PAC 模式保存失败",
                            onRevert: { self.pacMode = old }) {
             try await self.bridge?.settingsSet(key: "pac_mode", value: on ? "on" : "off")
+            await self.refresh()
+        }
+    }
+
+    /// TUN 模式开关（批⑥ §4 → `tun on|off` 编排，90s 档：首装含提权弹窗 + 45s
+    /// 就绪判定 + 回滚重拉）。乐观回显同 setPacMode；成功文案按方向给服务状态提示。
+    func setTUN(_ on: Bool) async {
+        let old = tunEnabled
+        tunEnabled = on
+        await performWrite(success: on ? "TUN 模式已开启（特权服务托管内核）" : "TUN 模式已关闭（用户态内核已恢复）",
+                           failure: "TUN 模式切换失败",
+                           onRevert: { self.tunEnabled = old }) {
+            try await self.bridge?.setTUN(enabled: on)
             await self.refresh()
         }
     }
@@ -176,6 +193,7 @@ final class ProxyModeModel: ObservableObject {
         if let snapshot = try? await bridge.settingsGetJSON() {
             pacMode = snapshot.pacMode ?? false
             currentBypass = snapshot.bypassDomains
+            tunEnabled = snapshot.tunEnabled ?? false
         }
     }
 

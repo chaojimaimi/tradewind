@@ -85,6 +85,8 @@ final class PanelModel: ObservableObject {
     @Published private(set) var pendingSysProxy: Bool?
     /// 同上，主开关（start/stop）的乐观值。
     @Published private(set) var pendingRunning: Bool?
+    /// 同上，TUN 开关（批⑥ §4）的乐观值——90s 编排（首装含提权弹窗）期 UI 不悬空。
+    @Published private(set) var pendingTUN: Bool?
     private(set) var gateway: GatewayClient?
     private let bridge: CoreBridge?
     /// 网关会话注入点（URLProtocol stub 单测；生产默认 .shared）
@@ -128,9 +130,19 @@ final class PanelModel: ObservableObject {
     /// refresh 权威值落地后 pending 清除，自动回权威口径。
     var effectiveSysProxy: Bool { pendingSysProxy ?? report?.sysProxy.applied ?? false }
     var effectiveRunning: Bool { pendingRunning ?? running }
-    /// 接入路径：系统代理开启即视为有接入（demo：sysProxy || tun；M2 无 TUN）。
-    /// WHY effective 口径：菜单栏图标绿点随系统代理点击立即翻转（v0.4.7）
-    var intake: Bool { effectiveSysProxy }
+    /// TUN 开关 effective 口径（批⑥ §4）：pending 优先，权威值取 status --json tun
+    /// 段（nil=旧 CLI 缺键 → false 渲染）。running=enabled 且服务托管内核健康
+    /// （Go 侧三态：enabled+running / enabled+服务异常 / disabled）。
+    var effectiveTUN: Bool { pendingTUN ?? (report?.tun?.enabled ?? false) }
+    var tunRunning: Bool { report?.tun?.running ?? false }
+    /// TUN 行副注（三态呈现，§4"单图标+菜单态文案"）：服务异常态显著提示。
+    var tunNote: String? {
+        guard effectiveTUN, report != nil, !tunRunning else { return nil }
+        return "服务异常"
+    }
+    /// 接入路径：系统代理或 TUN 至少一开（demo 口径 sysProxy || tun；批⑥ TUN 转正）。
+    /// WHY effective 口径：菜单栏图标绿点随开关点击立即翻转（v0.4.7）
+    var intake: Bool { effectiveSysProxy || effectiveTUN }
     var iconState: StatusIconState { StatusIcon.state(running: effectiveRunning, intake: intake) }
     /// 当前节点延迟：activeGroup.nodes 中 currentNode 匹配项的 delay。
     /// WHY 下沉为模型计算属性：视图内查找无法单测（M3-plan §3.2）
@@ -267,6 +279,22 @@ final class PanelModel: ObservableObject {
         }
         await refresh()
         pendingSysProxy = nil
+    }
+
+    /// TUN 模式开关（批⑥ §4 → `tun on|off`，90s 档：首装含提权弹窗等待）。
+    /// 乐观回显同 setSysProxy（pendingTUN）；失败视觉回退 + toast。
+    /// WHY 不设 busy 独占重入守卫：Go 编排幂等（已是目标态 no-op），双发无害。
+    func setTUN(on: Bool) async {
+        guard let bridge else { return }
+        pendingTUN = on
+        do {
+            try await bridge.setTUN(enabled: on)
+        } catch {
+            pendingTUN = nil
+            showToast(on ? "TUN 开启失败（提权被取消或服务安装失败）" : "TUN 关闭失败")
+        }
+        await refresh()
+        pendingTUN = nil
     }
 
     /// 切换节点：PUT 成功后本地乐观更新（内核失败不更新，重拉修正）。

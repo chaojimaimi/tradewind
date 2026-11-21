@@ -101,6 +101,34 @@ final class FakeRunner: CommandLineRunning, @unchecked Sendable {
         #expect(fake.timeouts == [65])
     }
 
+    /// 批⑥ §4：setTUN 参数拼装 + 90s 档（首装含提权弹窗等待 + 编排就绪 45s +
+    /// 回滚重拉，65s write 档不够）。两个方向都断言——开关拼装是本次交付的契约。
+    @Test func setTUNRoutesArgumentsAndTimeout() async throws {
+        let fake = TimeoutRecordingRunner()
+        let bridge = CoreBridge(runner: fake)
+        try await bridge.setTUN(enabled: true)
+        try await bridge.setTUN(enabled: false)
+        #expect(fake.calls == [["tun", "on"], ["tun", "off"]])
+        #expect(fake.timeouts == [90, 90])
+    }
+
+    /// 批⑥ §4：status --json tun 三态段解码（enabled+running / enabled+服务异常 /
+    /// disabled）；旧 CLI 缺 tun 键 → nil（版本偏斜兼容，sysProxy.form 同先例）。
+    @Test func statusDecodesTunTriStateAndToleratesMissingKey() throws {
+        let withTun = #"{"core":{"running":true,"pid":1,"version":"v"},"mode":"rule","sys_proxy":{"applied":false,"services":0},"tun":{"enabled":true,"running":true},"profile":{"uid":"","name":""},"panel_url":""}"#
+        let report = try StatusReport.decode(withTun)
+        #expect(report.tun?.enabled == true && report.tun?.running == true)
+        let degraded = try StatusReport.decode(withTun.replacingOccurrences(
+            of: #""tun":{"enabled":true,"running":true}"#,
+            with: #""tun":{"enabled":true,"running":false}"#))
+        #expect(degraded.tun?.enabled == true && degraded.tun?.running == false)
+        let legacy = try StatusReport.decode(Self.statusJSONWithoutTun)
+        #expect(legacy.tun == nil)
+    }
+
+    /// 无 tun 键的 status 输出（旧 CLI 形态）。
+    private static let statusJSONWithoutTun = #"{"core":{"running":true,"pid":1,"version":"v"},"mode":"rule","sys_proxy":{"applied":false,"services":0},"profile":{"uid":"","name":""},"panel_url":""}"#
+
     @Test func controlPlaneOperationsPassExactArguments() async throws {
         let fake = FakeRunner(
             FakeRunner.Reply(output: "", exitCode: 0),

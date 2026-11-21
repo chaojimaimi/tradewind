@@ -19,6 +19,10 @@ struct SettingsSnapshot: Codable, Equatable {
     /// 绕过域名（逗号分隔存储的数组形态；nil=未设置 → 生效值取缺省集）。
     /// Go omitempty 对 nil slice 缺键，同上必须可选。
     var bypassDomains: [String]?
+    /// TUN 模式开关（批⑥ §4，Go store.Settings.TunEnabled 对齐）。可选=旧 CLI 缺键
+    /// 兼容（nil 按 false 处理）。注意：写入入口是 `tun on|off` 编排（CoreBridge.setTUN），
+    /// settings set tun_enabled 在 Go 侧被双入口封死——本键仅作开关初值读取。
+    var tunEnabled: Bool?
 
     enum CodingKeys: String, CodingKey {
         case mixedPort = "mixed_port"
@@ -30,6 +34,7 @@ struct SettingsSnapshot: Codable, Equatable {
         case logRetentionDays = "log_retention_days"
         case pacMode = "pac_mode"
         case bypassDomains = "bypass_domains"
+        case tunEnabled = "tun_enabled"
     }
 
     /// 解码单行 JSON 输出；解析失败显式报错（壳按降级态处理而非崩溃）。

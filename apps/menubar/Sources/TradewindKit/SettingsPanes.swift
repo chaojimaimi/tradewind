@@ -285,9 +285,19 @@ struct GeneralPane: View {
 
     /// PAC 模式开关 + 绕过域名编辑行（走 ProxyModeModel settingsGet/set 链——双轨制
     /// 不走 @AppStorage；写编排含 applied 态形态翻转重放与 gateway_port 仅警告联动，
-    /// 由 Go 侧编排）。
+    /// 由 Go 侧编排）。TUN 模式开关（批⑥ §4）：`tun on|off` 编排（首装含提权弹窗，
+    /// 90s 档），与系统代理为独立开关（切换不改用户意图，由 CLI 编排精确恢复）。
     private var proxySection: some View {
-        SettingsSection(title: "系统代理") {
+        SettingsSection(title: "网络代理") {
+            SettingsRow(label: "TUN 模式",
+                        subtitle: "root 特权服务托管内核（首次开启安装服务并弹管理员授权）") {
+                SwitchPill(isOn: Binding(
+                    get: { proxyModeModel.tunEnabled },
+                    set: { newValue in Task { await proxyModeModel.setTUN(newValue) } }
+                ), small: true, accessibilityLabel: "TUN 模式")
+                .disabled(proxyModeModel.busy)
+            }
+            rowDivider
             SettingsRow(label: "PAC 模式",
                         subtitle: "PAC 需面板网关（panel_enabled）；绕过默认 localhost/内网段") {
                 SwitchPill(isOn: Binding(

@@ -255,6 +255,16 @@ final class CoreBridge {
     /// 取 65s 留裕量（45s 会把壳 SIGTERM 在 retarget 前——半完成态正是本设计要消灭的）。
     static let writeTimeout: TimeInterval = 65
 
+    /// TUN 编排超时（批⑥ §4）：90s——首装含提权弹窗等待用户输入 + 编排就绪判定
+    /// 窗口 45s + 失败回滚重拉，65s write 档不够（settings set 65s 先例的加长档）。
+    static let tunTimeout: TimeInterval = 90
+
+    /// TUN 模式开关（批⑥ §4）：`tun on|off` 编排（含服务首装/就绪等待/失败回滚），
+    /// 绝不经 settings set tun_enabled（Go 侧双入口封死）。
+    func setTUN(enabled: Bool) async throws {
+        _ = try await runner.runWithTimeout(["tun", enabled ? "on" : "off"], timeout: Self.tunTimeout)
+    }
+
     /// `settings get --json`：通用页初始值数据源（读操作，常规 10s 足够）。
     func settingsGetJSON() async throws -> SettingsSnapshot {
         let output = try await runner.run(["settings", "get", "--json"])
