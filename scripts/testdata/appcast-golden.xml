@@ -10,7 +10,7 @@
       <pubDate>Fri, 20 Nov 2026 12:00:00 +0000</pubDate>
       <sparkle:version>42</sparkle:version>
       <sparkle:shortVersionString>v9.9.9-test</sparkle:shortVersionString>
-      <minimumSystemVersion>13.0</minimumSystemVersion>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
       <enclosure url="https://github.com/chaojimaimi/tradewind/releases/download/v9.9.9-test/Tradewind.app.zip" sparkle:edSignature="PLACEHOLDER_EDDSA_SIG" length="12345" type="application/octet-stream" />
     </item>
   </channel>

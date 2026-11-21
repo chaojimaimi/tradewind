@@ -70,7 +70,7 @@ func TestCheckUpdateDevBuildIsExplicitError(t *testing.T) {
 	}
 }
 
-func TestCheckUpdateTokenMissingMentionsGuidance(t *testing.T) {
+func TestCheckUpdateAnonymousAndTokenStates(t *testing.T) {
 	// batch5 §2.1 匿名降级：release_token 缺失 → 匿名客户端照常查询（公开仓可达）
 	server := checkFakeAPI(t, "v9.9.9", 1, true)
 	pointCheckAtFake(t, "v0.5.0-m3b5", server)

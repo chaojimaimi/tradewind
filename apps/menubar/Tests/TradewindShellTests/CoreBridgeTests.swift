@@ -10,7 +10,7 @@ final class FakeRunner: CommandLineRunning, @unchecked Sendable {
     }
 
     private(set) var calls: [[String]] = []
-    /// runWithTimeout 收到的超时档（批③：selfUpdate 180s 档断言；读/写档缺省转发不记录）
+    /// runWithTimeout 收到的超时档（现役消费：subs/settings/enhance 65s 写档与 read 档记录；selfUpdate 断言已随 CLI 三态退役删除——批⑤ code-reviewer P3-1）
     private(set) var timeouts: [TimeInterval] = []
     private var script: [Reply] = []
     private let lock = NSLock()
@@ -38,7 +38,7 @@ final class FakeRunner: CommandLineRunning, @unchecked Sendable {
     }
 
     /// 记录超时档后转发常规 run（假执行器无进程可杀，超时值仅真实执行器有语义；
-    /// 记录供 selfUpdate/updateTimeout 契约断言）。
+    /// 记录供写编排超时档契约断言）。
     func runWithTimeout(_ args: [String], timeout: TimeInterval, tolerate: Set<Int32>) async throws -> String {
         lock.withLock { timeouts.append(timeout) }
         return try await run(args, tolerate: tolerate)

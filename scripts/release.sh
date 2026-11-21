@@ -36,6 +36,9 @@ usage() {
 # 生产取官方 sign_update 输出，测试用占位（真私钥绝不进测试）。抽为独立函数供
 # golden 测试直接调用（source 本脚本即得；main 仅 $0 直跑时执行）。
 generate_appcast() {
+  # WHY minimumSystemVersion 恒带 sparkle: 前缀（批⑤ code-reviewer P2-1）：
+  # Sparkle 2.9.1 只按 sparkle:minimumSystemVersion 键取值（SUAppcastItem.m:644），
+  # 裸元素静默失效=版本门槛不生效。XML 内不加注释——golden 逐字节对比。
   local version="$1" build="$2" ed_sig="$3" zip_len="$4" pubdate="$5" out="$6"
   cat > "$out" <<EOF
 <?xml version="1.0" encoding="utf-8"?>
@@ -50,7 +53,7 @@ generate_appcast() {
       <pubDate>$pubdate</pubDate>
       <sparkle:version>$build</sparkle:version>
       <sparkle:shortVersionString>$version</sparkle:shortVersionString>
-      <minimumSystemVersion>13.0</minimumSystemVersion>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
       <enclosure url="https://github.com/chaojimaimi/tradewind/releases/download/$version/Tradewind.app.zip" sparkle:edSignature="$ed_sig" length="$zip_len" type="application/octet-stream" />
     </item>
   </channel>

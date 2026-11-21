@@ -27,7 +27,7 @@ diff "$GOLDEN" "$TMP/appcast.xml" > /dev/null || fail "appcast golden mismatch"
 grep -q 'releases/download/v9.9.9-test/Tradewind.app.zip' "$TMP/appcast.xml" || fail "enclosure not pinned to tag URL"
 grep -q '<sparkle:version>42</sparkle:version>' "$TMP/appcast.xml" || fail "sparkle:version != build number"
 grep -q 'sparkle:edSignature="PLACEHOLDER_EDDSA_SIG"' "$TMP/appcast.xml" || fail "placeholder signature missing"
-grep -q '<minimumSystemVersion>13.0</minimumSystemVersion>' "$TMP/appcast.xml" || fail "minimumSystemVersion != 13.0"
+grep -q '<sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>' "$TMP/appcast.xml" || fail "minimumSystemVersion != 13.0"
 pass "generate_appcast golden + lockpoints"
 
 # 3. DRY_RUN 默认（无 Sparkle 工具）：正式版默认（无 --prerelease）、不 upload、链跳过
