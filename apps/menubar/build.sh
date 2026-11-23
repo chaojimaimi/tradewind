@@ -1,8 +1,10 @@
 #!/bin/bash
 # Tradewind 壳构建（M2-plan §3）：swift build → 最小 .app bundle（LSUIElement）。
-# 签名身份（batch5 §3.1）：默认探测自签证书 "Tradewind Developer"（证书助理创建，
-# batch5 §3.4 前置动作），缺失 → 降级 ad-hoc + stderr 警告（构建不失败——Sparkle
-# 更新链路安装期签名校验未生效，m3e2 实测 gate）。
+# 签名身份（batch5 §3.1 + 批⑥ signing identity）：优先用 scripts/make-signing-identity.sh
+# 产出的独立签名钥匙串（SIGN_KEYCHAIN + SIGN_KEYCHAIN_PASS_FILE 都在 → 解锁后在其中
+# 探测，未受信任的自签证书也接受）；二者不在 → 维持 batch5 路径（默认钥匙串搜索列表里
+# 经 Keychain Access 手工创建的证书）。都没有 → 降级 ad-hoc + stderr 警告（构建不
+# 失败——ad-hoc 签名下 Sparkle 更新链路的安装期签名校验未生效，m3e2 实测 gate）。
 # Sparkle 嵌入（batch5 §3.1 终审 P2-2 fail fast）：Package.swift 声明 Sparkle 依赖即
 # dyld 加载期硬依赖——framework 探测失败 → 构建失败 exit 1（警告跳过=产出打不开的
 # app）；Package.swift 尚无 Sparkle 依赖时静默跳过。"构建不失败"原则仅适用于签名
@@ -11,6 +13,7 @@
 #   apps/menubar/build.sh                      # release 构建 → apps/menubar/dist/Tradewind.app
 #   CONFIG=debug apps/menubar/build.sh         # 调试构建
 #   SIGN_IDENTITY="自定义名" apps/menubar/build.sh   # 显式指定签名身份
+#   SIGN_KEYCHAIN=... SIGN_KEYCHAIN_PASS_FILE=... apps/menubar/build.sh   # 覆盖签名钥匙串落点
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -24,19 +27,42 @@ APP="$DIR/dist/Tradewind.app"
 # release.sh 以同式计算）
 BUILD_NUMBER="$(git -C "$REPO_ROOT" rev-list --count HEAD)"
 SIGN_IDENTITY="${SIGN_IDENTITY:-Tradewind Developer}"
+# 签名钥匙串（批⑥ signing identity）：scripts/make-signing-identity.sh 的产物（默认落点
+# 与该脚本一致；EdDSA 私钥同在 ~/.sparkle 的既有约定）。
+SIGN_KEYCHAIN="${SIGN_KEYCHAIN:-$HOME/.sparkle/tradewind-signing.keychain-db}"
+SIGN_KEYCHAIN_PASS_FILE="${SIGN_KEYCHAIN_PASS_FILE:-$HOME/.sparkle/tradewind-signing.pass}"
 
 cd "$DIR"
 swift build -c "$CONFIG"
 BINDIR="$(swift build -c "$CONFIG" --show-bin-path)"
 BIN="$BINDIR/TradewindShell"
 
-# 签名身份探测（batch5 §3.1）：Keychain 代码签名身份含指定名 → 用之；缺失 →
-# 降级 ad-hoc "-" + 显著警告（构建不失败）
-if security find-identity -v -p codesigning 2>/dev/null | grep -qF "\"$SIGN_IDENTITY\""; then
-  echo "==> codesign identity: $SIGN_IDENTITY"
+# 签名身份探测（batch5 §3.1；批⑥ signing identity）：独立签名钥匙串可用 → 只在其中
+# 探测；否则查默认钥匙串搜索列表（batch5 手工证书路径）；均缺失 → 降级 ad-hoc "-"
+# + 显著警告（构建不失败）。
+# WHY 不带 -v 查独立钥匙串：-v 按信任状态过滤，而自签证书有意不加信任设置（加信任
+# 需 GUI 授权）——会被整段滤掉；改以排除 EXPIRED 行表达"可用"。
+# WHY 先把清单读进变量再 grep：pipefail 下 `security | grep -q` 的 grep 提前退出会让
+# security 吃 SIGPIPE，命中也可能被判失败。
+SIGN_KC_SIGN=() # codesign 的 --keychain 参数（空 = 不指定钥匙串）
+IDENTITY_FIND=(-v -p codesigning)
+IDENTITY_SOURCE="default keychain search list"
+if [ -f "$SIGN_KEYCHAIN" ] && [ -f "$SIGN_KEYCHAIN_PASS_FILE" ]; then
+  if security unlock-keychain -p "$(cat "$SIGN_KEYCHAIN_PASS_FILE")" "$SIGN_KEYCHAIN" 2>/dev/null; then
+    IDENTITY_FIND=(-p codesigning "$SIGN_KEYCHAIN")
+    SIGN_KC_SIGN=(--keychain "$SIGN_KEYCHAIN")
+    IDENTITY_SOURCE="keychain $SIGN_KEYCHAIN"
+  else
+    echo "warning: cannot unlock signing keychain $SIGN_KEYCHAIN with $SIGN_KEYCHAIN_PASS_FILE (mismatched password?) — keychain ignored" >&2
+  fi
+fi
+IDENTITY_LISTING="$(security find-identity "${IDENTITY_FIND[@]}" 2>/dev/null || true)"
+if grep -v EXPIRED <<<"$IDENTITY_LISTING" | grep -qF "\"$SIGN_IDENTITY\""; then
+  echo "==> codesign identity: $SIGN_IDENTITY ($IDENTITY_SOURCE)"
 else
-  echo "warning: codesign identity \"$SIGN_IDENTITY\" not found in keychain (前置动作：Keychain Access→证书助理→创建证书，batch5 §3.4); falling back to ad-hoc — Sparkle 更新链路未生效" >&2
+  echo "warning: codesign identity \"$SIGN_IDENTITY\" not found (生成：scripts/make-signing-identity.sh); falling back to ad-hoc — Sparkle 更新链路未生效" >&2
   SIGN_IDENTITY="-"
+  SIGN_KC_SIGN=()
 fi
 
 # 先停运行中的旧实例（code-reviewer P3）：删除运行中 bundle 不终止进程（inode 存续），
@@ -143,8 +169,10 @@ $PUB_KEY_LINE
 </plist>
 EOF
 # 嵌套签名（batch5 §3.1）：framework 先签 → app 后签（--deep 仅作降级路径，登记不用）
+# --keychain 仅在独立签名钥匙串可用时附带；ad-hoc 降级不带。bash 3.2 + set -u 下空
+# 数组不可直接展开，用 ${arr[@]+"${arr[@]}"} 惯用法。
 if [ -d "$APP/Contents/Frameworks/Sparkle.framework" ]; then
-  codesign --force --sign "$SIGN_IDENTITY" "$APP/Contents/Frameworks/Sparkle.framework"
+  codesign --force --sign "$SIGN_IDENTITY" ${SIGN_KC_SIGN[@]+"${SIGN_KC_SIGN[@]}"} "$APP/Contents/Frameworks/Sparkle.framework"
 fi
-codesign --force --sign "$SIGN_IDENTITY" "$APP"
+codesign --force --sign "$SIGN_IDENTITY" ${SIGN_KC_SIGN[@]+"${SIGN_KC_SIGN[@]}"} "$APP"
 echo "built $APP (version $VERSION, build $BUILD_NUMBER)"
