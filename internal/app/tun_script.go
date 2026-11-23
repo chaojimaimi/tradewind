@@ -148,7 +148,7 @@ try_candidate() {
 	for _, cand := range lay.candidates {
 		fmt.Fprintf(&b, "try_candidate %s || ", q(cand))
 	}
-	fmt.Fprintf(&b, "fail %s 3\n\n", q("所有候选安装位置均被 macOS 系统策略拦截（未公证二进制受限），未安装任何文件："+strings.Join(lay.candidates, " / ")))
+	fmt.Fprintf(&b, "fail %s 3\n\n", q(allBlockedMessage(lay)))
 	b.WriteString("# ③ 清理其余候选里的陈旧三文件\n")
 	for _, cand := range lay.candidates {
 		fmt.Fprintf(&b, `if [ "$EXE" != %s ]; then clean_candidate %s; fi`+"\n", q(cand), q(cand))
@@ -159,6 +159,16 @@ try_candidate() {
 exit "$?"
 `)
 	return b.String()
+}
+
+// allBlockedMessage 全部候选被系统策略拦截时的 stderr 说明（真机 fold-in 2 补
+// quarantine 提示）：浏览器下载后解压的二进制常带 com.apple.quarantine，cp 会把该
+// 扩展属性带到副本上，三个候选会一并被拦——提示先对解压目录去 quarantine 再重试。
+func allBlockedMessage(lay tunScriptLayout) string {
+	return "所有候选安装位置均被 macOS 系统策略拦截（未公证二进制受限），未安装任何文件：" +
+		strings.Join(lay.candidates, " / ") +
+		"；若 CLI/内核二进制带 com.apple.quarantine 扩展属性（浏览器下载后解压常见），副本会继承并被拦" +
+		"——先对解压目录执行 xattr -dr com.apple.quarantine <目录> 再重试"
 }
 
 // tunUninstallScript 生成生产卸载提权脚本（纯函数）。

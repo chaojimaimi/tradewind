@@ -43,21 +43,31 @@ func (realLaunchctl) Run(args ...string) error {
 
 // Install 执行 helper 安装子命令
 // （`tradewind install --data-dir <p> --data-uid <n> --exec-dir <e>`）：校验 argv →
-// root 内核副本一致性校验 → 写 service.json + daemon plist → bootout（幂等，失败
-// 忽略）→ bootstrap。必须 root（提权脚本调用；非 root 直接报错，绝不静默降级为
-// 用户态写系统目录）。
+// 执行目录归 root 所有 → root 内核副本一致性校验 → 写 service.json + daemon plist
+// → bootout（幂等，失败忽略）→ bootstrap。必须 root（提权脚本调用；非 root 直接
+// 报错，绝不静默降级为用户态写系统目录）。
 func Install(dataDir string, dataUID int, execDir string, stdout io.Writer) error {
 	if os.Geteuid() != 0 {
 		return errors.New("service: install must run as root (via `tradewind tun install`)")
 	}
-	return installDaemon(installPlan{
+	return installWith(installPlan{
 		dataDir:          dataDir,
 		dataUID:          dataUID,
 		execDir:          execDir,
 		configDir:        DefaultConfigDir,
 		launchDaemonsDir: "/Library/LaunchDaemons",
 		logsDir:          "/Library/Logs",
-	}, realLaunchctl{}, stdout)
+	}, realLaunchctl{}, stdout, verifyExecDirOwnership)
+}
+
+// installWith 是安装入口的可测形态：执行目录归属校验在前（注入——生产=
+// verifyExecDirOwnership；非 root 测试环境经 installDaemon 直达或桩跳过），任一项
+// 不达标则不写任何文件、不碰 launchd。
+func installWith(p installPlan, lc launchctlRunner, stdout io.Writer, verifyOwnership func(string) error) error {
+	if err := verifyOwnership(p.execDir); err != nil {
+		return fmt.Errorf("service: refusing to install: %w", err)
+	}
+	return installDaemon(p, lc, stdout)
 }
 
 // installPlan 是安装落点参数（生产=系统目录；测试指向临时目录）。

@@ -85,8 +85,12 @@ func TestTunInstallScriptContent(t *testing.T) {
 		}
 		lastPos = pos
 	}
-	if !strings.HasSuffix(chain, "均被 macOS 系统策略拦截（未公证二进制受限），未安装任何文件："+
-		strings.Join(service.ExecDirCandidates(), " / ")+"' 3") {
+	// 链尾文案：说明系统策略拦截 + quarantine 提示（fold-in 2），以 exit 3 收尾
+	terminator := "均被 macOS 系统策略拦截（未公证二进制受限），未安装任何文件：" +
+		strings.Join(service.ExecDirCandidates(), " / ") +
+		"；若 CLI/内核二进制带 com.apple.quarantine 扩展属性（浏览器下载后解压常见），副本会继承并被拦" +
+		"——先对解压目录执行 xattr -dr com.apple.quarantine <目录> 再重试' 3"
+	if !strings.HasSuffix(chain, terminator) {
 		t.Fatalf("probe chain must terminate in the explained exit 3:\n%s", chain)
 	}
 
@@ -429,6 +433,10 @@ func TestTunInstallScriptAllCandidatesBlocked(t *testing.T) {
 	}
 	if strings.Count(stderr, "被系统策略拦截，尝试下一处") != len(f.layout.candidates) {
 		t.Fatalf("each candidate must report one blocked line:\n%s", stderr)
+	}
+	// quarantine 提示：带 com.apple.quarantine 的二进制其副本会继承并被拦
+	if !strings.Contains(stderr, "com.apple.quarantine") || !strings.Contains(stderr, "xattr -dr com.apple.quarantine <目录>") {
+		t.Fatalf("the all-blocked message must carry the quarantine hint:\n%s", stderr)
 	}
 	for _, cand := range f.layout.candidates {
 		f.assertCandidateClean(t, cand)

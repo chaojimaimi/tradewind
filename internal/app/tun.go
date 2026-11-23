@@ -167,6 +167,8 @@ func tunPreflightOn(ctx context.Context, home paths.Home, env tunEnv) error {
 // tunConverge 切换收敛（§2.2 步 5-8）：杀旧 start（超时 → 垂死等待）→ 服务 stop
 // 兜底收敛 root core（kill -9 场景旧 start 未及收敛；已起则停、未起 no-op）→
 // detached spawn --no-sysproxy → 就绪判定 → sysproxy 意图恢复。任一步失败 → 回滚。
+// off 路径的服务 stop 是尽力而为（逃生口，真机 fold-in 2）：服务不可达时没有可停的
+// root core，warning 后继续收敛；on 路径不可达照旧回滚。
 func tunConverge(ctx context.Context, home paths.Home, env tunEnv, settings store.Settings, preApplied, on, preTun bool) error {
 	// preTun 显式传参（batch6 review P2-2 次生修正）：幂等 fall-through 时 preTun
 	// == on（切换前即目标态、仅缺实际形态）——回滚必须按真实切换前值回写，旧的
@@ -180,7 +182,11 @@ func tunConverge(ctx context.Context, home paths.Home, env tunEnv, settings stor
 		}
 		return tunRollback(ctx, home, env, settings, preApplied, preTun, false)
 	}
-	if err := tunStopCoreForward(env); err != nil {
+	stopRootCore := tunStopCoreForward
+	if !on {
+		stopRootCore = tunStopCoreBestEffort
+	}
+	if err := stopRootCore(env); err != nil {
 		return tunRollback(ctx, home, env, settings, preApplied, preTun, false)
 	}
 	if err := env.spawnStart(); err != nil {

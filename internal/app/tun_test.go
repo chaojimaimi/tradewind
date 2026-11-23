@@ -28,7 +28,10 @@ type fakeTunService struct {
 	startOK      bool
 	startPID     int
 	startRefused string
-	stopErr      error
+	// stopErr 非空 = stop 的传输层失败（服务不可达）；stopRefused 非空 = 服务可达
+	// 但拒绝（ok:false）——两条路径在 tun off 的处置不同（fold-in 2 逃生口）。
+	stopErr     error
+	stopRefused string
 }
 
 func (f *fakeTunService) Start(gen int) (service.Response, error) {
@@ -50,6 +53,9 @@ func (f *fakeTunService) Stop() (service.Response, error) {
 	f.stops++
 	if f.stopErr != nil {
 		return service.Response{}, f.stopErr
+	}
+	if f.stopRefused != "" {
+		return service.Response{OK: false, Error: f.stopRefused}, nil
 	}
 	return service.Response{OK: true}, nil
 }
@@ -85,6 +91,7 @@ func newTunTestEnv(t *testing.T) (tunEnv, *fakeTunService, *int, *int, *fakeNetR
 	env := tunEnv{
 		serviceClient:        func(time.Duration) (tunServiceClientT, error) { return svc, nil },
 		serviceAnchorExists:  func() bool { return true },
+		legacyResidueExists:  func() bool { return false },
 		helperMatchesCurrent: func() bool { return true },
 		coreMatchesCurrent:   func(paths.Home) bool { return true },
 		serviceReachable:     func() bool { return true },

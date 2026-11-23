@@ -238,11 +238,15 @@ func (s *Server) coreManaged() bool {
 // 调用方须持 s.mu。
 func (s *Server) spawnCore() error {
 	// core-service.log 预创建 0644（R2：用户可读诊断面；Manager 以 O_APPEND 打开
-	// 已存在文件，权限保持——"服务端尊重已存在文件权限"）
+	// 已存在文件，权限保持——"服务端尊重已存在文件权限"）。
+	// O_NOFOLLOW（batch6 真机 fold-in 2）：与 core.Manager 的日志打开同一道闸——
+	// 该路径在用户可写的数据目录，若被换成符号链接，跟随打开会让 root 在目标处
+	// 建出空文件。被拒（ELOOP）时预创建静默跳过，随后的 Manager.Spawn 会以明确的
+	// "symbolic link" 错误拒绝启动。
 	if err := os.MkdirAll(filepath.Dir(s.conf.Log), 0o755); err != nil {
 		return fmt.Errorf("service: mkdir log dir: %w", err)
 	}
-	if f, err := os.OpenFile(s.conf.Log, os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+	if f, err := os.OpenFile(s.conf.Log, os.O_CREATE|os.O_WRONLY|syscall.O_NOFOLLOW, 0o644); err == nil {
 		f.Close()
 	}
 	mgr := core.NewManager(core.Config{

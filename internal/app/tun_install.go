@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/chaojimaimi/tradewind/internal/paths"
+	"github.com/chaojimaimi/tradewind/internal/store"
 )
 
 // tunElevateTimeout 提权执行的有界等待：弹窗等待含用户输入 + 安装脚本执行自测与
@@ -33,13 +34,16 @@ func TunInstall(home paths.Home) error {
 
 // TunReinstall 编排 `tradewind tun reinstall`（R4 陈旧修复）：强制重拷 helper + 内核
 // root 副本 + helper install + bootstrap（重装前服务 stop 收敛 root core，失败仅
-// 警告——bootout/bootstrap 由 helper install 幂等处理）。
+// 警告——bootout/bootstrap 由 helper install 幂等处理）。TUN 开启期间，安装验证
+// 通过后把会话重收敛回来（见 tunReconvergeTunSession）。
 func TunReinstall(home paths.Home) error {
 	return tunInstallWith(home, productionTunEnv(home), true)
 }
 
 // TunUninstall 编排 `tradewind tun uninstall`：服务 stop（先停 root core）→ 提权
-// bootout + 清 plist/日志/锚文件/遗留 helper/各候选三文件。未安装 → no-op。
+// bootout + 清 plist/日志/锚文件/遗留 helper/各候选三文件。锚与遗留残留都不在 →
+// no-op；只有遗留残留（失败安装留下的 root 属主 helper、没有 service.json）同样
+// 走提权清理。
 func TunUninstall(home paths.Home) error {
 	return tunUninstallWith(home, productionTunEnv(home))
 }
@@ -68,11 +72,52 @@ func tunInstallWith(home paths.Home, env tunEnv, force bool) error {
 		return err
 	}
 	fmt.Println("tun: privileged service installed")
+	// 只有 reinstall 重收敛：`tun on` 的前置安装（force=false）自身随后就会走
+	// converge，且它已持有 mutation lock——在这里再收敛会双重重启并自锁。
+	if force {
+		if err := tunReconvergeTunSession(home, env); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// tunReconvergeTunSession 重装后的 TUN 会话重收敛（真机 fold-in 2）：helper install
+// 会 bootout 旧 daemon，root core 随之停下，而 start 进程的健康轮询只通知不自愈
+// ——TUN 开启期间重装后会话就此断掉。settings 说 TUN 开 → 复用既有缝隙
+// stopStart → spawnStart → waitServiceCore 把会话拉回来（不写 settings、不碰
+// sysproxy）；未开启 → 无动作。任一步失败 → 报错并给出恢复指引。
+func tunReconvergeTunSession(home paths.Home, env tunEnv) error {
+	settings, err := store.LoadSettings(home)
+	if err != nil {
+		return err
+	}
+	if !settings.TunEnabled {
+		return nil
+	}
+	// 与 tun on/off 同一把 mutation lock：重收敛期间并发的切换编排串行化而非交错
+	lock, err := AcquireMutationLock(home)
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+	const guidance = "请执行 `tradewind tun off && tradewind tun on` 恢复会话"
+	if err := env.stopStart(home); err != nil {
+		return fmt.Errorf("app: 重装后重收敛 TUN 会话失败（停止旧 start）: %v；%s", err, guidance)
+	}
+	if err := env.spawnStart(); err != nil {
+		return fmt.Errorf("app: 重装后重收敛 TUN 会话失败（拉起 start）: %v；%s", err, guidance)
+	}
+	if _, err := tunWaitReady(context.Background(), home, env, true); err != nil {
+		return fmt.Errorf("app: 重装后重收敛 TUN 会话失败（TUN core 未就绪）: %v；%s", err, guidance)
+	}
+	fmt.Println("tun: TUN session re-converged after reinstall")
 	return nil
 }
 
 func tunUninstallWith(home paths.Home, env tunEnv) error {
-	if !env.serviceAnchorExists() {
+	anchor := env.serviceAnchorExists()
+	if !anchor && !env.legacyResidueExists() {
 		fmt.Println("tun: service is not installed; nothing to do")
 		return nil
 	}
@@ -82,7 +127,11 @@ func tunUninstallWith(home paths.Home, env tunEnv) error {
 	if err := tunRunElevated(home, env, tunUninstallScript()); err != nil {
 		return err
 	}
-	fmt.Println("tun: privileged service uninstalled")
+	if anchor {
+		fmt.Println("tun: privileged service uninstalled")
+	} else {
+		fmt.Println("tun: legacy helper residue removed")
+	}
 	return nil
 }
 

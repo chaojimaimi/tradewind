@@ -42,6 +42,17 @@ func serviceConfigInstalled() bool {
 	return err == nil
 }
 
+// tunLegacyHelperPath 是遗留位置的 helper 路径（缝隙：单测指向临时文件，绝不触真
+// 系统目录）。
+var tunLegacyHelperPath = service.HelperInstallPath
+
+// legacyHelperResidueExists 遗留位置残留检测。Lstat 而非 Stat：悬空链接也算残留
+// （卸载脚本的 rm -f 能清）。
+func legacyHelperResidueExists() bool {
+	_, err := os.Lstat(tunLegacyHelperPath)
+	return err == nil
+}
+
 // startCoreViaService startCore TUN 分流（§2.1 分流 1）：合成后向服务请求 start
 // （携带 generation——postHandshake 同源自增，§3.1 携带方统一=start 进程）。
 // 服务端同步握手完成才返回；再 /version 双确认收口。返回 root pid（postHandshake
@@ -106,6 +117,32 @@ func tunStopCoreNoOp(env tunEnv) error {
 	resp, err := cl.Stop()
 	if err != nil {
 		fmt.Printf("tun: service unreachable during rollback stop (%v); treated as no-op\n", err)
+		return nil
+	}
+	if !resp.OK {
+		return errors.New(resp.Error)
+	}
+	return nil
+}
+
+// tunStopCoreBestEffort `tun off` 路径的尽力而为 stop（逃生口，真机 fold-in 2）：
+// 服务不可达（客户端构造失败/拨号失败）→ 没有可请求停下的 root core，打一行
+// warning 继续收敛。否则 off 会走回滚（preTun=true）去重拉一个服务不可达时注定
+// 拉不起的 TUN 会话，用户被困在"配置说 TUN 开、实际没有任何代理"的态。
+// 服务可达但拒绝（!resp.OK）仍视为失败（调用方走回滚）。`tun on` 不走这里——
+// 不可达照旧回滚，行为不变。
+func tunStopCoreBestEffort(env tunEnv) error {
+	if !env.serviceAnchorExists() {
+		return nil
+	}
+	cl, err := env.serviceClient(tunStopRequestTimeout)
+	if err != nil {
+		fmt.Printf("warning: 特权服务不可达（%v），无法请求停止 root core；继续关闭 TUN\n", err)
+		return nil
+	}
+	resp, err := cl.Stop()
+	if err != nil {
+		fmt.Printf("warning: 特权服务不可达（%v），无法请求停止 root core；继续关闭 TUN\n", err)
 		return nil
 	}
 	if !resp.OK {

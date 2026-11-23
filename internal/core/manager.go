@@ -89,9 +89,9 @@ func (m *Manager) Spawn() error {
 	if err := os.MkdirAll(filepath.Dir(m.cfg.LogPath), 0o700); err != nil {
 		return fmt.Errorf("core: mkdir log dir: %w", err)
 	}
-	logFile, err := os.OpenFile(m.cfg.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	logFile, err := openLogFile(m.cfg.LogPath)
 	if err != nil {
-		return fmt.Errorf("core: open log: %w", err)
+		return err
 	}
 	cmd := exec.Command(m.cfg.BinPath,
 		"-d", m.cfg.DataDir,
@@ -278,14 +278,35 @@ func (m *Manager) TailLog() string {
 	return tailFile(m.cfg.LogPath, logTailSize)
 }
 
+// openLogFile 打开内核日志（O_APPEND 追加写）。
+// WHY O_NOFOLLOW（batch6 真机 fold-in 2）：特权服务以 root 打开用户数据目录里的
+// core-service.log——该路径若被换成指向系统文件的符号链接，跟随打开 = root 往
+// 目标追加日志。O_NOFOLLOW 由内核拒绝（ELOOP），不依赖调用前的 Lstat（那有
+// TOCTOU 窗口）。只作用于路径末段，普通文件零回归。
+func openLogFile(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		if errors.Is(err, syscall.ELOOP) {
+			return nil, fmt.Errorf("core: open log: %s is a symbolic link (refusing to follow)", path)
+		}
+		return nil, fmt.Errorf("core: open log: %w", err)
+	}
+	return f, nil
+}
+
 // rotateLog 超过 logRotateSize 时将日志轮转为 .1（保留 1 份，直接覆盖旧 .1）。
+// Lstat 判符号链接并直接拒绝：跟随 Stat 会读到目标的大小，随后 Rename 移走的是
+// 链接本身——以 root 对用户可控路径做这些动作都不该发生。
 func rotateLog(path string) error {
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("core: stat log: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("core: log path %s is a symbolic link (refusing to rotate)", path)
 	}
 	if info.Size() <= logRotateSize {
 		return nil
@@ -296,9 +317,11 @@ func rotateLog(path string) error {
 	return nil
 }
 
-// tailFile 读文件末尾 n 字节。
+// tailFile 读文件末尾 n 字节。O_NOFOLLOW：日志内容会进错误信息（fail-fast /
+// giveup 的 log tail）——特权服务下若跟随符号链接，root 专读文件的内容会被带进
+// 返回给用户态的错误里。读不了只表现为"日志不可用"，不影响主流程。
 func tailFile(path string, n int64) string {
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return fmt.Sprintf("(log unavailable: %v)", err)
 	}

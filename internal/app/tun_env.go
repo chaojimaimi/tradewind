@@ -27,6 +27,10 @@ type tunEnv struct {
 	serviceClient func(time.Duration) (tunServiceClientT, error)
 	// serviceAnchorExists service.json 锚存在性（安装判据/兜底 stop 判据）。
 	serviceAnchorExists func() bool
+	// legacyResidueExists 遗留位置（/Library/PrivilegedHelperTools/<label>）残留检测
+	// （Lstat）。真机 fold-in 2：失败的安装只留下这一件 root 属主文件、没有锚——
+	// uninstall 的判据须把它算进来，否则残留永远清不掉。
+	legacyResidueExists func() bool
 	// helperMatchesCurrent 安装位 helper（锚 helper_path）sha256 == 当前 CLI（R4 陈旧检测）。
 	helperMatchesCurrent func() bool
 	// coreMatchesCurrent root 内核副本（锚 core_bin）sha256 == 数据目录 bin/mihomo
@@ -58,6 +62,7 @@ func productionTunEnv(home paths.Home) tunEnv {
 	return tunEnv{
 		serviceClient:        func(timeout time.Duration) (tunServiceClientT, error) { return tunNewClient(timeout) },
 		serviceAnchorExists:  serviceConfigInstalled,
+		legacyResidueExists:  legacyHelperResidueExists,
 		helperMatchesCurrent: helperBinaryMatches,
 		coreMatchesCurrent:   coreBinaryMatches,
 		serviceReachable:     tunServiceReachable,
