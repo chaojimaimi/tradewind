@@ -86,6 +86,9 @@ func newTunTestEnv(t *testing.T) (tunEnv, *fakeTunService, *int, *int, *fakeNetR
 		serviceClient:        func(time.Duration) (tunServiceClientT, error) { return svc, nil },
 		serviceAnchorExists:  func() bool { return true },
 		helperMatchesCurrent: func() bool { return true },
+		coreMatchesCurrent:   func(paths.Home) bool { return true },
+		serviceReachable:     func() bool { return true },
+		waitForServiceReady:  func() error { return nil },
 		elevate:              func(string) error { return nil },
 		stopStart: func(paths.Home) error {
 			stopStarts++
@@ -499,6 +502,10 @@ func TestTunStatusLines(t *testing.T) {
 	if !strings.Contains(joined, "core pid=4242") {
 		t.Fatalf("status missing service core pid:\n%s", joined)
 	}
+	// `{}` 锚不可用 → 陈旧项如实报"unknown"并指引 reinstall（不假装最新）
+	if !strings.Contains(joined, "helper:     unknown") || !strings.Contains(joined, "tun reinstall") {
+		t.Fatalf("status must flag an unreadable anchor instead of pretending it is current:\n%s", joined)
+	}
 }
 
 // TestTunInstallIdempotentNoOp 已装且 helper 最新 → no-op（零提权弹窗）。
@@ -527,53 +534,6 @@ func TestTunUninstallStopsServiceFirst(t *testing.T) {
 	}
 	if svc.stopCount() != 1 {
 		t.Fatalf("service stops = %d, want exactly 1 (stop before uninstall)", svc.stopCount())
-	}
-}
-
-// TestTunInstallScriptContent 安装脚本纯函数断言（§3.3）：rm+cp 新 inode（P2-1——
-// KeepAlive 恒运行下 cp 原地覆写运行中 helper = ETXTBSY）+ root 属主 +
-// 内联 argv + 单引号转义（含空格用户名场景）。
-func TestTunInstallScriptContent(t *testing.T) {
-	script := tunInstallScript("/Applications/Tradewind.app/cli",
-		"/Users/le e/Library/Application Support/tradewind", 501)
-	for _, want := range []string{
-		"mkdir -p '/Library/PrivilegedHelperTools'",
-		"rm -f '/Library/PrivilegedHelperTools/io.github.chaojimaimi.tradewind.service'",
-		"cp '/Applications/Tradewind.app/cli' '/Library/PrivilegedHelperTools/io.github.chaojimaimi.tradewind.service'",
-		"chown root:wheel '/Library/PrivilegedHelperTools/io.github.chaojimaimi.tradewind.service'",
-		"chmod 0755 '/Library/PrivilegedHelperTools/io.github.chaojimaimi.tradewind.service'",
-		"install --data-dir '/Users/le e/Library/Application Support/tradewind' --data-uid 501",
-	} {
-		if !strings.Contains(script, want) {
-			t.Fatalf("script missing %q:\n%s", want, script)
-		}
-	}
-	// rm 必须先于 cp（新 inode 语义）
-	if strings.Index(script, "rm -f") > strings.Index(script, "cp ") {
-		t.Fatalf("rm must precede cp:\n%s", script)
-	}
-	if strings.Count(script, "\n") != 6 {
-		t.Fatalf("script must be exactly 6 lines (minimal exposure):\n%s", script)
-	}
-}
-
-// TestTunUninstallScriptContent 卸载脚本：bootout + 五路径 rm（helper/plist/锚/pid/
-// 服务日志——P3-2 残留清理）。
-func TestTunUninstallScriptContent(t *testing.T) {
-	script := tunUninstallScript()
-	if !strings.Contains(script, "launchctl bootout system/io.github.chaojimaimi.tradewind.service") {
-		t.Fatalf("script missing bootout:\n%s", script)
-	}
-	for _, want := range []string{
-		"rm -f '/Library/PrivilegedHelperTools/io.github.chaojimaimi.tradewind.service'",
-		"rm -f '/Library/LaunchDaemons/io.github.chaojimaimi.tradewind.service.plist'",
-		"rm -f '/Library/Application Support/Tradewind/service.json'",
-		"rm -f '/Library/Application Support/Tradewind/core.pid'",
-		"rm -f '/Library/Logs/tradewind-service.log'",
-	} {
-		if !strings.Contains(script, want) {
-			t.Fatalf("script missing %q:\n%s", want, script)
-		}
 	}
 }
 

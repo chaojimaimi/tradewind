@@ -120,6 +120,7 @@ func SelfUpdateCore(ctx context.Context, home paths.Home, env selfUpdateEnv) (st
 	// 步 5（未运行分支）：换盘 + sidecar 即可，无回滚触发点（评审 P3）
 	if !wasRunning {
 		fmt.Fprintln(env.progress, "core replaced (sidecar rewritten); takes effect on next start（下次启动生效）")
+		tunCoreStaleReminder(env.progress)
 		return tag, nil
 	}
 	// 步 5：拉回内核（同主体步 7 分支）→ /version 握手且版本 == tag
@@ -133,7 +134,18 @@ func SelfUpdateCore(ctx context.Context, home paths.Home, env selfUpdateEnv) (st
 		return "", coreRollback(ctx, env, home, hasPrev, prev, prevSidecar, bringBack)
 	}
 	fmt.Fprintf(env.progress, "core self-updated -> %s, core restarted\n", tag)
+	tunCoreStaleReminder(env.progress)
 	return tag, nil
+}
+
+// tunCoreStaleReminder self-update --core 真正换盘成功后的提醒（batch6 真机
+// fold-in）：特权服务已安装时，其 root 内核副本仍是旧版（tun on 前置检查会拦），
+// 提示 reinstall。"已是最新"的早退不提醒（没有换盘）。
+func tunCoreStaleReminder(w io.Writer) {
+	if !serviceConfigInstalled() {
+		return
+	}
+	fmt.Fprintln(w, "note: 特权服务已安装——其内核副本仍是旧版，请执行 `tradewind tun reinstall`")
 }
 
 // coreIsUpstreamVersion 判断当前内核是否已是上游 tag：运行中经 /version 探针；

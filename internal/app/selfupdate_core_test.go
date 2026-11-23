@@ -148,6 +148,7 @@ func (c *coreFixture) upstreamClient() *release.Client {
 
 func TestSelfUpdateCoreSwapsSidecarAndRestarts(t *testing.T) {
 	c := newCoreFixture(t)
+	pinServiceAnchor(t, false) // 未装特权服务：成功路径不得出 reinstall 提醒
 	env := c.env()
 	env.reachable = func(paths.Home) bool { return true }
 	env.autostartOn = func() bool { return true }
@@ -157,6 +158,9 @@ func TestSelfUpdateCoreSwapsSidecarAndRestarts(t *testing.T) {
 	}
 	if tag != upstreamTag {
 		t.Fatalf("tag = %q", tag)
+	}
+	if body := env.progress.(*strings.Builder).String(); strings.Contains(body, "tun reinstall") {
+		t.Fatalf("no reinstall reminder expected without the privileged service: %q", body)
 	}
 	if got := strings.Join(c.f.log, ","); got != "stop,kickstart" {
 		t.Fatalf("call log = %q, want stop,kickstart", got)
@@ -177,6 +181,7 @@ func TestSelfUpdateCoreSwapsSidecarAndRestarts(t *testing.T) {
 
 func TestSelfUpdateCoreNotRunningOnlySwaps(t *testing.T) {
 	c := newCoreFixture(t)
+	pinServiceAnchor(t, false)
 	env := c.env()
 	env.reachable = func(paths.Home) bool { return false }
 	tag, err := SelfUpdateCore(context.Background(), c.f.home, env)
@@ -188,6 +193,9 @@ func TestSelfUpdateCoreNotRunningOnlySwaps(t *testing.T) {
 	}
 	if len(c.f.log) != 0 {
 		t.Fatalf("no stop/restart expected: %v", c.f.log)
+	}
+	if body := env.progress.(*strings.Builder).String(); strings.Contains(body, "tun reinstall") {
+		t.Fatalf("no reinstall reminder expected without the privileged service: %q", body)
 	}
 	if err := core.VerifyBinary(c.f.home.Bin(), c.f.home.Sidecar()); err != nil {
 		t.Fatalf("VerifyBinary: %v", err)
@@ -239,6 +247,7 @@ func TestSelfUpdateCoreAlreadyLatestViaProbe(t *testing.T) {
 	if err := os.WriteFile(c.coreBin, []byte(fakeCoreScript(upstreamTag)), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	pinServiceAnchor(t, true) // 已装特权服务，但"已是最新"没有换盘
 	env := c.env()
 	env.reachable = func(paths.Home) bool { return true }
 	tag, err := SelfUpdateCore(context.Background(), c.f.home, env)
@@ -249,6 +258,40 @@ func TestSelfUpdateCoreAlreadyLatestViaProbe(t *testing.T) {
 		if strings.Contains(path, "assets/") {
 			t.Fatalf("no download expected: %q", path)
 		}
+	}
+	if body := env.progress.(*strings.Builder).String(); strings.Contains(body, "tun reinstall") {
+		t.Fatalf("already-latest must not remind reinstall (nothing was replaced): %q", body)
+	}
+}
+
+// pinServiceAnchor 把特权服务锚探测钉到确定状态（存在/不存在）——reinstall 提醒
+// 的有无不随真机是否装了服务而变。
+func pinServiceAnchor(t *testing.T, installed bool) {
+	t.Helper()
+	anchor := filepath.Join(t.TempDir(), "service.json")
+	if installed {
+		if err := os.WriteFile(anchor, []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := tunServiceConfigPath
+	tunServiceConfigPath = anchor
+	t.Cleanup(func() { tunServiceConfigPath = old })
+}
+
+// TestSelfUpdateCoreRemindsTunReinstallWhenServiceInstalled 换盘成功且特权服务已
+// 安装 → 一行 reinstall 提醒（服务的 root 内核副本仍是旧版，tun on 前置检查会拦）。
+func TestSelfUpdateCoreRemindsTunReinstallWhenServiceInstalled(t *testing.T) {
+	c := newCoreFixture(t)
+	pinServiceAnchor(t, true)
+	env := c.env()
+	env.reachable = func(paths.Home) bool { return false }
+	if _, err := SelfUpdateCore(context.Background(), c.f.home, env); err != nil {
+		t.Fatalf("SelfUpdateCore: %v", err)
+	}
+	body := env.progress.(*strings.Builder).String()
+	if !strings.Contains(body, "tradewind tun reinstall") {
+		t.Fatalf("progress = %q, want the reinstall reminder", body)
 	}
 }
 

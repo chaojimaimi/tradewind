@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -256,8 +255,9 @@ func tunProbeServiceCore(ctx context.Context, home paths.Home) (int, error) {
 	return resp.PID, nil
 }
 
-// TunStatus 编排 `tradewind tun status`（§2.2）：合并四方——settings.tun_enabled /
-// 服务 status（未安装=清晰降级文案）/ helper sha256 陈旧提示（R4）/ core.sock 健康。
+// TunStatus 编排 `tradewind tun status`（§2.2）：合并——settings.tun_enabled /
+// 服务 status（未安装=清晰降级文案）/ helper 与 root 内核副本两项陈旧状态（R4）/
+// core.sock 健康。
 func TunStatus(home paths.Home) error {
 	lines, err := tunStatusLines(home)
 	if err != nil {
@@ -280,9 +280,7 @@ func tunStatusLines(home paths.Home) ([]string, error) {
 		lines = append(lines, "service:    not installed（`tradewind tun install` 安装特权服务；`tun on` 会自动安装）")
 	} else {
 		lines = append(lines, tunServiceStatusLine()...)
-		if !helperBinaryMatches() {
-			lines = append(lines, "warning: 服务二进制已陈旧（self-update 后），请执行 `tradewind tun reinstall`")
-		}
+		lines = append(lines, tunBinaryStatusLines(home)...)
 	}
 	if CoreReachable(home) {
 		lines = append(lines, "core.sock:  healthy")
@@ -305,22 +303,4 @@ func tunServiceStatusLine() []string {
 		return []string{fmt.Sprintf("service:    running, core pid=%d version=%s", resp.PID, resp.Version)}
 	}
 	return []string{"service:    running, no managed core"}
-}
-
-// helperBinaryMatches 比对安装位 helper 与当前 CLI 的 sha256（R4 self-update 陈旧
-// 检测）；任一侧缺失/不可读 = 不匹配（走安装/重装指引）。
-func helperBinaryMatches() bool {
-	exe, err := os.Executable()
-	if err != nil {
-		return false
-	}
-	want, err := sha256SumFile(exe)
-	if err != nil {
-		return false
-	}
-	got, err := sha256SumFile(service.HelperInstallPath)
-	if err != nil {
-		return false
-	}
-	return strings.EqualFold(want, got)
 }

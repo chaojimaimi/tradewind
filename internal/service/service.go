@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -37,13 +39,39 @@ const (
 	DefaultCorePIDPath = DefaultConfigDir + "/core.pid"
 	// DaemonLabel 是 launchd daemon 标识（对齐 agent 命名空间 io.github.chaojimaimi.*）。
 	DaemonLabel = "io.github.chaojimaimi.tradewind.service"
-	// HelperInstallPath 是提权拷贝后的 helper 落点（root:wheel 0755）。
+	// HelperInstallPath 是旧布局的 helper 落点——降为「遗留位置」（batch6 真机首测：
+	// Gatekeeper/AppleSystemPolicy 对 /Library/PrivilegedHelperTools 做执行评估，
+	// ad-hoc 签名二进制被 SIGKILL，helper install 根本没启动）。不再落位；安装与
+	// 卸载脚本均清理它。标识符保留原名以免无谓改名。
 	HelperInstallPath = "/Library/PrivilegedHelperTools/" + DaemonLabel
+	// HelperFileName 是执行目录内的 helper 副本文件名。
+	HelperFileName = "tradewind-service"
 	// DaemonPlistPath 是 LaunchDaemon plist 落点。
 	DaemonPlistPath = "/Library/LaunchDaemons/" + DaemonLabel + ".plist"
 	// DaemonLogPath 是服务自身 stdout/stderr（plist StandardOutPath）。
 	DaemonLogPath = "/Library/Logs/tradewind-service.log"
 )
+
+// LibexecDir 是第二候选的父目录（可能由安装脚本新建；卸载时仅在空时回收——
+// /opt 等既有系统目录绝不回收）。
+const LibexecDir = "/usr/local/libexec"
+
+// ExecDirCandidates 返回执行目录候选（按序探测，首个通过执行自测者选定；返回
+// 副本防调用方改动）。真机实证 Gatekeeper/ASP 对 /Library/PrivilegedHelperTools
+// 拦截 ad-hoc 二进制，而同一二进制在 /opt/homebrew、/tmp、~/Library 下可执行——
+// 哪个系统位置放行只能执行时探测，故脚本对每个候选拷贝后实跑 `version`/`-v`
+// 自测（batch6 真机 fold-in）。执行目录内放 helper 副本 + 内核的 root 属主副本
+// （bin/mihomo、bin/mihomo.sha256）。
+func ExecDirCandidates() []string {
+	return []string{DefaultConfigDir, LibexecDir + "/tradewind", "/opt/tradewind"}
+}
+
+// HelperPathIn / CorePathIn / SidecarPathIn 是执行目录内三个文件的落点。
+func HelperPathIn(execDir string) string { return filepath.Join(execDir, HelperFileName) }
+func CorePathIn(execDir string) string   { return filepath.Join(execDir, "bin", "mihomo") }
+func SidecarPathIn(execDir string) string {
+	return filepath.Join(execDir, "bin", "mihomo.sha256")
+}
 
 // 服务请求动作（协议仅此三个；未知 action 协议层拒绝）。
 const (
@@ -95,12 +123,19 @@ func DecodeRequest(line []byte) (Request, error) {
 type ConfigFile struct {
 	AllowedUIDs []int  `json:"allowed_uids"`
 	DataDir     string `json:"data_dir"`
-	CoreBin     string `json:"core_bin"`
-	Sidecar     string `json:"sidecar"`
-	Runtime     string `json:"runtime"`
-	Sock        string `json:"sock"`
-	Log         string `json:"log"`
-	DataUID     int    `json:"data_uid"`
+	// HelperPath 执行目录内的 helper 副本（plist ProgramArguments[0]；CLI 陈旧检测的
+	// 比对来源）。旧布局锚缺此键——服务运行期不消费它，CLI 侧按陈旧处理。
+	HelperPath string `json:"helper_path"`
+	// CoreBin/Sidecar 是内核的 **root 属主副本**（执行目录下），绝不指向用户可写的
+	// data_dir。LPE 修复（batch6 真机 fold-in）：旧布局指向 data_dir/bin——二进制与
+	// 校验文件均用户可写，任何用户态进程替换二者再 stop/start 即可以 root 执行任意
+	// 代码（sha256 校验挡不住：校验文件本身用户可写）。validate 拒绝该形态。
+	CoreBin string `json:"core_bin"`
+	Sidecar string `json:"sidecar"`
+	Runtime string `json:"runtime"`
+	Sock    string `json:"sock"`
+	Log     string `json:"log"`
+	DataUID int    `json:"data_uid"`
 }
 
 // validate 锚完整性校验（服务启动闸——缺字段宁可 exit 1 也不带病运行）。
@@ -116,7 +151,22 @@ func (c ConfigFile) validate() error {
 	if c.DataUID <= 0 {
 		return errors.New("service: service.json has invalid data_uid")
 	}
+	// LPE 纵深防御：root 执行的内核副本不得落在用户可写的 data_dir 之内
+	// （旧布局锚在此被拒 → 服务 exit 1 fail-closed，用户须 tun reinstall）。
+	if pathWithin(c.CoreBin, c.DataDir) {
+		return errors.New("service: core_bin must not live inside data_dir (user-writable; root must run the root-owned copy)")
+	}
 	return nil
+}
+
+// pathWithin 词法包含判断：child 是否位于 parent 目录之内（".." 逃逸与不同根
+// 前缀均视为不在其内）。
+func pathWithin(child, parent string) bool {
+	rel, err := filepath.Rel(filepath.Clean(parent), filepath.Clean(child))
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 // LoadConfigFile 读取并校验 service.json。

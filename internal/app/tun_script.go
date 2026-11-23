@@ -1,0 +1,192 @@
+// tun_script.go：提权脚本的纯函数生成器（批⑥ §3.3；真机 fold-in 改布局）。
+//
+// 产物是 POSIX sh（经 /bin/sh 执行，不用数组/local 等 bashism——候选路径含空格，
+// 不走 "空格分隔字符串遍历"）。系统路径经 tunScriptLayout 注入：生产=固定常量，
+// 行为测试指向临时目录（绝不触碰真实系统目录/提权/launchd）。
+package app
+
+import (
+	"fmt"
+	"path/filepath"
+	"strings"
+
+	"github.com/chaojimaimi/tradewind/internal/service"
+)
+
+// tunScriptLayout 是提权脚本涉及的系统路径。
+type tunScriptLayout struct {
+	// anchorDir 锚目录（service.json/core.pid；同时也是第一执行目录候选）。
+	anchorDir string
+	// legacy 遗留 helper 位置（/Library/PrivilegedHelperTools/<label>）——旧布局
+	// 落点，受 Gatekeeper 执行评估拦截；不再落位，安装/卸载脚本均清理。
+	legacy string
+	// candidates 执行目录候选（按序探测；每个内放 tradewind-service、bin/mihomo、
+	// bin/mihomo.sha256 三个 root 属主文件）。
+	candidates []string
+
+	// 以下仅卸载脚本使用。
+	plist     string   // LaunchDaemon plist
+	log       string   // 服务日志
+	corePID   string   // 锚目录内的 core.pid（与 service.json 同为锚文件）
+	rmdirDirs []string // 可能由安装脚本新建的父目录（仅在空时回收）
+}
+
+// productionTunScriptLayout 生产布局（路径全部来自 service 包常量）。
+func productionTunScriptLayout() tunScriptLayout {
+	return tunScriptLayout{
+		anchorDir:  service.DefaultConfigDir,
+		legacy:     service.HelperInstallPath,
+		candidates: service.ExecDirCandidates(),
+		plist:      service.DaemonPlistPath,
+		log:        service.DaemonLogPath,
+		corePID:    service.DefaultCorePIDPath,
+		rmdirDirs:  []string{service.LibexecDir},
+	}
+}
+
+// scriptLines 把脚本切成非空行（内容断言用）。
+func scriptLines(script string) []string {
+	var out []string
+	for _, line := range strings.Split(script, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// 候选清理函数（两脚本共用）：一律显式文件路径——红线"禁止 rm -rf"；目录仅在
+// 空时移除（锚目录若还有别的文件则保留）。
+const tunScriptCleanHelper = `
+clean_candidate() {
+	rm -f "$1/tradewind-service" "$1/bin/mihomo" "$1/bin/mihomo.sha256"
+	rmdir "$1/bin" 2>/dev/null
+	rmdir "$1" 2>/dev/null
+	return 0
+}
+`
+
+// tunInstallScript 生成生产安装提权脚本（纯函数）。
+func tunInstallScript(cliPath, dataDir string, dataUID int) string {
+	return tunInstallScriptFor(cliPath, dataDir, dataUID, productionTunScriptLayout())
+}
+
+// tunInstallScriptFor 生成安装提权脚本（纯函数）：
+//
+//	⓪ 源文件存在性预检（缺失 → exit 4，不误报成"系统策略拦截"）
+//	① 锚目录（root:wheel 0755）+ 清理遗留位置 helper
+//	② 逐候选：mkdir bin → rm+cp 三文件 → root:wheel → 0755/0755/0644 → 执行自测
+//	   （`tradewind-service version` 与 `bin/mihomo -v` 均成功才算该位置可用）；
+//	   被拦 → stderr 一行 + 清理该候选 + 下一处；全部被拦 → stderr 说明 + exit 3
+//	③ 清理其余候选里的陈旧三文件（历史安装可能落在别的候选）
+//	④ `<exec-dir>/tradewind-service install --data-dir --data-uid --exec-dir`
+func tunInstallScriptFor(cliPath, dataDir string, dataUID int, lay tunScriptLayout) string {
+	q := shQuote
+	var b strings.Builder
+	b.WriteString("#!/bin/sh\n")
+	b.WriteString("# tradewind 特权服务安装脚本（自动生成；经 osascript 以 root 执行；POSIX sh）\n")
+	b.WriteString("set -u\n")
+	b.WriteString("umask 022\n\n")
+	fmt.Fprintf(&b, "CLI=%s\n", q(cliPath))
+	fmt.Fprintf(&b, "DATA=%s\n", q(dataDir))
+	fmt.Fprintf(&b, "DATA_UID=%d\n", dataUID)
+	b.WriteString(`CORE="$DATA/bin/mihomo"
+SIDECAR="$DATA/bin/mihomo.sha256"
+`)
+	fmt.Fprintf(&b, "ANCHOR=%s\n", q(lay.anchorDir))
+	fmt.Fprintf(&b, "LEGACY=%s\n", q(lay.legacy))
+	b.WriteString("EXE=''\n\n")
+	b.WriteString(`
+fail() {
+	echo "tradewind: $1" >&2
+	exit "$2"
+}
+`)
+	b.WriteString(tunScriptCleanHelper)
+	b.WriteString(`
+# ⓪ 源文件预检：缺失属用户侧问题，须与"位置被系统策略拦截"区分开
+[ -f "$CLI" ] || fail "缺少 CLI 二进制 $CLI" 4
+[ -f "$CORE" ] || fail "数据目录缺少内核 $CORE（内核尚未安装？）" 4
+[ -f "$SIDECAR" ] || fail "数据目录缺少内核校验文件 $SIDECAR" 4
+
+# ① 锚目录 + 遗留位置清理
+mkdir -p "$ANCHOR" || fail "无法创建锚目录 $ANCHOR" 1
+chown root:wheel "$ANCHOR" || fail "无法设置锚目录属主 $ANCHOR" 1
+chmod 0755 "$ANCHOR" || fail "无法设置锚目录权限 $ANCHOR" 1
+rm -f "$LEGACY"
+
+# ② 单个候选的落位 + 执行自测
+try_candidate() {
+	CAND="$1"
+	mkdir -p "$CAND/bin" || return 1
+	chown root:wheel "$CAND" "$CAND/bin" || return 1
+	chmod 0755 "$CAND" "$CAND/bin" || return 1
+	# rm+cp 换新 inode（cp 原地覆写运行中二进制 = ETXTBSY）
+	rm -f "$CAND/tradewind-service" "$CAND/bin/mihomo" "$CAND/bin/mihomo.sha256"
+	if ! cp "$CLI" "$CAND/tradewind-service" || ! cp "$CORE" "$CAND/bin/mihomo" || ! cp "$SIDECAR" "$CAND/bin/mihomo.sha256"; then
+		echo "tradewind: 拷贝到 $CAND 失败，尝试下一处" >&2
+		clean_candidate "$CAND"
+		return 1
+	fi
+	chown root:wheel "$CAND/tradewind-service" "$CAND/bin/mihomo" "$CAND/bin/mihomo.sha256" || { clean_candidate "$CAND"; return 1; }
+	chmod 0755 "$CAND/tradewind-service" "$CAND/bin/mihomo" || { clean_candidate "$CAND"; return 1; }
+	chmod 0644 "$CAND/bin/mihomo.sha256" || { clean_candidate "$CAND"; return 1; }
+	# 执行自测：系统策略（Gatekeeper/ASP）按位置评估未公证二进制——两个二进制
+	# 都能执行才算该位置可用；被 SIGKILL 的进程在这里表现为非零退出
+	if "$CAND/tradewind-service" version >/dev/null 2>&1 && "$CAND/bin/mihomo" -v >/dev/null 2>&1; then
+		EXE="$CAND"
+		echo "tradewind: 安装位置 $CAND" >&2
+		return 0
+	fi
+	echo "tradewind: $CAND 被系统策略拦截，尝试下一处" >&2
+	clean_candidate "$CAND"
+	return 1
+}
+
+`)
+	b.WriteString("# ② 逐候选探测（顺序固定）；全部被拦 → exit 3\n")
+	for _, cand := range lay.candidates {
+		fmt.Fprintf(&b, "try_candidate %s || ", q(cand))
+	}
+	fmt.Fprintf(&b, "fail %s 3\n\n", q("所有候选安装位置均被 macOS 系统策略拦截（未公证二进制受限），未安装任何文件："+strings.Join(lay.candidates, " / ")))
+	b.WriteString("# ③ 清理其余候选里的陈旧三文件\n")
+	for _, cand := range lay.candidates {
+		fmt.Fprintf(&b, `if [ "$EXE" != %s ]; then clean_candidate %s; fi`+"\n", q(cand), q(cand))
+	}
+	b.WriteString(`
+# ④ 写锚 + 注册 daemon（plist/service.json 由 root 身份的 helper 自写）
+"$EXE/tradewind-service" install --data-dir "$DATA" --data-uid "$DATA_UID" --exec-dir "$EXE"
+exit "$?"
+`)
+	return b.String()
+}
+
+// tunUninstallScript 生成生产卸载提权脚本（纯函数）。
+func tunUninstallScript() string {
+	return tunUninstallScriptFor(productionTunScriptLayout())
+}
+
+// tunUninstallScriptFor 生成卸载提权脚本（纯函数）：bootout → rm plist/日志/锚文件
+// /遗留 helper → 逐候选清三文件并回收空目录 → 回收可能由安装新建的父目录。
+// 禁止 rm -rf：一律显式文件路径；末尾 exit 0（残留的非空目录不算失败）。
+func tunUninstallScriptFor(lay tunScriptLayout) string {
+	q := shQuote
+	var b strings.Builder
+	b.WriteString("#!/bin/sh\n")
+	b.WriteString("# tradewind 特权服务卸载脚本（自动生成；经 osascript 以 root 执行；POSIX sh）\n")
+	b.WriteString("set -u\n")
+	b.WriteString(tunScriptCleanHelper)
+	fmt.Fprintf(&b, "\nlaunchctl bootout system/%s 2>/dev/null || true\n", service.DaemonLabel)
+	fmt.Fprintf(&b, "rm -f %s %s %s %s %s\n",
+		q(lay.plist), q(lay.log), q(filepath.Join(lay.anchorDir, "service.json")), q(lay.corePID), q(lay.legacy))
+	b.WriteString("# 逐候选：显式三文件 + 空目录回收（绝不 rm -rf）\n")
+	for _, cand := range lay.candidates {
+		fmt.Fprintf(&b, "clean_candidate %s\n", q(cand))
+	}
+	b.WriteString("\n# 可能由安装脚本新建的父目录：仅在空时回收\n")
+	for _, dir := range lay.rmdirDirs {
+		fmt.Fprintf(&b, "rmdir %s 2>/dev/null\n", q(dir))
+	}
+	b.WriteString("exit 0\n")
+	return b.String()
+}

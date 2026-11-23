@@ -16,9 +16,7 @@ import (
 	"time"
 
 	"github.com/chaojimaimi/tradewind/internal/paths"
-	"github.com/chaojimaimi/tradewind/internal/service"
 	"github.com/chaojimaimi/tradewind/internal/store"
-	"github.com/chaojimaimi/tradewind/internal/sysproxy"
 )
 
 // 切换编排窗口（评审二轮 P2-b）：就绪 45s 覆盖服务端 15s 握手 + spawn/launchd
@@ -56,67 +54,16 @@ func spawnTunStartDetached() error {
 	return spawnDetachedArgs(exe, "start", "--no-sysproxy")
 }
 
-// tunServiceClientT 是特权服务客户端缝隙接口（测试注入假客户端——编排测试绝不
-// 触真 /var/run socket；生产为 *service.Client）。
-type tunServiceClientT interface {
-	Start(generation int) (service.Response, error)
-	Stop() (service.Response, error)
-	Status() (service.Response, error)
-}
-
-// tunEnv 是 tun 编排家族的可注入环境（selfUpdateEnv 同款形态）：测试构造假编排，
-// 绝不触真系统代理/真 launchd/真实提权。
-type tunEnv struct {
-	// serviceClient 特权服务客户端工厂（timeout 按动作给）。
-	serviceClient func(time.Duration) (tunServiceClientT, error)
-	// serviceAnchorExists service.json 锚存在性（安装判据/兜底 stop 判据）。
-	serviceAnchorExists func() bool
-	// helperMatchesCurrent 安装位 helper sha256 == 当前 CLI（R4 陈旧检测）。
-	helperMatchesCurrent func() bool
-	// elevate 提权脚本执行缝隙（测试桩——绝不真实提权）。
-	elevate func(scriptPath string) error
-	// stopStart 杀旧 start（复用 stop 编排语义 20s/StopW）。
-	stopStart func(paths.Home) error
-	// spawnStart detached spawn `start --no-sysproxy`。
-	spawnStart func() error
-	// waitServiceCore 单次服务就绪探针（status pid>0 + /version 双确认）。
-	waitServiceCore func(context.Context, paths.Home) (int, error)
-	// waitUserCore 用户态就绪轮询（回滚重拉/tun off 就绪判定）。
-	waitUserCore func(paths.Home, time.Duration) bool
-	// ensureGeoip geoip.metadb 前置检查+下载缝隙。
-	ensureGeoip func(context.Context, paths.Home) error
-	// sysproxyRunner sysproxy 意图恢复 runner（测试注入 fake——绝不触真系统代理）。
-	sysproxyRunner sysproxy.Runner
-}
-
-// productionTunEnv 组装生产编排环境。
-func productionTunEnv() tunEnv {
-	return tunEnv{
-		serviceClient:        func(timeout time.Duration) (tunServiceClientT, error) { return tunNewClient(timeout) },
-		serviceAnchorExists:  serviceConfigInstalled,
-		helperMatchesCurrent: helperBinaryMatches,
-		elevate:              runElevatedScript,
-		stopStart:            func(home paths.Home) error { return StopW(home, os.Stdout) },
-		spawnStart:           spawnTunStartDetached,
-		waitServiceCore:      tunProbeServiceCore,
-		waitUserCore: func(home paths.Home, timeout time.Duration) bool {
-			return waitCoreReady(home, store.ReadSecret(home), timeout)
-		},
-		ensureGeoip:    ensureGeoipMetadb,
-		sysproxyRunner: sysproxy.SystemRunner(),
-	}
-}
-
 // TunOn 编排 `tradewind tun on`：持 mutation lock → 快照/幂等判定 → 前置检查
 // （服务安装 + geoip）→ settings 翻转 → 收敛（§2.2 步 5-8）。
 func TunOn(ctx context.Context, home paths.Home) error {
-	return tunOnWith(ctx, home, productionTunEnv())
+	return tunOnWith(ctx, home, productionTunEnv(home))
 }
 
 // TunOff 编排 `tradewind tun off`：对称收敛（settings 翻转 → 服务 stop 兜底 →
 // 用户态 core 回归 → sysproxy 意图按切换前 Applied 恢复）。
 func TunOff(ctx context.Context, home paths.Home) error {
-	return tunOffWith(ctx, home, productionTunEnv())
+	return tunOffWith(ctx, home, productionTunEnv(home))
 }
 
 func tunOnWith(ctx context.Context, home paths.Home, env tunEnv) error {
@@ -197,14 +144,22 @@ func saveTunEnabled(home paths.Home, settings store.Settings, on bool) error {
 }
 
 // tunPreflightOn `tun on` 前置检查（§2.2 步 3 + §3.2）：服务未安装 → 提权安装；
-// helper sha256 ≠ 当前 CLI → 提示走 reinstall（本命令不自动重装，避免提权弹窗
-// 叠加）；geoip.metadb 缺失 → 钉死来源下载，失败报错不半开 TUN。
+// helper 或 root 内核副本 sha256 与当前不一致 → 提示走 reinstall（本命令不自动
+// 重装，避免提权弹窗叠加）；服务不可达 → 在杀旧 start **之前**报错（真机 fold-in：
+// 否则白折腾一次用户态 core 重启后才在服务 stop 处失败回滚）；geoip.metadb 缺失
+// → 钉死来源下载，失败报错不半开 TUN。
 func tunPreflightOn(ctx context.Context, home paths.Home, env tunEnv) error {
 	if !env.serviceAnchorExists() {
 		return tunInstallWith(home, env, false)
 	}
 	if !env.helperMatchesCurrent() {
 		return errors.New("app: 服务二进制已陈旧（self-update 后），请先执行 `tradewind tun reinstall`")
+	}
+	if !env.coreMatchesCurrent(home) {
+		return errors.New("app: 服务内核副本已陈旧（self-update --core 后），请先执行 `tradewind tun reinstall`")
+	}
+	if !env.serviceReachable() {
+		return errors.New("app: 特权服务不可达（未启动或已崩溃），未改动任何状态；请执行 `tradewind tun status` 排查")
 	}
 	return env.ensureGeoip(ctx, home)
 }

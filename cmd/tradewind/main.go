@@ -114,7 +114,7 @@ func dispatch(home paths.Home, args []string) error {
 		err = cmdService(args[1:])
 	case "install":
 		// 隐藏子命令（不出 help）：helper 安装子命令——提权脚本以 root 调用，
-		// --data-dir/--data-uid 内联 argv 传入（argv 无秘密，批⑥ §3.3）
+		// --data-dir/--data-uid/--exec-dir 内联 argv 传入（argv 无秘密，批⑥ §3.3）
 		err = cmdServiceInstall(home, args[1:])
 	case "version", "--version", "-v":
 		// WHY 收编惯用 flag 形式：用户直觉输入 tradewind --version，而非子命令
@@ -547,17 +547,19 @@ func cmdService(_ []string) error {
 }
 
 // cmdServiceInstall 分发隐藏 `tradewind install`：helper 安装子命令（提权脚本调用）。
-// {data_dir, data_uid} 内联 argv（root 无法自证调用者数据目录，评审二轮 P2-c）；
+// {data_dir, data_uid, exec_dir} 内联 argv（root 无法自证调用者数据目录，评审二轮
+// P2-c）；exec_dir 是脚本经执行自测选定的目录（helper 副本 + 内核 root 副本所在）。
 // argv 无秘密，密码红线不涉及。
 func cmdServiceInstall(_ paths.Home, args []string) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	dataDir := fs.String("data-dir", "", "user data directory (absolute)")
 	dataUID := fs.Int("data-uid", 0, "data directory owner uid")
+	execDir := fs.String("exec-dir", "", "execution directory holding the helper and root-owned core copies (absolute)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *dataDir == "" || *dataUID <= 0 {
-		return errors.New("usage: tradewind install --data-dir <abs path> --data-uid <uid>")
+	if *dataDir == "" || *dataUID <= 0 || *execDir == "" {
+		return errors.New("usage: tradewind install --data-dir <abs path> --data-uid <uid> --exec-dir <abs path>")
 	}
-	return service.Install(*dataDir, *dataUID, os.Stdout)
+	return service.Install(*dataDir, *dataUID, *execDir, os.Stdout)
 }
