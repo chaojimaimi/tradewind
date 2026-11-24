@@ -23,16 +23,18 @@ func (f *fakeLaunchctl) Run(args ...string) error {
 
 // newInstallPlan 造安装落点（全部临时目录——绝不触碰真实系统目录）。execDir 含
 // 空格：路径拼装须逐段引用安全（生产第一候选 /Library/Application Support 同形）。
+// owner/dataUID 都用进程自身——非 root 进程 fchown 到别的 uid 必然 EPERM（生产恒
+// root:wheel，属主收敛的实际效果由 §8 真机清单覆盖）。
 func newInstallPlan(t *testing.T) installPlan {
 	t.Helper()
 	base := shortTempDir(t)
 	return installPlan{
 		dataDir:          filepath.Join(base, "data"),
-		dataUID:          501,
+		dataUID:          os.Getuid(),
 		execDir:          filepath.Join(base, "exec dir"),
 		configDir:        filepath.Join(base, "support"),
 		launchDaemonsDir: filepath.Join(base, "LaunchDaemons"),
-		logsDir:          filepath.Join(base, "Logs"),
+		owner:            uidgid{uid: os.Getuid(), gid: os.Getgid()},
 	}
 }
 
@@ -75,10 +77,11 @@ func readWrittenAnchor(t *testing.T, p installPlan) (ConfigFile, os.FileMode) {
 	return got, info.Mode().Perm()
 }
 
-// TestInstallDaemonWritesRootOwnedLayout helper install 新布局（batch6 真机
-// fold-in）：service.json 的 helper_path/core_bin/sidecar 全部指向执行目录（root
-// 属主副本），runtime/sock/log 留在数据目录；plist ProgramArguments 用 helper_path
-// （不再是遗留位置）；launchctl 序 = bootout → bootstrap。
+// TestInstallDaemonWritesRootOwnedLayout helper install v3 布局（批⑥b §4.1）：
+// service.json 的 helper_path/core_bin/sidecar 全部指向执行目录（root 属主副本），
+// 内核工作目录/内核 sock/代理 sock/日志收进锚目录，归一化输入留在数据目录；
+// plist ProgramArguments 用 helper_path（不再是遗留位置）；launchctl 序 = bootout
+// → bootstrap。
 func TestInstallDaemonWritesRootOwnedLayout(t *testing.T) {
 	p := newInstallPlan(t)
 	seedRootCoreCopy(t, p, "")
@@ -92,31 +95,44 @@ func TestInstallDaemonWritesRootOwnedLayout(t *testing.T) {
 		t.Fatalf("service.json perm = %o, want 644", perm)
 	}
 	want := ConfigFile{
-		AllowedUIDs: []int{501},
+		Layout:      3,
+		AllowedUIDs: []int{os.Getuid()},
 		DataDir:     p.dataDir,
 		HelperPath:  HelperPathIn(p.execDir),
 		CoreBin:     CorePathIn(p.execDir),
 		Sidecar:     SidecarPathIn(p.execDir),
-		Runtime:     filepath.Join(p.dataDir, "runtime.yaml"),
-		Sock:        filepath.Join(p.dataDir, "core.sock"),
-		Log:         filepath.Join(p.dataDir, "logs", "core-service.log"),
-		DataUID:     501,
+		CoreHome:    p.coreHome(),
+		KernelSock:  KernelSockIn(p.coreHome()),
+		BrokerSock:  filepath.Join(p.configDir, "core.sock"),
+		CoreLog:     filepath.Join(p.logsDir(), CoreLogName),
+		UserRuntime: filepath.Join(p.dataDir, "runtime.yaml"),
+		DataUID:     os.Getuid(),
 	}
-	if len(got.AllowedUIDs) != 1 || got.AllowedUIDs[0] != 501 {
-		t.Fatalf("allowed_uids = %v, want [501]", got.AllowedUIDs)
+	if len(got.AllowedUIDs) != 1 || got.AllowedUIDs[0] != os.Getuid() {
+		t.Fatalf("allowed_uids = %v, want [%d]", got.AllowedUIDs, os.Getuid())
+	}
+	if got.Layout != 3 {
+		t.Fatalf("layout = %d, want 3", got.Layout)
 	}
 	// ConfigFile 含 []int 不可整体 ==，逐字段比对
 	if got.DataDir != want.DataDir || got.HelperPath != want.HelperPath || got.CoreBin != want.CoreBin ||
-		got.Sidecar != want.Sidecar || got.Runtime != want.Runtime || got.Sock != want.Sock ||
-		got.Log != want.Log || got.DataUID != want.DataUID {
+		got.Sidecar != want.Sidecar || got.CoreHome != want.CoreHome || got.KernelSock != want.KernelSock ||
+		got.BrokerSock != want.BrokerSock || got.CoreLog != want.CoreLog ||
+		got.UserRuntime != want.UserRuntime || got.DataUID != want.DataUID {
 		t.Fatalf("service.json = %+v\nwant            %+v", got, want)
 	}
 	// LPE 修复锚：root 执行的内核副本绝不在用户可写的数据目录之内
 	if pathWithin(got.CoreBin, got.DataDir) {
 		t.Fatalf("core_bin %q must be outside data_dir %q", got.CoreBin, got.DataDir)
 	}
-	if err := got.validate(); err != nil {
+	if err := got.validate(p.configDir); err != nil {
 		t.Fatalf("written anchor must pass the service startup gate: %v", err)
+	}
+	// 写出的锚能被 LoadConfigFile 以 v3 读回（以锚所在目录为锚目录）
+	if loaded, err := LoadConfigFile(filepath.Join(p.configDir, "service.json")); err != nil {
+		t.Fatalf("LoadConfigFile(v3 anchor): %v", err)
+	} else if loaded.KernelSock != want.KernelSock {
+		t.Fatalf("loaded kernel_sock = %q, want %q", loaded.KernelSock, want.KernelSock)
 	}
 
 	plist, err := os.ReadFile(filepath.Join(p.launchDaemonsDir, DaemonLabel+".plist"))
@@ -129,7 +145,7 @@ func TestInstallDaemonWritesRootOwnedLayout(t *testing.T) {
 		"<string>" + want.HelperPath + "</string>",
 		"<string>service</string>",
 		"<key>KeepAlive</key>",
-		"<string>" + filepath.Join(p.logsDir, "tradewind-service.log") + "</string>",
+		"<string>" + filepath.Join(p.logsDir(), ServiceLogName) + "</string>",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("plist missing %q:\n%s", want, text)
@@ -212,37 +228,23 @@ func TestInstallRejectsRelativeExecDir(t *testing.T) {
 	}
 }
 
-// TestConfigValidateRejectsCoreBinInsideDataDir LPE 纵深防御（服务启动闸）：旧布局
-// 锚（core_bin 指向 data_dir/bin）被 validate 拒绝 → LoadConfigFile 报错 → 服务
+// TestConfigValidateRejectsCoreBinInsideDataDir LPE 纵深防御（服务启动闸）：锚里
+// 的 core_bin 指向 data_dir 之内 → validate 拒绝 → LoadConfigFile 报错 → 服务
 // exit 1 fail-closed（launchd 节流重试，用户须 tun reinstall），绝不带病运行。
 func TestConfigValidateRejectsCoreBinInsideDataDir(t *testing.T) {
 	dir := shortTempDir(t)
-	legacy := ConfigFile{
-		AllowedUIDs: []int{501},
-		DataDir:     dir,
-		CoreBin:     filepath.Join(dir, "bin", "mihomo"),
-		Sidecar:     filepath.Join(dir, "bin", "mihomo.sha256"),
-		Runtime:     filepath.Join(dir, "runtime.yaml"),
-		Sock:        filepath.Join(dir, "core.sock"),
-		Log:         filepath.Join(dir, "logs", "core-service.log"),
-		DataUID:     501,
-	}
-	err := legacy.validate()
+	bad := v3Config(dir, filepath.Join(dir, "data"))
+	bad.CoreBin = filepath.Join(bad.DataDir, "bin", "mihomo")
+	bad.Sidecar = filepath.Join(bad.DataDir, "bin", "mihomo.sha256")
+	err := bad.validate(dir)
 	if err == nil || !strings.Contains(err.Error(), "core_bin must not live inside data_dir") {
-		t.Fatalf("legacy-layout anchor validate err = %v, want LPE rejection", err)
+		t.Fatalf("anchor with core_bin inside data_dir: validate err = %v, want LPE rejection", err)
 	}
-	if err := writeJSONFile(filepath.Join(dir, "service.json"), legacy); err != nil {
+	if err := writeJSONFile(filepath.Join(dir, "service.json"), bad); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := LoadConfigFile(filepath.Join(dir, "service.json")); err == nil {
-		t.Fatal("service startup gate must reject the legacy-layout anchor (fail-closed)")
-	}
-	// 对照：同结构仅 core_bin/sidecar 移到数据目录外 → 通过
-	fixed := legacy
-	fixed.CoreBin = filepath.Join(dir, "..", "exec", "bin", "mihomo")
-	fixed.Sidecar = filepath.Join(dir, "..", "exec", "bin", "mihomo.sha256")
-	if err := fixed.validate(); err != nil {
-		t.Fatalf("exec-dir layout must pass validate: %v", err)
+		t.Fatal("service startup gate must reject core_bin inside data_dir (fail-closed)")
 	}
 }
 

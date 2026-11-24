@@ -1,14 +1,12 @@
-// orphan.go：进程身份/回收/属主工具（孤儿收编与数据目录回收共用，批⑥ §3.1）。
+// orphan.go：进程身份与回收工具（孤儿收编专用，批⑥ §3.1；批⑥b 起不再有数据目录
+// 属主回收——内核工作目录收进 root 专属 <core_home>，root 对用户目录零写入，I1）。
 // 语义与 app/process.go 同构——service 包不得依赖 app（层次反向），此处独立实现。
 package service
 
 import (
 	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -30,14 +28,14 @@ func processAlive(pid int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
-// coreProcessMatches 身份校验：ps 命令行含 "-d <dataDir>"（防 pid 复用误杀；
-// macOS 无 /proc，取 ps -p 输出）。
-func coreProcessMatches(pid int, dataDir string) bool {
+// coreProcessMatches 身份校验：ps 命令行含 "-d <dir>"（防 pid 复用误杀；macOS 无
+// /proc，取 ps -p 输出）。批⑥b 起传 <core_home>（内核工作目录）。
+func coreProcessMatches(pid int, dir string) bool {
 	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
 	if err != nil {
 		return false
 	}
-	return strings.Contains(strings.TrimSpace(string(out)), "-d "+dataDir)
+	return strings.Contains(strings.TrimSpace(string(out)), "-d "+dir)
 }
 
 // killProcessGracefully SIGTERM → killGrace → SIGKILL（root 身份执行；孤儿收编专用）。
@@ -59,26 +57,4 @@ func killProcessGracefully(pid int) error {
 		return fmt.Errorf("service: sigkill %d: %w", pid, err)
 	}
 	return nil
-}
-
-// chownDataDirBack root core 退出后递归 chown 回 data_uid（批⑥ §3.1/R10/F22）：
-// root mihomo 会以 root 属主创建/改写 cache.db、geoip*、日志——不回收则 tun off
-// 后用户态 core EACCES。root→用户方向回收安全；非 root（测试）为同 uid no-op。
-// WHY 跳过 symlink（batch6 review P1-1）：os.Chown 走 chown(2) 跟随符号链接——
-// 用户可在 dataDir 植入指向 /etc/sudoers 等文件的 symlink，任一回收路径触发时
-// root 会把目标文件 chown 给用户 uid（本地提权面）。mihomo 产物均为普通文件，
-// 跳过无副作用（WalkDir 本就不展开 symlink，Type 判定即可拦住全部 symlink 条目）。
-func chownDataDirBack(dataDir string, uid int) error {
-	return filepath.WalkDir(dataDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.Type()&fs.ModeSymlink != 0 {
-			return nil // symlink 条目一律不动（含悬空链——chown 跟随后 ENOENT 也会误伤）
-		}
-		if chErr := os.Chown(path, uid, -1); chErr != nil {
-			return fmt.Errorf("service: chown %s: %w", path, chErr)
-		}
-		return nil
-	})
 }

@@ -21,8 +21,9 @@ const (
 	logRotateSize           = 5 << 20 // core.log >5MB 轮转为 .1，保留 1 份
 	logTailSize             = 8 << 10 // fail-fast 时读取的日志尾部
 	// DefaultSockPerm 握手成功后 core.sock 收敛权限的默认值（纵深防御，M0-plan §8）。
-	// 特权服务侧经 Config.SockPerm 传 0666（root 属主 sock，用户态 CLI 直连必需，
-	// 批⑥ §3.1 SockPerm 参数化——Monitor 自愈重启走同参数，权限保持）。
+	// 批⑥b 起特权服务沿用这个默认 0600——内核原生 socket 只对 root 服务可达，用户域
+	// 只经代理访问（批⑥b §4.3）；用户态形态不传 SockPerm（零值即本默认，socket 归
+	// 用户本人，0600 可连）。
 	DefaultSockPerm = 0o600
 )
 
@@ -40,16 +41,27 @@ type Config struct {
 	HandshakeTimeout time.Duration
 	RestartBackoff   []time.Duration
 	StopGrace        time.Duration
-	// Env 覆盖子进程环境（默认继承父进程；测试注入桩内核模式用）
+	// Env 覆盖子进程环境（默认继承父进程；测试注入桩内核模式用。特权服务传显式
+	// 最小环境——批⑥b §4.1）
 	Env []string
-	// SockPerm 握手成功后 core.sock 的收敛权限（零值=默认 0600；特权服务传 0666——
-	// root 属主 sock，用户态 CLI 直连必需。Monitor 崩溃重启内部 Spawn+WaitReady
-	// 走同参数，自愈后权限保持，批⑥ §3.1 SockPerm 参数化）
+	// SockPerm 握手成功后 core.sock 的收敛权限（零值=默认 0600。批⑥b 起特权服务
+	// 沿用默认——用户域只经代理访问内核 API，批⑥b §4.3。Monitor 崩溃重启内部
+	// Spawn+WaitReady 走同参数，自愈后权限保持）
 	SockPerm os.FileMode
 	// PreSpawn 是每次 spawn 前的前置钩子（nil = 无）：返回错误则本次 spawn 不执行。
 	// 特权服务用它复核执行目录归属——Monitor 崩溃自愈的内部 respawn 不经过服务的
 	// spawnCore，钩子保证初始 spawn 与自愈 respawn 走同一道闸。
 	PreSpawn func() error
+	// LogOwner 非空时：openLogFile 之后对新打开的日志 fd 做 fchown(uid,-1) +
+	// fchmod(0600)；失败 → 关闭 fd 并返回错误，本次 spawn 不执行。批⑥b §4.1/§4.6：
+	// 新 core.log 只在 Spawn() 里产生（初次启动，或自愈 respawn 时轮转出一份新的，
+	// F21），收敛放 Manager 里两条 spawn 路径都覆盖；打开带了 O_NOFOLLOW，fd 指向
+	// 的就是那个普通文件，不存在"按路径 chown 跟随符号链接"的面。
+	LogOwner *int
+	// OnSpawned 在 cmd.Start() 成功、m.cmd 赋值之后调用，传入子进程 pid（nil = 无）。
+	// 批⑥b §4.1：特权服务用它重写 core.pid——每次 spawn 都记录（含自愈 respawn，
+	// F20），否则服务重启时收编不到自愈出来的内核。
+	OnSpawned func(pid int)
 }
 
 func (c *Config) fillDefaults() {
@@ -102,6 +114,18 @@ func (m *Manager) Spawn() error {
 	if err != nil {
 		return err
 	}
+	// 日志属主/权限经 fd 收敛（批⑥b §4.6）：fchown + fchmod 打在刚打开的 fd 上，
+	// 失败 → 关闭 fd 返回错误，本次 spawn 不执行
+	if m.cfg.LogOwner != nil {
+		if err := logFile.Chown(*m.cfg.LogOwner, -1); err != nil {
+			logFile.Close()
+			return fmt.Errorf("core: chown log: %w", err)
+		}
+		if err := logFile.Chmod(0o600); err != nil {
+			logFile.Close()
+			return fmt.Errorf("core: chmod log: %w", err)
+		}
+	}
 	cmd := exec.Command(m.cfg.BinPath,
 		"-d", m.cfg.DataDir,
 		"-f", m.cfg.RuntimePath,
@@ -120,6 +144,11 @@ func (m *Manager) Spawn() error {
 	m.exit = make(chan struct{})
 	m.stopping = false
 	m.mu.Unlock()
+	// 每次 spawn 都通知调用方（批⑥b F20）：特权服务在回调里重写 core.pid——自愈
+	// respawn 不经过服务的 spawnCore，回调保证自愈出来的内核也记录在案
+	if m.cfg.OnSpawned != nil {
+		m.cfg.OnSpawned(cmd.Process.Pid)
+	}
 	go func() {
 		cmd.Wait()
 		logFile.Close()
@@ -288,10 +317,11 @@ func (m *Manager) TailLog() string {
 }
 
 // openLogFile 打开内核日志（O_APPEND 追加写）。
-// WHY O_NOFOLLOW（batch6 真机 fold-in 2）：特权服务以 root 打开用户数据目录里的
-// core-service.log——该路径若被换成指向系统文件的符号链接，跟随打开 = root 往
-// 目标追加日志。O_NOFOLLOW 由内核拒绝（ELOOP），不依赖调用前的 Lstat（那有
-// TOCTOU 窗口）。只作用于路径末段，普通文件零回归。
+// WHY O_NOFOLLOW（batch6 真机 fold-in 2）：特权服务以 root 打开日志路径（批⑥b 起
+// 是 root 属主目录下的 <anchor>/logs/core.log，纵深防御原样保留）——该路径若被换成
+// 指向系统文件的符号链接，跟随打开 = root 往目标追加日志。O_NOFOLLOW 由内核拒绝
+// （ELOOP），不依赖调用前的 Lstat（那有 TOCTOU 窗口）。只作用于路径末段，普通
+// 文件零回归。
 func openLogFile(path string) (*os.File, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {

@@ -119,6 +119,10 @@ func dispatch(home paths.Home, args []string) error {
 		// 隐藏子命令（不出 help）：helper 安装子命令——提权脚本以 root 调用，
 		// --data-dir/--data-uid/--exec-dir 内联 argv 传入（argv 无秘密，批⑥ §3.3）
 		err = cmdServiceInstall(home, args[1:])
+	case "purge":
+		// 隐藏子命令（不出 help）：删除 root 专属内核工作目录（批⑥b §4.1）——
+		// 卸载脚本对每个执行目录候选探测 helper 后调用（须 root）
+		err = service.Purge(os.Stdout)
 	case "version", "--version", "-v":
 		// WHY 收编惯用 flag 形式：用户直觉输入 tradewind --version，而非子命令
 		err = cmdVersion(home, args[1:])

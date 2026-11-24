@@ -25,10 +25,11 @@ type tunScriptLayout struct {
 	candidates []string
 
 	// 以下仅卸载脚本使用。
-	plist     string   // LaunchDaemon plist
-	log       string   // 服务日志
-	corePID   string   // 锚目录内的 core.pid（与 service.json 同为锚文件）
-	rmdirDirs []string // 可能由安装脚本新建的父目录（仅在空时回收）
+	plist      string   // LaunchDaemon plist
+	logsDir    string   // 锚目录内的日志目录（service.log / core.log / core.log.1）
+	anchorSock string   // 锚目录内的代理入口 socket（服务被 kill -9 时的残留）
+	corePID    string   // 锚目录内的 core.pid（与 service.json 同为锚文件）
+	rmdirDirs  []string // 可能由安装脚本新建的父目录（仅在空时回收）
 }
 
 // installScriptLayout 安装脚本的生产布局，候选换成过滤后的安全集（review P2）。
@@ -68,7 +69,8 @@ func productionTunScriptLayout() tunScriptLayout {
 		legacy:     service.HelperInstallPath,
 		candidates: service.ExecDirCandidates(),
 		plist:      service.DaemonPlistPath,
-		log:        service.DaemonLogPath,
+		logsDir:    service.DefaultLogsDir,
+		anchorSock: service.DefaultBrokerSock,
 		corePID:    service.DefaultCorePIDPath,
 		rmdirDirs:  []string{service.LibexecDir},
 	}
@@ -208,8 +210,10 @@ func tunUninstallScript() string {
 	return tunUninstallScriptFor(productionTunScriptLayout())
 }
 
-// tunUninstallScriptFor 生成卸载提权脚本（纯函数）：bootout → rm plist/日志/锚文件
-// /遗留 helper → 逐候选清三文件并回收空目录 → 回收可能由安装新建的父目录。
+// tunUninstallScriptFor 生成卸载提权脚本（纯函数）：bootout → 逐候选探测 helper
+// 并调用它的 purge（删除 root 专属内核工作目录——helper 还在位才能调用）→ rm -f
+// plist/三份日志/锚文件/代理 socket 残留/遗留 helper → 逐候选清三文件并回收空目录
+// → 回收 logs 与锚目录（仅空时）→ 回收可能由安装新建的父目录。
 // 禁止 rm -rf：一律显式文件路径；末尾 exit 0（残留的非空目录不算失败）。
 func tunUninstallScriptFor(lay tunScriptLayout) string {
 	q := shQuote
@@ -219,12 +223,32 @@ func tunUninstallScriptFor(lay tunScriptLayout) string {
 	b.WriteString("set -u\n")
 	b.WriteString(tunScriptCleanHelper)
 	fmt.Fprintf(&b, "\nlaunchctl bootout system/%s 2>/dev/null || true\n", service.DaemonLabel)
-	fmt.Fprintf(&b, "rm -f %s %s %s %s %s\n",
-		q(lay.plist), q(lay.log), q(filepath.Join(lay.anchorDir, "service.json")), q(lay.corePID), q(lay.legacy))
+	// 逐候选调 helper 的 purge（批⑥b §4.1：内核产物含哈希文件名，脚本无法显式
+	// 枚举；`|| true` 保证候选缺失/被拦时继续）。purge 必须排在 clean_candidate
+	// 之前——clean 之后 helper 就没了
+	b.WriteString("# 逐候选：helper 在位则调它的 purge（删除 root 专属内核工作目录）\n")
+	for _, cand := range lay.candidates {
+		helper := q(filepath.Join(cand, service.HelperFileName))
+		fmt.Fprintf(&b, "[ -x %s ] && %s purge || true\n", helper, helper)
+	}
+	// rm -f 清单：三份日志（含轮转出的 .1）、两个锚文件、代理 socket 残留（服务被
+	// kill -9 时来不及自摘）、遗留 helper
+	fmt.Fprintf(&b, "rm -f %s %s %s %s %s %s %s %s\n",
+		q(lay.plist),
+		q(filepath.Join(lay.logsDir, service.ServiceLogName)),
+		q(filepath.Join(lay.logsDir, service.CoreLogName)),
+		q(filepath.Join(lay.logsDir, service.CoreLogName+".1")),
+		q(filepath.Join(lay.anchorDir, "service.json")),
+		q(lay.corePID),
+		q(lay.anchorSock),
+		q(lay.legacy))
 	b.WriteString("# 逐候选：显式三文件 + 空目录回收（绝不 rm -rf）\n")
 	for _, cand := range lay.candidates {
 		fmt.Fprintf(&b, "clean_candidate %s\n", q(cand))
 	}
+	// logs 与锚目录仅在空时回收（purge 已删 service-data；锚里若有别的文件则保留）
+	fmt.Fprintf(&b, "rmdir %s 2>/dev/null\n", q(lay.logsDir))
+	fmt.Fprintf(&b, "rmdir %s 2>/dev/null\n", q(lay.anchorDir))
 	b.WriteString("\n# 可能由安装脚本新建的父目录：仅在空时回收\n")
 	for _, dir := range lay.rmdirDirs {
 		fmt.Fprintf(&b, "rmdir %s 2>/dev/null\n", q(dir))

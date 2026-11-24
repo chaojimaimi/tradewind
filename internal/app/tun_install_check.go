@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,13 +21,15 @@ var (
 	// tunInstallVerifyWindow 提权安装后等待服务可达的窗口（变量缝：测试缩短）。
 	tunInstallVerifyWindow = 12 * time.Second
 	// tunDaemonLogPath 服务自身日志（plist StandardOutPath；安装失败诊断读尾部）。
-	tunDaemonLogPath = service.DaemonLogPath
+	// 批⑥b §4.6：日志在 root 属主的 <anchor>/logs/ 下，属主是数据目录用户、0600
+	// ——用户仍可读自己的服务日志（安装失败的诊断面）。
+	tunDaemonLogPath = filepath.Join(service.DefaultLogsDir, service.ServiceLogName)
 )
 
 // loadTunAnchor 读取并校验 service.json 锚。锚为 root 属主 0644（/Library/
 // Application Support 下用户不可写）——helper_path/core_bin 是可信来源。旧布局锚
-// （core_bin 在 data_dir 内）被 service.ConfigFile.validate 拒绝 → 读不出 →
-// 调用方按陈旧/无效处理。
+// （缺 layout 键或 ≠3；batch⑥b 前的 runtime/sock/log 都在数据目录）被
+// service.ConfigFile.validate 拒绝 → 读不出 → 调用方按陈旧/无效处理。
 func loadTunAnchor() (service.ConfigFile, bool) {
 	cfg, err := service.LoadConfigFile(tunServiceConfigPath)
 	if err != nil {
@@ -107,8 +110,9 @@ func tunWaitForServiceReady() error {
 // daemonLogTailBytes 是安装失败诊断携带的服务日志尾部上限。
 const daemonLogTailBytes = 2000
 
-// tunDaemonLogTail 读服务日志尾部（不可读/为空 → 空串；/Library/Logs 下 root
-// 属主文件通常 0644 用户可读）。
+// tunDaemonLogTail 读服务日志尾部（不可读/为空 → 空串）。可读性依据（批⑥b
+// §4.6）：日志在 root 属主的 <anchor>/logs/ 下，但文件属主就是数据目录用户本人、
+// 0600——Install 预创建时经 fd 收敛，所以用户读得到自己的服务日志。
 func tunDaemonLogTail() string {
 	f, err := os.Open(tunDaemonLogPath)
 	if err != nil {

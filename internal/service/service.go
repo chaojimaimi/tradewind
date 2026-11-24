@@ -9,7 +9,12 @@
 //   - 请求零路径：协议仅 {action,generation}，所有路径来自 service.json（协议层
 //     DisallowUnknownFields 拒收未知字段），CLI 侧携带路径的注入面为零；
 //   - 所有权仲裁 = generation 单调递增（start 须 > currentGeneration）+ start 幂等
-//     no-op（core 已运行不重复 spawn）。
+//     no-op（core 已运行不重复 spawn）；
+//   - 内核工作目录 = root 属主的 <core_home>（锚目录内 service-data，0700）——内核
+//     的一切产物（runtime.yaml、core.sock、cache.db、geo、日志之外的写点）都落在
+//     root 独占可写目录里，用户域无从植入（批⑥b §3 I1/I2）；
+//   - 服务对用户数据目录只有"经安全打开读取"一种操作（safeopen：O_NOFOLLOW +
+//     fstat 普通文件 + 属主 = data_uid + 大小上限），零写入、零 chown（批⑥b I1）。
 package service
 
 import (
@@ -48,9 +53,41 @@ const (
 	HelperFileName = "tradewind-service"
 	// DaemonPlistPath 是 LaunchDaemon plist 落点。
 	DaemonPlistPath = "/Library/LaunchDaemons/" + DaemonLabel + ".plist"
-	// DaemonLogPath 是服务自身 stdout/stderr（plist StandardOutPath）。
-	DaemonLogPath = "/Library/Logs/tradewind-service.log"
+	// 锚目录内三个 root 专属条目的名字（批⑥b §4.1）。名字只在这里定义一次：生产
+	// 常量、validate 的派生式、Install 的落点、purge 的删除目标全部由它们推导——
+	// "purge 删的目录 == 服务用的目录 == Install 建的目录"因此是同一份事实，而不是
+	// 几处手写字面量碰巧相等（config_test.go 钉死）。
+	logsDirName    = "logs"
+	coreHomeName   = "service-data"
+	brokerSockName = "core.sock"
+	// DefaultLogsDir 是锚目录内的日志目录（root 属主 0755；批⑥b §4.1——服务与内核
+	// 日志迁出 admin 可写的 /Library/Logs，R22）。目录归 root，两份日志文件归
+	// data_uid 0600（Install 预创建，见 install.go）。
+	DefaultLogsDir = DefaultConfigDir + "/" + logsDirName
+	// DefaultCoreHome 是 root 专属内核工作目录（内核 -d；root:wheel 0700，用户域
+	// 不可进入——内核一切产物都落在这里，批⑥b §3 I2）。
+	DefaultCoreHome = DefaultConfigDir + "/" + coreHomeName
+	// DefaultBrokerSock 是用户域 API 入口（代理入口，§4.3；c1 只写入并校验该字段，
+	// 监听在 c4）。
+	DefaultBrokerSock = DefaultConfigDir + "/" + brokerSockName
+	// ServiceLogName / CoreLogName 是 <logs> 目录内两份日志的文件名（属主 data_uid
+	// 0600；目录 root 属主——用户无法替换目录项，只能改自己那份日志的内容）。
+	ServiceLogName = "service.log"
+	CoreLogName    = "core.log"
 )
+
+// LogsDirIn / CoreHomeIn / BrokerSockIn 由锚目录推导三个 root 专属条目的路径
+// （与上面的生产常量同源；测试的临时锚目录同样成立）。
+func LogsDirIn(anchorDir string) string    { return filepath.Join(anchorDir, logsDirName) }
+func CoreHomeIn(anchorDir string) string   { return filepath.Join(anchorDir, coreHomeName) }
+func BrokerSockIn(anchorDir string) string { return filepath.Join(anchorDir, brokerSockName) }
+
+// KernelSockIn 返回 <core_home> 内的内核原生 API socket 路径（仅 root 服务可达；
+// 用户域只经代理访问）。
+func KernelSockIn(coreHome string) string { return filepath.Join(coreHome, "core.sock") }
+
+// RuntimeIn 返回 <core_home> 内的内核 -f 配置路径（服务写入，内核只读）。
+func RuntimeIn(coreHome string) string { return filepath.Join(coreHome, "runtime.yaml") }
 
 // LibexecDir 是第二候选的父目录（可能由安装脚本新建；卸载时仅在空时回收——
 // /opt 等既有系统目录绝不回收）。
@@ -120,9 +157,19 @@ func DecodeRequest(line []byte) (Request, error) {
 // ConfigFile 是 service.json（root-owned 0644 安装锚）：服务启动时只读校验，
 // 非法/缺失 → exit 1（launchd 节流重试，R3）。全部路径由此锚定——服务运行期
 // 不接受任何请求侧路径。
+//
+// v3（批⑥b §4.1）：layout=3 引入 root 专属布局——内核工作目录收进锚目录内的
+// service-data，日志收进锚目录内的 logs/，代理入口 <anchor>/core.sock；旧布局
+// （runtime/sock/log 在用户数据目录、/Library/Logs）的锚缺 layout 键，一律判无效。
 type ConfigFile struct {
-	AllowedUIDs []int  `json:"allowed_uids"`
-	DataDir     string `json:"data_dir"`
+	// Layout 恒为 3；旧锚缺此键 → validate 失败（fail-closed，用户须 tun reinstall）。
+	Layout int `json:"layout"`
+	// AllowedUIDs 是 peer-uid 白名单（唯一认证闸）。
+	AllowedUIDs []int `json:"allowed_uids"`
+	// DataDir 是用户数据目录——服务对它**只读**（归一化输入与 geo 同步的来源，I1）。
+	DataDir string `json:"data_dir"`
+	// DataUID 是数据目录属主（安全打开的属主校验基准 + 日志文件的收敛属主）。
+	DataUID int `json:"data_uid"`
 	// HelperPath 执行目录内的 helper 副本（plist ProgramArguments[0]；CLI 陈旧检测的
 	// 比对来源）。旧布局锚缺此键——服务运行期不消费它，CLI 侧按陈旧处理。
 	HelperPath string `json:"helper_path"`
@@ -132,27 +179,81 @@ type ConfigFile struct {
 	// 代码（sha256 校验挡不住：校验文件本身用户可写）。validate 拒绝该形态。
 	CoreBin string `json:"core_bin"`
 	Sidecar string `json:"sidecar"`
-	Runtime string `json:"runtime"`
-	Sock    string `json:"sock"`
-	Log     string `json:"log"`
-	DataUID int    `json:"data_uid"`
+	// CoreHome 是内核 -d（root:wheel 0700，位于锚目录内）。
+	CoreHome string `json:"core_home"`
+	// KernelSock 是内核原生 API socket（<core_home>/core.sock，仅 root 服务可达）。
+	KernelSock string `json:"kernel_sock"`
+	// BrokerSock 是用户域 API 入口（<anchor>/core.sock；c1 只写入并校验，监听在 c4）。
+	BrokerSock string `json:"broker_sock"`
+	// CoreLog 是内核日志（<anchor>/logs/core.log，data_uid 属主 0600）。
+	CoreLog string `json:"core_log"`
+	// UserRuntime 是归一化输入（<data_dir>/runtime.yaml，只经 safeopen 读取）。
+	UserRuntime string `json:"user_runtime"`
 }
 
 // validate 锚完整性校验（服务启动闸——缺字段宁可 exit 1 也不带病运行）。
-func (c ConfigFile) validate() error {
+// anchorDir 是锚所在目录（LoadConfigFile 以 filepath.Dir(path) 传入）：CoreHome/
+// KernelSock/CoreLog/BrokerSock 必须在它之内，测试的临时目录同样成立。
+func (c ConfigFile) validate(anchorDir string) error {
+	// ① 布局代际：旧锚（无 layout 键或 ≠3）一律判无效——批⑥b 起内核工作目录必须
+	// 在 root 属主目录里，带旧锚运行等于把 I2 整个打开。
+	if c.Layout != 3 {
+		return errors.New("service: service.json layout must be 3 (got a pre-batch6b anchor); run `tradewind tun reinstall`")
+	}
+	// ② 身份字段
 	if len(c.AllowedUIDs) == 0 {
 		return errors.New("service: service.json missing allowed_uids")
-	}
-	for _, field := range []string{c.DataDir, c.CoreBin, c.Sidecar, c.Runtime, c.Sock, c.Log} {
-		if field == "" {
-			return errors.New("service: service.json has empty path field")
-		}
 	}
 	if c.DataUID <= 0 {
 		return errors.New("service: service.json has invalid data_uid")
 	}
-	// LPE 纵深防御：root 执行的内核副本不得落在用户可写的 data_dir 之内
-	// （旧布局锚在此被拒 → 服务 exit 1 fail-closed，用户须 tun reinstall）。
+	// ③ 全部路径字段：非空、绝对路径、Clean 后与原值相等（拒绝 ..、尾斜杠、重复分隔符
+	// ——后面的 pathWithin 都是词法判断，先保证输入形态单一）。
+	paths := []string{c.DataDir, c.CoreBin, c.Sidecar, c.CoreHome, c.KernelSock, c.BrokerSock, c.CoreLog, c.UserRuntime, c.HelperPath}
+	for _, p := range paths {
+		if p == "" {
+			return errors.New("service: service.json has empty path field")
+		}
+		if !filepath.IsAbs(p) {
+			return fmt.Errorf("service: service.json path %q is not absolute", p)
+		}
+		if filepath.Clean(p) != p {
+			return fmt.Errorf("service: service.json path %q is not clean (rejecting .., trailing slash, duplicate separators)", p)
+		}
+	}
+	// ④ 内核专属产物必须全部位于锚目录内（root 属主、用户不可写），且内核 socket
+	// 路径与 CoreHome 派生一致（防"sock 指到目录外"的锚篡改）。
+	for _, p := range []string{c.CoreHome, c.KernelSock, c.CoreLog} {
+		if !pathWithin(p, anchorDir) {
+			return fmt.Errorf("service: %s must live inside the anchor dir %s", p, anchorDir)
+		}
+	}
+	if want := KernelSockIn(c.CoreHome); c.KernelSock != want {
+		return fmt.Errorf("service: kernel_sock must be %s (got %s)", want, c.KernelSock)
+	}
+	// ⑤ 代理入口：锚目录下的固定文件名（词法事实，编译期常量同形）；不得落在用户
+	// 可写的 DataDir 或内核的 CoreHome 里。
+	if want := BrokerSockIn(anchorDir); c.BrokerSock != want {
+		return fmt.Errorf("service: broker_sock must be %s (got %s)", want, c.BrokerSock)
+	}
+	if pathWithin(c.BrokerSock, c.DataDir) {
+		return errors.New("service: broker_sock must not live inside data_dir (user-writable)")
+	}
+	if pathWithin(c.BrokerSock, c.CoreHome) {
+		return errors.New("service: broker_sock must not live inside core_home")
+	}
+	// ⑥ 归一化输入固定为数据目录的 runtime.yaml。
+	if want := filepath.Join(c.DataDir, "runtime.yaml"); c.UserRuntime != want {
+		return fmt.Errorf("service: user_runtime must be %s (got %s)", want, c.UserRuntime)
+	}
+	// ⑦ 用户数据目录与内核工作目录互不嵌套；root 执行的内核副本不得落在用户可写
+	// 的 data_dir 之内（LPE 纵深防御沿用）。
+	if pathWithin(c.CoreHome, c.DataDir) {
+		return errors.New("service: core_home must not live inside data_dir (user-writable)")
+	}
+	if pathWithin(c.DataDir, c.CoreHome) {
+		return errors.New("service: data_dir must not live inside core_home")
+	}
 	if pathWithin(c.CoreBin, c.DataDir) {
 		return errors.New("service: core_bin must not live inside data_dir (user-writable; root must run the root-owned copy)")
 	}
@@ -169,13 +270,14 @@ func pathWithin(child, parent string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
-// LoadConfigFile 读取并校验 service.json。
+// LoadConfigFile 读取并校验 service.json（以配置文件所在目录为锚目录——CoreHome
+// 等内核专属路径必须在它之内；生产即 DefaultConfigDir）。
 func LoadConfigFile(path string) (ConfigFile, error) {
 	var cfg ConfigFile
 	if err := ReadJSONFile(path, &cfg); err != nil {
 		return ConfigFile{}, err
 	}
-	if err := cfg.validate(); err != nil {
+	if err := cfg.validate(filepath.Dir(path)); err != nil {
 		return ConfigFile{}, err
 	}
 	return cfg, nil

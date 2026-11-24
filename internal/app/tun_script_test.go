@@ -122,32 +122,49 @@ func TestTunInstallScriptContent(t *testing.T) {
 	}
 }
 
-// TestTunUninstallScriptContent 卸载脚本内容断言：bootout → rm plist/日志/锚文件
-// （service.json、core.pid）/遗留 helper → 逐候选清理 → 回收可能新建的父目录 →
-// exit 0；无 rm -rf。
+// TestTunUninstallScriptContent 卸载脚本内容断言（批⑥b §4.5）：bootout → 逐候选
+// 调 helper 的 purge（须在 clean_candidate 之前——clean 之后 helper 就没了）→
+// rm -f plist/三份日志/锚文件/锚目录 core.sock/遗留 helper → 逐候选清理 → 回收
+// logs 与锚目录（仅空时）→ 回收可能新建的父目录 → exit 0；无 rm -rf。
 func TestTunUninstallScriptContent(t *testing.T) {
 	script := tunUninstallScript()
 	lines := scriptLines(script)
 	bootout := indexOfLine(lines, "launchctl bootout system/"+service.DaemonLabel+" 2>/dev/null || true")
-	rmLine := `rm -f '/Library/LaunchDaemons/` + service.DaemonLabel + `.plist' '/Library/Logs/tradewind-service.log' ` +
-		`'/Library/Application Support/Tradewind/service.json' '/Library/Application Support/Tradewind/core.pid' ` +
-		`'/Library/PrivilegedHelperTools/` + service.DaemonLabel + `'`
+	anchor := service.DefaultConfigDir
+	logs := service.DefaultLogsDir
+	rmLine := `rm -f '/Library/LaunchDaemons/` + service.DaemonLabel + `.plist' '` + logs + `/service.log' '` +
+		logs + `/core.log' '` + logs + `/core.log.1' '` + anchor + `/service.json' '` +
+		anchor + `/core.pid' '` + anchor + `/core.sock' '/Library/PrivilegedHelperTools/` + service.DaemonLabel + `'`
 	rm := indexOfLine(lines, rmLine)
 	if bootout < 0 || rm < 0 || bootout > rm {
 		t.Fatalf("uninstall must boot out before removing files (bootout=%d rm=%d):\n%s", bootout, rm, script)
 	}
-	lastClean := -1
+	// 逐候选 purge 调用，且全部位于首个 clean_candidate 之前
+	firstClean := -1
 	for _, cand := range service.ExecDirCandidates() {
-		i := indexOfLine(lines, "clean_candidate '"+cand+"'")
+		purgeLine := `[ -x '` + cand + `/tradewind-service' ] && '` + cand + `/tradewind-service' purge || true`
+		i := indexOfLine(lines, purgeLine)
 		if i < 0 {
+			t.Fatalf("uninstall script missing purge call for %s:\n%s", cand, script)
+		}
+		cleanIdx := indexOfLine(lines, "clean_candidate '"+cand+"'")
+		if cleanIdx < 0 {
 			t.Fatalf("uninstall script missing candidate cleanup %s:\n%s", cand, script)
 		}
-		lastClean = i
+		if firstClean < 0 || cleanIdx < firstClean {
+			firstClean = cleanIdx
+		}
+		if i > cleanIdx {
+			t.Fatalf("purge for %s must run before its clean_candidate (purge=%d clean=%d):\n%s", cand, i, cleanIdx, script)
+		}
 	}
+	rmdirLogs := indexOfLine(lines, "rmdir '"+logs+"' 2>/dev/null")
+	rmdirAnchor := indexOfLine(lines, "rmdir '"+anchor+"' 2>/dev/null")
 	parent := indexOfLine(lines, "rmdir '/usr/local/libexec' 2>/dev/null")
 	exit := indexOfLine(lines, "exit 0")
-	if parent < lastClean || exit != len(lines)-1 {
-		t.Fatalf("uninstall epilogue order wrong (lastClean=%d parent=%d exit=%d):\n%s", lastClean, parent, exit, script)
+	if rmdirLogs < firstClean || rmdirAnchor < rmdirLogs || parent < rmdirAnchor || exit != len(lines)-1 {
+		t.Fatalf("uninstall epilogue order wrong (firstClean=%d rmdirLogs=%d rmdirAnchor=%d parent=%d exit=%d):\n%s",
+			firstClean, rmdirLogs, rmdirAnchor, parent, exit, script)
 	}
 	// 逐候选清理用显式文件路径；目录仅在空时移除
 	for _, want := range []string{
@@ -228,7 +245,8 @@ func newScriptFixture(t *testing.T) *scriptFixture {
 		legacy:     filepath.Join(root, "legacy helper", service.DaemonLabel),
 		candidates: []string{anchor, filepath.Join(root, "lib exec", "tradewind"), filepath.Join(root, "opt", "tradewind")},
 		plist:      filepath.Join(root, "LaunchDaemons", service.DaemonLabel+".plist"),
-		log:        filepath.Join(root, "Logs", "tradewind-service.log"),
+		logsDir:    filepath.Join(anchor, "logs"),
+		anchorSock: filepath.Join(anchor, "core.sock"),
 		corePID:    filepath.Join(anchor, "core.pid"),
 		rmdirDirs:  []string{filepath.Join(root, "lib exec")},
 	}
@@ -330,13 +348,18 @@ func (f *scriptFixture) assertCandidatePopulated(t *testing.T, cand string) {
 	}
 }
 
-// plant 三件套占位（模拟历史安装落位）。
+// plant 三件套占位（模拟历史安装落位）。helper 副本是记录参数的 shell 脚本
+// （批⑥b：卸载脚本会调用它的 purge 子命令）——绝不能执行真实的 tradewind 二进制。
 func (f *scriptFixture) plant(t *testing.T, cand string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(cand, "bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"tradewind-service", "bin/mihomo", "bin/mihomo.sha256"} {
+	f.writeExecutable(t, filepath.Join(cand, "tradewind-service"), "#!/bin/sh\n"+fakePolicyBlockLogic+
+		`printf '%s\n' "$0 $*" >> "$FAKE_RECORD_DIR/helper-args.log"
+exit 0
+`)
+	for _, name := range []string{"bin/mihomo", "bin/mihomo.sha256"} {
 		if err := os.WriteFile(filepath.Join(cand, filepath.FromSlash(name)), []byte("stale"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -468,9 +491,10 @@ func TestTunInstallScriptMissingSource(t *testing.T) {
 	}
 }
 
-// TestTunUninstallScriptBehaviour 卸载行为：bootout（经桩 launchctl）→ 清 plist/
-// 日志/锚文件/遗留 helper → 逐候选清三文件并回收空目录；诱饵文件所在目录保留
-// （无 rm -rf）；父目录仅在空时回收；末尾恒 exit 0。
+// TestTunUninstallScriptBehaviour 卸载行为（批⑥b §4.5）：bootout（经桩 launchctl）
+// → 逐候选调 helper 的 purge（桩 helper 记录调用）→ rm -f 清单 → 逐候选清三文件并
+// 回收空目录；诱饵文件所在目录保留（无 rm -rf）；logs 与锚目录仅在空时回收；父目录
+// 仅在空时回收；末尾恒 exit 0。
 func TestTunUninstallScriptBehaviour(t *testing.T) {
 	f := newScriptFixture(t)
 	f.plantUninstallArtifacts(t)
@@ -487,20 +511,38 @@ func TestTunUninstallScriptBehaviour(t *testing.T) {
 	if got := f.recordLines(t, "launchctl.args"); strings.Join(got, "|") != "bootout system/"+service.DaemonLabel {
 		t.Fatalf("launchctl argv = %q (stub must be the one invoked)", got)
 	}
+	// 每个候选的 helper 都收到 purge 调用（记录桩按 $0 区分候选）
+	purges := f.recordLines(t, "helper-args.log")
+	if len(purges) != len(f.layout.candidates) {
+		t.Fatalf("helper purge calls = %q, want one per candidate %v", purges, f.layout.candidates)
+	}
+	for i, cand := range f.layout.candidates {
+		if purges[i] != filepath.Join(cand, "tradewind-service")+" purge" {
+			t.Fatalf("purge call %d = %q, want %s purge", i, purges[i], filepath.Join(cand, "tradewind-service"))
+		}
+	}
 	for _, cand := range f.layout.candidates {
 		f.assertCandidateClean(t, cand)
 	}
 	if _, err := os.Stat(filepath.Join(c2, "bin")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("candidate bin dir must be reclaimed (err = %v)", err)
 	}
-	for _, gone := range []string{c1, c3, f.layout.plist, f.layout.log, f.layout.corePID,
-		filepath.Join(c1, "service.json"), f.layout.legacy} {
-		if _, err := os.Stat(gone); !errors.Is(err, os.ErrNotExist) {
+	for _, gone := range []string{c1, c3, f.layout.plist, f.layout.corePID, f.layout.anchorSock,
+		filepath.Join(c1, "service.json"), f.layout.legacy,
+		filepath.Join(f.layout.logsDir, service.ServiceLogName),
+		filepath.Join(f.layout.logsDir, service.CoreLogName),
+		filepath.Join(f.layout.logsDir, service.CoreLogName+".1")} {
+		if _, err := os.Stat(gone); !os.IsNotExist(err) {
 			t.Fatalf("%s must be removed (err = %v)", gone, err)
 		}
 	}
 	if data, err := os.ReadFile(decoy); err != nil || string(data) != "keep me" {
 		t.Fatalf("uninstall must not remove unrelated files (decoy err = %v)", err)
+	}
+	// 锚目录在 rm -f 清单 + logs 回收之后已空 → rmdir 成功（purge 桩没有真删
+	// service-data，这里锚内没有它——service-data 的删除由真 helper 的 purge 负责）
+	if _, err := os.Stat(f.layout.logsDir); !os.IsNotExist(err) {
+		t.Fatalf("logs dir must be reclaimed when empty (err = %v)", err)
 	}
 	// 诱饵令第二候选非空 → 其 bin 已回收但目录保留 → 父目录同样保留
 	if _, err := os.Stat(filepath.Join(f.root, "lib exec")); err != nil {
@@ -524,14 +566,23 @@ func TestTunUninstallScriptReclaimsParentWhenEmpty(t *testing.T) {
 	}
 }
 
-// plantUninstallArtifacts 铺满卸载脚本要清理的全部对象（模拟已安装态 + 遗留残留）。
+// plantUninstallArtifacts 铺满卸载脚本要清理的全部对象（模拟已安装态 + 遗留残留）：
+// plist、三份日志（含轮转出的 .1）、锚文件、锚目录 core.sock、遗留 helper。
 func (f *scriptFixture) plantUninstallArtifacts(t *testing.T) {
 	t.Helper()
 	for _, cand := range f.layout.candidates {
 		f.plant(t, cand)
 	}
-	for _, file := range []string{f.layout.plist, f.layout.log, f.layout.corePID,
-		filepath.Join(f.layout.anchorDir, "service.json"), f.layout.legacy} {
+	for _, file := range []string{
+		f.layout.plist,
+		filepath.Join(f.layout.logsDir, service.ServiceLogName),
+		filepath.Join(f.layout.logsDir, service.CoreLogName),
+		filepath.Join(f.layout.logsDir, service.CoreLogName+".1"),
+		filepath.Join(f.layout.anchorDir, "service.json"),
+		f.layout.corePID,
+		f.layout.anchorSock,
+		f.layout.legacy,
+	} {
 		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
 			t.Fatal(err)
 		}

@@ -10,9 +10,6 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -41,8 +38,12 @@ func DefaultServerConfig() ServerConfig {
 }
 
 // RunCLI 是 `tradewind service` 隐藏子命令入口：root 守卫（launchd daemon 是唯一
-// 合法运行形态）+ 信号驱动生命周期（SIGINT/SIGTERM → 停核/属主回收/sock 清理）。
+// 合法运行形态）+ 信号驱动生命周期（SIGINT/SIGTERM → 停核/sock 清理）。
 func RunCLI() error {
+	// 批⑥b §4.1：umask 022 钉死并被子进程（内核）继承——内核解压 UI、新建文件的
+	// 权限由此收敛；服务自身没有 umask(0) 窗口（v1.0 的窗口随代理入口移出用户目录
+	// 一并删除，§3.1）。
+	syscall.Umask(0o022)
 	if os.Geteuid() != 0 {
 		return errors.New("service: tradewind service must run as root (launchd daemon)")
 	}
@@ -51,7 +52,8 @@ func RunCLI() error {
 	return NewServer(DefaultServerConfig()).Run(ctx)
 }
 
-// Server 是特权服务：root 身份托管内核（core.Manager 复用 + SockPerm 0666）。
+// Server 是特权服务：root 身份托管内核（core.Manager 复用；批⑥b 起内核工作目录
+// 收进 root 属主的 <core_home>，用户域只经代理访问内核 API）。
 type Server struct {
 	cfg  ServerConfig
 	conf ConfigFile
@@ -65,16 +67,28 @@ type Server struct {
 	// verifyAnchorExecTrust；测试注入——测试夹具在 /tmp 下，祖先含系统符号链接
 	// /tmp 与全局可写目录，真 Lstat 必拒。
 	verifyExecTrust func(ConfigFile) error
+	// verifyHomeTrust root 专属内核工作目录复核（<core_home> 祖先链 + <anchor>/logs
+	// + CoreLog）。生产=verifyCoreHomeTrust；测试注入桩（同 verifyExecTrust 的原因）。
+	verifyHomeTrust func(ConfigFile) error
+	// coreEnv 内核进程环境（生产=恰好三个固定变量，不继承 launchd 环境；测试缝——
+	// 桩内核的 FAKE_CORE_MODE 等测试模式靠环境变量读取）。绝不在生产路径拼接
+	// os.Environ()：SKIP_SAFE_PATH_CHECK 一旦经 launchctl setenv 带入即全线失守（M8）。
+	coreEnv func(ConfigFile) []string
 }
 
 // NewServer 构造服务。
 func NewServer(cfg ServerConfig) *Server {
-	return &Server{cfg: cfg, verifyExecTrust: verifyAnchorExecTrust}
+	return &Server{
+		cfg:             cfg,
+		verifyExecTrust: verifyAnchorExecTrust,
+		verifyHomeTrust: verifyCoreHomeTrust,
+		coreEnv:         coreEnvProduction,
+	}
 }
 
 // Run 常驻主循环：加载锚 → 信任链复核 → 孤儿收编 → 监听（0666）→ accept；ctx
-// 结束 → 收敛退出。service.json 非法/缺失、或执行目录信任链不达标 → 返回错误
-// （CLI exit 1 → launchd 节流重试，R3 fail-closed）。
+// 结束 → 收敛退出。service.json 非法/缺失、或执行目录/内核工作目录信任链不达标
+// → 返回错误（CLI exit 1 → launchd 节流重试，R3 fail-closed）。
 func (s *Server) Run(ctx context.Context) error {
 	conf, err := LoadConfigFile(s.cfg.ConfigPath)
 	if err != nil {
@@ -86,6 +100,10 @@ func (s *Server) Run(ctx context.Context) error {
 	// 可写，执行目录可被整个换成符号链接。不达标一律不带病运行。
 	if err := s.verifyExecTrust(conf); err != nil {
 		return fmt.Errorf("service: exec dir failed the ownership check (fail-closed): %w", err)
+	}
+	// 批⑥b I2：内核工作目录与其产物所在子树（<anchor>/logs）同样逐级复核。
+	if err := s.verifyHomeTrust(conf); err != nil {
+		return fmt.Errorf("service: core home failed the trust check (fail-closed): %w", err)
 	}
 	if err := s.adoptOrphans(); err != nil {
 		return fmt.Errorf("service: adopt orphans: %w", err)
@@ -231,7 +249,7 @@ func (s *Server) handleStatus() Response {
 	}
 	ctx, cancel := context.WithTimeout(s.rootCtx, 2*time.Second)
 	defer cancel()
-	v, err := core.NewClient(s.conf.Sock, "").Version(ctx)
+	v, err := core.NewClient(s.conf.KernelSock, "").Version(ctx)
 	if err != nil {
 		return Response{OK: true}
 	}
@@ -242,138 +260,6 @@ func (s *Server) handleStatus() Response {
 // 也算托管中——期间 start 请求 no-op，健康由 start 进程就绪轮询确认）。
 func (s *Server) coreManaged() bool {
 	return s.mgr != nil && !s.gaveUp
-}
-
-// spawnCore 以 root 身份 spawn + 同步握手 + 记录 pid + 启动 Monitor 自愈。
-// 调用方须持 s.mu。每次 spawn 前复核执行目录信任链（review P2）：不达标即拒绝并
-// 返回明确错误；Manager 的 PreSpawn 钩子再复核一次，覆盖 Monitor 崩溃自愈的内部
-// respawn（那条路径不经过本函数）。
-func (s *Server) spawnCore() error {
-	if err := s.verifyExecTrust(s.conf); err != nil {
-		return fmt.Errorf("service: refusing to spawn, exec dir failed the ownership re-check: %w", err)
-	}
-	// core-service.log 预创建 0644（R2：用户可读诊断面；Manager 以 O_APPEND 打开
-	// 已存在文件，权限保持——"服务端尊重已存在文件权限"）。
-	// O_NOFOLLOW（batch6 真机 fold-in 2）：与 core.Manager 的日志打开同一道闸——
-	// 该路径在用户可写的数据目录，若被换成符号链接，跟随打开会让 root 在目标处
-	// 建出空文件。被拒（ELOOP）时预创建静默跳过，随后的 Manager.Spawn 会以明确的
-	// "symbolic link" 错误拒绝启动。
-	if err := os.MkdirAll(filepath.Dir(s.conf.Log), 0o755); err != nil {
-		return fmt.Errorf("service: mkdir log dir: %w", err)
-	}
-	if f, err := os.OpenFile(s.conf.Log, os.O_CREATE|os.O_WRONLY|syscall.O_NOFOLLOW, 0o644); err == nil {
-		f.Close()
-	}
-	mgr := core.NewManager(core.Config{
-		BinPath:     s.conf.CoreBin,
-		SidecarPath: s.conf.Sidecar,
-		DataDir:     s.conf.DataDir,
-		RuntimePath: s.conf.Runtime,
-		SockPath:    s.conf.Sock,
-		LogPath:     s.conf.Log,
-		SockPerm:    0o666, // root 属主 sock：用户态 CLI 直连必需（批⑥ §3.1 SockPerm 参数化）
-		// Monitor 崩溃自愈的 respawn 在 Manager 内部发生，不经 spawnCore——同一道闸
-		PreSpawn: func() error { return s.verifyExecTrust(s.conf) },
-	})
-	if err := mgr.Spawn(); err != nil {
-		return fmt.Errorf("service: spawn core: %w", err)
-	}
-	hsCtx, cancel := context.WithTimeout(s.rootCtx, handshakeWindow)
-	defer cancel()
-	if err := mgr.WaitReady(hsCtx); err != nil {
-		_ = mgr.Stop()
-		return fmt.Errorf("service: core handshake: %w", err)
-	}
-	s.mgr = mgr
-	s.gaveUp = false
-	s.recordCorePID()
-	go s.monitorLoop(mgr)
-	fmt.Printf("service: core spawned (pid %d)\n", mgr.PID())
-	return nil
-}
-
-// monitorLoop 崩溃自愈（Manager Monitor 复用，退避 1s/2s/4s）：预算耗尽 → gaveUp
-// 置位（新 start 请求可重新准入）+ pid 记录清理 + 数据目录属主回收。
-func (s *Server) monitorLoop(mgr *core.Manager) {
-	err := mgr.Monitor(s.rootCtx, func(giveUp error) {
-		s.mu.Lock()
-		s.gaveUp = true
-		s.mu.Unlock()
-		_ = os.Remove(s.cfg.PIDPath)
-		if cerr := chownDataDirBack(s.conf.DataDir, s.conf.DataUID); cerr != nil {
-			fmt.Fprintf(os.Stderr, "service: chown back after core death: %v\n", cerr)
-		}
-		fmt.Fprintf(os.Stderr, "service: core restart budget exhausted: %v\n", giveUp)
-	})
-	if err != nil {
-		return // giveUp 回调已处理；Monitor 返回值仅诊断
-	}
-}
-
-// stopCoreLocked 停核 + pid 记录清理 + 属主回收（调用方须持 s.mu；未托管时 no-op）。
-func (s *Server) stopCoreLocked() error {
-	if s.mgr == nil {
-		return nil
-	}
-	mgr := s.mgr
-	s.mgr = nil
-	if err := mgr.Stop(); err != nil {
-		return fmt.Errorf("service: stop core: %w", err)
-	}
-	_ = os.Remove(s.cfg.PIDPath)
-	if err := chownDataDirBack(s.conf.DataDir, s.conf.DataUID); err != nil {
-		// 回收失败不阻断停核（root core 已停；下次启动的用户态 core 若 EACCES
-		// 由 tun status / 重装指引收敛），但必须留痕
-		fmt.Fprintf(os.Stderr, "service: chown back: %v\n", err)
-	}
-	fmt.Println("service: core stopped")
-	return nil
-}
-
-// stopCore 并发安全停核（Run 收敛路径用）。
-func (s *Server) stopCore() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_ = s.stopCoreLocked()
-}
-
-// adoptOrphans 服务自身重启的孤儿收编（批⑥ §3.1/R13）：launchd 拉起时旧子进程
-// mihomo 仍存活（父死后被 launchd 收养，cmd.Wait 不可用）——读 core.pid：pid 存活
-// 且身份匹配 → root SIGTERM 回收 → 走正常 start 流程收编（代价=健康 core 全断
-// 重启一次，R13 登记）。
-func (s *Server) adoptOrphans() error {
-	data, err := os.ReadFile(s.cfg.PIDPath)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("service: read core.pid: %w", err)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
-		_ = os.Remove(s.cfg.PIDPath) // 损坏记录清零（保守收敛）
-		return nil
-	}
-	_ = os.Remove(s.cfg.PIDPath)
-	if !processAlive(pid) || !coreProcessMatches(pid, s.conf.DataDir) {
-		return nil // 已死或身份不符（pid 复用防护）：无可收编
-	}
-	fmt.Printf("service: reclaiming orphan core (pid %d)\n", pid)
-	if err := killProcessGracefully(pid); err != nil {
-		return fmt.Errorf("service: reclaim orphan pid %d: %w", pid, err)
-	}
-	if err := chownDataDirBack(s.conf.DataDir, s.conf.DataUID); err != nil {
-		fmt.Fprintf(os.Stderr, "service: chown back after reclaim: %v\n", err)
-	}
-	if err := s.spawnCore(); err != nil {
-		return fmt.Errorf("service: adopt: %w", err)
-	}
-	return nil
-}
-
-// recordCorePID 写 root core pid 记录（孤儿收编判据；root-owned 目录内 0644）。
-func (s *Server) recordCorePID() {
-	_ = os.WriteFile(s.cfg.PIDPath, []byte(strconv.Itoa(s.mgr.PID())+"\n"), 0o644)
 }
 
 // writeResponse 应答一行 JSON（写失败仅日志——对端可能已断开）。

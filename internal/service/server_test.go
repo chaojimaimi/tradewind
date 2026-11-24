@@ -48,11 +48,22 @@ func shortTempDir(t *testing.T) string {
 	return dir
 }
 
-// writeServiceFixture 组装桩内核 + service.json 锚（sock 全部落 /tmp 短路径；
-// fakecore 经 Manager 正常模式 spawn——锚只含路径，模式无注入面）。
+// writeServiceFixture 组装桩内核 + service.json 锚（v3：锚目录与数据目录分成两个
+// 目录——CoreHome 必须在锚内且不能在 DataDir 内；sock 全部落 /tmp 短路径；
+// fakecore 经 Manager 正常模式 spawn——锚只含路径，模式无注入面）。DataUID 用
+// 进程自身 uid：非 root 下 readSafe/stageRuntime 的属主校验与 LogOwner 的 fchown
+// 才能通过。
 func writeServiceFixture(t *testing.T, dir string) (ServerConfig, ConfigFile) {
 	t.Helper()
-	runtime := filepath.Join(dir, "runtime.yaml")
+	dataDir := filepath.Join(dir, "data")
+	coreHome := filepath.Join(dir, "service-data")
+	if err := os.MkdirAll(filepath.Join(dataDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(coreHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtime := filepath.Join(dataDir, "runtime.yaml")
 	if err := os.WriteFile(runtime, []byte("proxies: []\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -65,13 +76,17 @@ func writeServiceFixture(t *testing.T, dir string) (ServerConfig, ConfigFile) {
 		t.Fatal(err)
 	}
 	conf := ConfigFile{
+		Layout:      3,
 		AllowedUIDs: []int{os.Getuid()},
-		DataDir:     dir,
+		DataDir:     dataDir,
+		HelperPath:  HelperPathIn(filepath.Join(dir, "exec")),
 		CoreBin:     fakeCoreBin,
 		Sidecar:     sidecar,
-		Runtime:     runtime,
-		Sock:        filepath.Join(dir, "core.sock"),
-		Log:         filepath.Join(dir, "logs", "core-service.log"),
+		CoreHome:    coreHome,
+		KernelSock:  KernelSockIn(coreHome),
+		BrokerSock:  filepath.Join(dir, "core.sock"),
+		CoreLog:     filepath.Join(dir, "logs", CoreLogName),
+		UserRuntime: runtime,
 		DataUID:     os.Getuid(),
 	}
 	if err := writeJSONFile(filepath.Join(dir, "service.json"), conf); err != nil {
@@ -84,20 +99,32 @@ func writeServiceFixture(t *testing.T, dir string) (ServerConfig, ConfigFile) {
 	}, conf
 }
 
-// trustRecorder 是执行目录信任链复核的测试桩：默认放行并计数，可切换为拒绝。
-// WHY 需要桩：测试夹具都在 /tmp 下，祖先含系统符号链接 /tmp 与全局可写目录，
-// 生产复核（真 Lstat）对夹具必拒——复核逻辑本身由 ownership_test.go 单独覆盖。
+// trustRecorder 是两道信任链复核（执行目录 / 内核工作目录）的测试桩：默认放行并
+// 分别计数，可分别切换为拒绝。WHY 需要桩：测试夹具都在 /tmp 下，祖先含系统符号
+// 链接 /tmp 与全局可写目录，生产复核（真 Lstat）对夹具必拒——复核逻辑本身由
+// ownership_test.go / rootstate_test.go 单独覆盖。
 type trustRecorder struct {
-	mu    sync.Mutex
-	calls int
-	deny  error
+	mu        sync.Mutex
+	calls     int
+	deny      error
+	homeCalls int
+	homeDeny  error
 }
 
+// verify 是执行目录复核缝（verifyExecTrust）的桩。
 func (r *trustRecorder) verify(ConfigFile) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls++
 	return r.deny
+}
+
+// verifyHome 是内核工作目录复核缝（verifyHomeTrust）的桩。
+func (r *trustRecorder) verifyHome(ConfigFile) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.homeCalls++
+	return r.homeDeny
 }
 
 func (r *trustRecorder) count() int {
@@ -106,26 +133,50 @@ func (r *trustRecorder) count() int {
 	return r.calls
 }
 
+func (r *trustRecorder) homeCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.homeCalls
+}
+
 func (r *trustRecorder) failWith(err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.deny = err
 }
 
-// allowTrust 给直接构造的 Server 装上放行桩。
+func (r *trustRecorder) failHomeWith(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.homeDeny = err
+}
+
+// allowTrust 给直接构造的 Server 装上放行桩（两道复核缝都装）。
 func allowTrust(s *Server) *trustRecorder {
 	rec := &trustRecorder{}
 	s.verifyExecTrust = rec.verify
+	s.verifyHomeTrust = rec.verifyHome
 	return rec
 }
 
 // startStubServer 启动服务（后台 goroutine + 可取消 ctx），等待 socket 就绪；
 // Cleanup 负责取消并等待 Run 优雅收敛。返回复核桩（默认放行）供用例计数/切换。
 func startStubServer(t *testing.T, cfg ServerConfig) *trustRecorder {
+	srv, trust := startStubServerTuned(t, cfg, nil)
+	_ = srv
+	return trust
+}
+
+// startStubServerTuned 是 startStubServer 的可调形态：tune 在 Run 启动前对 Server
+// 与复核桩做额外加工（coreEnv 缝、home 拒绝等的用例用它）。
+func startStubServerTuned(t *testing.T, cfg ServerConfig, tune func(*Server, *trustRecorder)) (*Server, *trustRecorder) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	srv := NewServer(cfg)
 	trust := allowTrust(srv)
+	if tune != nil {
+		tune(srv, trust)
+	}
 	done := make(chan error, 1)
 	go func() { done <- srv.Run(ctx) }()
 	t.Cleanup(func() {
@@ -137,7 +188,7 @@ func startStubServer(t *testing.T, cfg ServerConfig) *trustRecorder {
 		}
 	})
 	waitForFile(t, cfg.SockPath, 5*time.Second)
-	return trust
+	return srv, trust
 }
 
 func waitForFile(t *testing.T, path string, timeout time.Duration) {
@@ -174,7 +225,7 @@ func TestServiceStartStopStatusFlow(t *testing.T) {
 	if !st.OK || st.PID != resp.PID || st.Version == "" {
 		t.Fatalf("Status resp = %+v, want pid=%d version non-empty", st, resp.PID)
 	}
-	waitForFile(t, conf.Sock, 2*time.Second) // 服务托管内核的 core.sock 在位
+	waitForFile(t, conf.KernelSock, 2*time.Second) // 服务托管内核的 core.sock 在位
 	if pidData, err := os.ReadFile(cfg.PIDPath); err != nil || strings.TrimSpace(string(pidData)) != fmt.Sprint(resp.PID) {
 		t.Fatalf("core.pid = %q err %v, want %d", pidData, err, resp.PID)
 	}
@@ -329,14 +380,15 @@ func rawRequest(sockPath, payload string) (Response, error) {
 }
 
 // TestServiceAdoptsOrphanCore 孤儿收编（R13）：服务启动时 core.pid 记录的孤儿
-// 内核存活且身份匹配 → SIGTERM 回收 → 正常 start 流程收编（新 pid 接管）。
+// 内核存活且身份匹配（命令行含 -d <core_home>）→ SIGTERM 回收 → 正常 start 流程
+// 收编（新 pid 接管）。
 func TestServiceAdoptsOrphanCore(t *testing.T) {
 	dir := shortTempDir(t)
 	cfg, conf := writeServiceFixture(t, dir)
-	// 手工拉起"孤儿"桩内核（同 Manager 参数形态：-d dataDir -f runtime -ext-ctl-unix sock）
-	orphan := exec.Command(fakeCoreBin, "-d", conf.DataDir, "-f", conf.Runtime,
-		"-ext-ctl-unix", conf.Sock)
-	orphan.Env = append(os.Environ(), "FAKE_CORE_MODE=normal")
+	// 手工拉起"孤儿"桩内核（同 Manager 参数形态：-d coreHome -f runtime -ext-ctl-unix sock）
+	orphan := exec.Command(fakeCoreBin, "-d", conf.CoreHome, "-f", RuntimeIn(conf.CoreHome),
+		"-ext-ctl-unix", conf.KernelSock)
+	orphan.Env = []string{"FAKE_CORE_MODE=normal"}
 	if err := orphan.Start(); err != nil {
 		t.Fatalf("spawn orphan: %v", err)
 	}
@@ -351,7 +403,7 @@ func TestServiceAdoptsOrphanCore(t *testing.T) {
 			_ = orphan.Process.Kill()
 		}
 	})
-	waitForFile(t, conf.Sock, 5*time.Second)
+	waitForFile(t, conf.KernelSock, 5*time.Second)
 	if err := os.WriteFile(cfg.PIDPath, []byte(fmt.Sprintf("%d\n", orphan.Process.Pid)), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -364,7 +416,7 @@ func TestServiceAdoptsOrphanCore(t *testing.T) {
 		if err == nil {
 			var newPID int
 			if _, perr := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &newPID); perr == nil &&
-				newPID > 0 && newPID != orphan.Process.Pid && probeAlive(conf.Sock) {
+				newPID > 0 && newPID != orphan.Process.Pid && probeAlive(conf.KernelSock) {
 				return
 			}
 		}
@@ -389,25 +441,6 @@ func TestServiceConfigInvalidExits(t *testing.T) {
 	}
 }
 
-// TestChownDataDirBack 属主回收递归遍历（R10 的纯逻辑层——root 方向翻转进真机目验，
-// R9）：嵌套目录/文件全量可达、无错误。
-func TestChownDataDirBack(t *testing.T) {
-	dir := shortTempDir(t)
-	nested := filepath.Join(dir, "logs")
-	if err := os.MkdirAll(nested, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(nested, "core-service.log"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "cache.db"), []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := chownDataDirBack(dir, os.Getuid()); err != nil {
-		t.Fatalf("chown back: %v", err)
-	}
-}
-
 // probeAlive 测试内 /version 探活。
 func probeAlive(sockPath string) bool {
 	cl := core.NewClient(sockPath, "")
@@ -415,39 +448,6 @@ func probeAlive(sockPath string) bool {
 	defer cancel()
 	_, err := cl.Version(ctx)
 	return err == nil
-}
-
-// TestChownDataDirBackSkipsSymlinks chown 提权面封堵（batch6 review P1-1）：
-// dataDir 内植入 symlink（悬空 + 指向外部文件），回收回调必须跳过——旧实现
-// os.Chown 走 chown(2) 跟随 symlink：悬空链必败（ENOENT 污染回收）、root 下
-// 指向 /etc/sudoers 等会被 chown 给用户 uid（本地提权）。
-func TestChownDataDirBackSkipsSymlinks(t *testing.T) {
-	base := shortTempDir(t)
-	dataDir := filepath.Join(base, "data")
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dataDir, "cache.db"), []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	target := filepath.Join(base, "target.txt") // dataDir 之外——绝不被触碰
-	if err := os.WriteFile(target, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join(base, "missing-target"), filepath.Join(dataDir, "dangling")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(target, filepath.Join(dataDir, "linked")); err != nil {
-		t.Fatal(err)
-	}
-	// 旧实现：dangling symlink 令 chown(2) ENOENT → 整个回收报错（行为可辨锚）
-	if err := chownDataDirBack(dataDir, os.Getuid()); err != nil {
-		t.Fatalf("chown back with symlinks: %v (symlink must be skipped)", err)
-	}
-	info, err := os.Lstat(target)
-	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		t.Fatalf("external target must stay untouched: mode=%v err=%v", info.Mode(), err)
-	}
 }
 
 // TestXucredUIDDecodesUint32 cr_uid 32 位解析（batch6 review P1-2）：uid_t=

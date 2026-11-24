@@ -31,20 +31,27 @@ func pointTunAnchorAt(t *testing.T, path string) {
 	t.Cleanup(func() { tunServiceConfigPath = old })
 }
 
-// writeTunAnchor 写一份合法锚到 path（mutate 可改写字段）；返回写入的结构。
+// writeTunAnchor 写一份合法锚到 path（v3 形态，批⑥b §4.1；mutate 可改写字段）；
+// 返回写入的结构。路径是词法事实——不需要真实存在（锚消费方只读字段）。
 func writeTunAnchor(t *testing.T, path string, mutate func(*service.ConfigFile)) service.ConfigFile {
 	t.Helper()
 	base := filepath.Dir(path)
+	execDir := filepath.Join(base, "exec dir")
+	dataDir := filepath.Join(base, "data")
+	coreHome := filepath.Join(base, "service-data")
 	cfg := service.ConfigFile{
+		Layout:      3,
 		AllowedUIDs: []int{501},
-		DataDir:     filepath.Join(base, "data"),
-		HelperPath:  filepath.Join(base, "exec dir", service.HelperFileName),
-		CoreBin:     service.CorePathIn(filepath.Join(base, "exec dir")),
-		Sidecar:     service.SidecarPathIn(filepath.Join(base, "exec dir")),
-		Runtime:     filepath.Join(base, "data", "runtime.yaml"),
-		Sock:        filepath.Join(base, "data", "core.sock"),
-		Log:         filepath.Join(base, "data", "logs", "core-service.log"),
+		DataDir:     dataDir,
 		DataUID:     501,
+		HelperPath:  filepath.Join(execDir, service.HelperFileName),
+		CoreBin:     service.CorePathIn(execDir),
+		Sidecar:     service.SidecarPathIn(execDir),
+		CoreHome:    coreHome,
+		KernelSock:  service.KernelSockIn(coreHome),
+		BrokerSock:  filepath.Join(base, "core.sock"),
+		CoreLog:     filepath.Join(base, "logs", service.CoreLogName),
+		UserRuntime: filepath.Join(dataDir, "runtime.yaml"),
 	}
 	if mutate != nil {
 		mutate(&cfg)
@@ -235,6 +242,15 @@ func (failingStatusClient) Stop() (service.Response, error) {
 }
 func (failingStatusClient) Status() (service.Response, error) {
 	return service.Response{}, errors.New("dial: refused")
+}
+
+// TestTunDaemonLogPathDefault 批⑥b §4.6：服务日志默认落在 root 属主锚目录的
+// logs/ 下、属主为数据目录用户（迁出 admin 可写的 /Library/Logs，R22 闭环）。
+func TestTunDaemonLogPathDefault(t *testing.T) {
+	want := filepath.Join(service.DefaultLogsDir, service.ServiceLogName)
+	if tunDaemonLogPath != want {
+		t.Fatalf("tunDaemonLogPath = %q, want %q", tunDaemonLogPath, want)
+	}
 }
 
 // --- 两项陈旧检测 ---
