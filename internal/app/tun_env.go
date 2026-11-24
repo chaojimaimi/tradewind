@@ -40,6 +40,9 @@ type tunEnv struct {
 	serviceReachable func() bool
 	// waitForServiceReady 提权安装后的安装验证（12s 轮询服务 status；失败带诊断）。
 	waitForServiceReady func() error
+	// safeExecDirCandidates 生成安装脚本前的执行目录候选过滤（review P2）：祖先目录
+	// 不安全的候选不进脚本；一个不剩 → 报错带各候选被排除的原因。
+	safeExecDirCandidates func() ([]string, error)
 	// elevate 提权脚本执行缝隙（测试桩——绝不真实提权）。
 	elevate func(scriptPath string) error
 	// stopStart 杀旧 start（复用 stop 编排语义 20s/StopW）。
@@ -60,17 +63,18 @@ type tunEnv struct {
 // bin/mihomo，故带 home）。
 func productionTunEnv(home paths.Home) tunEnv {
 	return tunEnv{
-		serviceClient:        func(timeout time.Duration) (tunServiceClientT, error) { return tunNewClient(timeout) },
-		serviceAnchorExists:  serviceConfigInstalled,
-		legacyResidueExists:  legacyHelperResidueExists,
-		helperMatchesCurrent: helperBinaryMatches,
-		coreMatchesCurrent:   coreBinaryMatches,
-		serviceReachable:     tunServiceReachable,
-		waitForServiceReady:  tunWaitForServiceReady,
-		elevate:              runElevatedScript,
-		stopStart:            func(home paths.Home) error { return StopW(home, os.Stdout) },
-		spawnStart:           spawnTunStartDetached,
-		waitServiceCore:      tunProbeServiceCore,
+		serviceClient:         func(timeout time.Duration) (tunServiceClientT, error) { return tunNewClient(timeout) },
+		serviceAnchorExists:   serviceConfigInstalled,
+		legacyResidueExists:   legacyHelperResidueExists,
+		helperMatchesCurrent:  helperBinaryMatches,
+		coreMatchesCurrent:    coreBinaryMatches,
+		serviceReachable:      tunServiceReachable,
+		waitForServiceReady:   tunWaitForServiceReady,
+		safeExecDirCandidates: tunSafeExecDirCandidates,
+		elevate:               runElevatedScript,
+		stopStart:             func(home paths.Home) error { return StopW(home, os.Stdout) },
+		spawnStart:            spawnTunStartDetached,
+		waitServiceCore:       tunProbeServiceCore,
 		waitUserCore: func(home paths.Home, timeout time.Duration) bool {
 			return waitCoreReady(home, store.ReadSecret(home), timeout)
 		},

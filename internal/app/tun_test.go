@@ -96,7 +96,10 @@ func newTunTestEnv(t *testing.T) (tunEnv, *fakeTunService, *int, *int, *fakeNetR
 		coreMatchesCurrent:   func(paths.Home) bool { return true },
 		serviceReachable:     func() bool { return true },
 		waitForServiceReady:  func() error { return nil },
-		elevate:              func(string) error { return nil },
+		safeExecDirCandidates: func() ([]string, error) {
+			return service.ExecDirCandidates(), nil // 默认全安全；过滤用例自行覆盖
+		},
+		elevate: func(string) error { return nil },
 		stopStart: func(paths.Home) error {
 			stopStarts++
 			return nil

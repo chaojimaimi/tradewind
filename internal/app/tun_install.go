@@ -62,7 +62,13 @@ func tunInstallWith(home paths.Home, env tunEnv, force bool) error {
 			fmt.Printf("warning: pre-reinstall service stop skipped (%v)\n", err)
 		}
 	}
-	script := tunInstallScript(exe, home.String(), os.Getuid())
+	// 候选过滤（review P2）：祖先目录用户/admin 可写的候选不进脚本——那种目录下
+	// 执行目录可被整个换成符号链接。一个都不剩 → 说明原因，不生成脚本。
+	candidates, err := env.safeExecDirCandidates()
+	if err != nil {
+		return err
+	}
+	script := tunInstallScriptFor(exe, home.String(), os.Getuid(), installScriptLayout(candidates))
 	if err := tunRunElevated(home, env, script); err != nil {
 		return err
 	}

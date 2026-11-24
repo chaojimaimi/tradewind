@@ -86,7 +86,7 @@ if [ -f "$SIGN_KEYCHAIN_PASS_FILE" ]; then
 	chmod 600 "$SIGN_KEYCHAIN_PASS_FILE"
 fi
 
-# --- 幂等：钥匙串已存在 → 能解锁且同名证书已在则 no-op ---
+# --- 幂等：钥匙串已存在 → 能解锁且身份可用（证书 + 私钥）则 no-op ---
 
 if [ -f "$SIGN_KEYCHAIN" ]; then
 	[ -n "$PASS" ] || die "钥匙串已存在但密码文件缺失或为空：$SIGN_KEYCHAIN_PASS_FILE（无法解锁；删除钥匙串与密码文件后重跑）"
@@ -94,8 +94,13 @@ if [ -f "$SIGN_KEYCHAIN" ]; then
 		die "钥匙串 $SIGN_KEYCHAIN 无法用 $SIGN_KEYCHAIN_PASS_FILE 解锁（密码不匹配）；删除钥匙串与密码文件后重跑"
 	fi
 	if SHA1="$(identity_sha1)"; then
-		echo "==> codesign identity \"$SIGN_IDENTITY\" already present in $SIGN_KEYCHAIN (SHA-1: $SHA1); nothing to do"
-		exit 0
+		# 证书在 ≠ 身份可用：残缺钥匙串（私钥丢失，或证书已过期）只查证书会永远
+		# 假成功，拖到 codesign 才炸——在此报错并指明出路（review P3-2）。
+		if identity_usable; then
+			echo "==> codesign identity \"$SIGN_IDENTITY\" already present in $SIGN_KEYCHAIN (SHA-1: $SHA1); nothing to do"
+			exit 0
+		fi
+		die "钥匙串 $SIGN_KEYCHAIN 里有同名证书但找不到可用的代码签名身份（私钥丢失或证书已过期）——请删除 $SIGN_KEYCHAIN 与 $SIGN_KEYCHAIN_PASS_FILE 后重跑"
 	fi
 fi
 

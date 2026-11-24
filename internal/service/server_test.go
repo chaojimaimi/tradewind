@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -83,12 +84,48 @@ func writeServiceFixture(t *testing.T, dir string) (ServerConfig, ConfigFile) {
 	}, conf
 }
 
+// trustRecorder 是执行目录信任链复核的测试桩：默认放行并计数，可切换为拒绝。
+// WHY 需要桩：测试夹具都在 /tmp 下，祖先含系统符号链接 /tmp 与全局可写目录，
+// 生产复核（真 Lstat）对夹具必拒——复核逻辑本身由 ownership_test.go 单独覆盖。
+type trustRecorder struct {
+	mu    sync.Mutex
+	calls int
+	deny  error
+}
+
+func (r *trustRecorder) verify(ConfigFile) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls++
+	return r.deny
+}
+
+func (r *trustRecorder) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
+}
+
+func (r *trustRecorder) failWith(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.deny = err
+}
+
+// allowTrust 给直接构造的 Server 装上放行桩。
+func allowTrust(s *Server) *trustRecorder {
+	rec := &trustRecorder{}
+	s.verifyExecTrust = rec.verify
+	return rec
+}
+
 // startStubServer 启动服务（后台 goroutine + 可取消 ctx），等待 socket 就绪；
-// Cleanup 负责取消并等待 Run 优雅收敛。
-func startStubServer(t *testing.T, cfg ServerConfig) {
+// Cleanup 负责取消并等待 Run 优雅收敛。返回复核桩（默认放行）供用例计数/切换。
+func startStubServer(t *testing.T, cfg ServerConfig) *trustRecorder {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	srv := NewServer(cfg)
+	trust := allowTrust(srv)
 	done := make(chan error, 1)
 	go func() { done <- srv.Run(ctx) }()
 	t.Cleanup(func() {
@@ -100,6 +137,7 @@ func startStubServer(t *testing.T, cfg ServerConfig) {
 		}
 	})
 	waitForFile(t, cfg.SockPath, 5*time.Second)
+	return trust
 }
 
 func waitForFile(t *testing.T, path string, timeout time.Duration) {
@@ -191,6 +229,7 @@ func TestServiceStaleGenerationRejected(t *testing.T) {
 	s := NewServer(cfg)
 	s.conf = conf
 	s.rootCtx = context.Background()
+	allowTrust(s)
 	s.curGen = 5 // 模拟"上一代 start 已以 5 准入"
 
 	resp := s.handleStart(Request{Action: ActionStart, Generation: 5})

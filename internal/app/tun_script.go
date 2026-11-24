@@ -31,6 +31,35 @@ type tunScriptLayout struct {
 	rmdirDirs []string // 可能由安装脚本新建的父目录（仅在空时回收）
 }
 
+// installScriptLayout 安装脚本的生产布局，候选换成过滤后的安全集（review P2）。
+// 卸载脚本不受影响：它仍遍历全部候选做清理。
+func installScriptLayout(candidates []string) tunScriptLayout {
+	lay := productionTunScriptLayout()
+	lay.candidates = candidates
+	return lay
+}
+
+// tunSafeExecDirCandidates 生成安装脚本前的候选过滤（用户态 stat）：祖先目录不安全
+// 的候选不进脚本；一个都不剩 → 报错带各候选被排除的原因，不生成脚本。
+func tunSafeExecDirCandidates() ([]string, error) {
+	safe, rejected := service.SafeExecDirCandidates()
+	return composeSafeCandidates(safe, rejected)
+}
+
+// composeSafeCandidates 是 tunSafeExecDirCandidates 的纯函数形态（"一个不剩"时的
+// 报错文案在此拼装）。
+func composeSafeCandidates(safe []string, rejected []service.ExecDirCandidateRejection) ([]string, error) {
+	if len(safe) > 0 {
+		return safe, nil
+	}
+	reasons := make([]string, 0, len(rejected))
+	for _, r := range rejected {
+		reasons = append(reasons, fmt.Sprintf("%s（%v）", r.Candidate, r.Reason))
+	}
+	return nil, fmt.Errorf("app: 没有祖先目录安全的安装位置（执行目录及其各级祖先目录须归 root 所有且对 group/other 不可写）：%s；"+
+		"修正对应目录的属主/权限后重试", strings.Join(reasons, "；"))
+}
+
 // productionTunScriptLayout 生产布局（路径全部来自 service 包常量）。
 func productionTunScriptLayout() tunScriptLayout {
 	return tunScriptLayout{
@@ -66,7 +95,9 @@ clean_candidate() {
 }
 `
 
-// tunInstallScript 生成生产安装提权脚本（纯函数）。
+// tunInstallScript 按全候选的生产布局生成安装脚本（纯函数）。生产编排不直接用它
+// ——tunInstallWith 先过滤候选再调 tunInstallScriptFor；本函数服务于内容断言
+// （全候选布局即脚本的最大形态）。
 func tunInstallScript(cliPath, dataDir string, dataUID int) string {
 	return tunInstallScriptFor(cliPath, dataDir, dataUID, productionTunScriptLayout())
 }

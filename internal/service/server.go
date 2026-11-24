@@ -61,15 +61,20 @@ type Server struct {
 	gaveUp  bool // Monitor 重启预算耗尽（内核终亡）→ 新 start 请求可重新准入
 	curGen  int  // 所有权仲裁基线：start 须 > curGen；显式 stop 后归零（见 handleStop）
 	rootCtx context.Context
+	// verifyExecTrust 执行目录信任链复核（锚所指可执行路径 + 全部祖先目录）。生产=
+	// verifyAnchorExecTrust；测试注入——测试夹具在 /tmp 下，祖先含系统符号链接
+	// /tmp 与全局可写目录，真 Lstat 必拒。
+	verifyExecTrust func(ConfigFile) error
 }
 
 // NewServer 构造服务。
 func NewServer(cfg ServerConfig) *Server {
-	return &Server{cfg: cfg}
+	return &Server{cfg: cfg, verifyExecTrust: verifyAnchorExecTrust}
 }
 
-// Run 常驻主循环：加载锚 → 孤儿收编 → 监听（0666）→ accept；ctx 结束 → 收敛退出。
-// service.json 非法/缺失 → 返回错误（CLI exit 1 → launchd 节流重试，R3）。
+// Run 常驻主循环：加载锚 → 信任链复核 → 孤儿收编 → 监听（0666）→ accept；ctx
+// 结束 → 收敛退出。service.json 非法/缺失、或执行目录信任链不达标 → 返回错误
+// （CLI exit 1 → launchd 节流重试，R3 fail-closed）。
 func (s *Server) Run(ctx context.Context) error {
 	conf, err := LoadConfigFile(s.cfg.ConfigPath)
 	if err != nil {
@@ -77,6 +82,11 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	s.conf = conf
 	s.rootCtx = ctx
+	// 启动复核（review P2）：Install 时的归属校验只跑一次；此后祖先目录若用户/admin
+	// 可写，执行目录可被整个换成符号链接。不达标一律不带病运行。
+	if err := s.verifyExecTrust(conf); err != nil {
+		return fmt.Errorf("service: exec dir failed the ownership check (fail-closed): %w", err)
+	}
 	if err := s.adoptOrphans(); err != nil {
 		return fmt.Errorf("service: adopt orphans: %w", err)
 	}
@@ -235,8 +245,13 @@ func (s *Server) coreManaged() bool {
 }
 
 // spawnCore 以 root 身份 spawn + 同步握手 + 记录 pid + 启动 Monitor 自愈。
-// 调用方须持 s.mu。
+// 调用方须持 s.mu。每次 spawn 前复核执行目录信任链（review P2）：不达标即拒绝并
+// 返回明确错误；Manager 的 PreSpawn 钩子再复核一次，覆盖 Monitor 崩溃自愈的内部
+// respawn（那条路径不经过本函数）。
 func (s *Server) spawnCore() error {
+	if err := s.verifyExecTrust(s.conf); err != nil {
+		return fmt.Errorf("service: refusing to spawn, exec dir failed the ownership re-check: %w", err)
+	}
 	// core-service.log 预创建 0644（R2：用户可读诊断面；Manager 以 O_APPEND 打开
 	// 已存在文件，权限保持——"服务端尊重已存在文件权限"）。
 	// O_NOFOLLOW（batch6 真机 fold-in 2）：与 core.Manager 的日志打开同一道闸——
@@ -257,6 +272,8 @@ func (s *Server) spawnCore() error {
 		SockPath:    s.conf.Sock,
 		LogPath:     s.conf.Log,
 		SockPerm:    0o666, // root 属主 sock：用户态 CLI 直连必需（批⑥ §3.1 SockPerm 参数化）
+		// Monitor 崩溃自愈的 respawn 在 Manager 内部发生，不经 spawnCore——同一道闸
+		PreSpawn: func() error { return s.verifyExecTrust(s.conf) },
 	})
 	if err := mgr.Spawn(); err != nil {
 		return fmt.Errorf("service: spawn core: %w", err)

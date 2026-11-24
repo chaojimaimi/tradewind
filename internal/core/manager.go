@@ -46,6 +46,10 @@ type Config struct {
 	// root 属主 sock，用户态 CLI 直连必需。Monitor 崩溃重启内部 Spawn+WaitReady
 	// 走同参数，自愈后权限保持，批⑥ §3.1 SockPerm 参数化）
 	SockPerm os.FileMode
+	// PreSpawn 是每次 spawn 前的前置钩子（nil = 无）：返回错误则本次 spawn 不执行。
+	// 特权服务用它复核执行目录归属——Monitor 崩溃自愈的内部 respawn 不经过服务的
+	// spawnCore，钩子保证初始 spawn 与自愈 respawn 走同一道闸。
+	PreSpawn func() error
 }
 
 func (c *Config) fillDefaults() {
@@ -80,6 +84,11 @@ func NewManager(cfg Config) *Manager {
 
 // Spawn 校验二进制并启动内核子进程，stdout/stderr 落日志。
 func (m *Manager) Spawn() error {
+	if m.cfg.PreSpawn != nil {
+		if err := m.cfg.PreSpawn(); err != nil {
+			return fmt.Errorf("core: pre-spawn check: %w", err)
+		}
+	}
 	if err := VerifyBinary(m.cfg.BinPath, m.cfg.SidecarPath); err != nil {
 		return err
 	}
