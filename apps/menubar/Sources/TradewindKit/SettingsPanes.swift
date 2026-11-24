@@ -283,34 +283,12 @@ struct GeneralPane: View {
 
     // MARK: 系统代理（批④ §3.4：PAC 模式 + 绕过域名）
 
-    /// PAC 模式开关 + 绕过域名编辑行（走 ProxyModeModel settingsGet/set 链——双轨制
-    /// 不走 @AppStorage；写编排含 applied 态形态翻转重放与 gateway_port 仅警告联动，
-    /// 由 Go 侧编排）。TUN 模式开关（批⑥ §4）：`tun on|off` 编排（首装含提权弹窗，
-    /// 90s 档），与系统代理为独立开关（切换不改用户意图，由 CLI 编排精确恢复）。
+    /// 「网络代理」区：内容见 ProxySectionContent——PAC 模式开关 + 绕过域名编辑行始终
+    /// 在，TUN 模式行仅当功能开关 `FeatureFlags.privilegedTUN` 为 true 时参与装配
+    /// （M3 batch6 release-gate：R16 闭环前隐藏）。
     private var proxySection: some View {
         SettingsSection(title: "网络代理") {
-            SettingsRow(label: "TUN 模式",
-                        subtitle: "root 特权服务托管内核（首次开启安装服务并弹管理员授权）") {
-                SwitchPill(isOn: Binding(
-                    get: { proxyModeModel.tunEnabled },
-                    set: { newValue in Task { await proxyModeModel.setTUN(newValue) } }
-                ), small: true, accessibilityLabel: "TUN 模式")
-                .disabled(proxyModeModel.busy)
-            }
-            rowDivider
-            SettingsRow(label: "PAC 模式",
-                        subtitle: "PAC 需面板网关（panel_enabled）；绕过默认 localhost/内网段") {
-                SwitchPill(isOn: Binding(
-                    get: { proxyModeModel.pacMode },
-                    set: { newValue in Task { await proxyModeModel.setPacMode(newValue) } }
-                ), small: true, accessibilityLabel: "PAC 模式")
-                .disabled(proxyModeModel.busy)
-            }
-            rowDivider
-            SettingsRow(label: "绕过域名",
-                        subtitle: "逗号分隔；留空恢复缺省（默认 localhost/内网段）") {
-                BypassValueField(model: proxyModeModel)
-            }
+            ProxySectionContent(proxyModeModel: proxyModeModel)
         }
     }
 
@@ -325,6 +303,88 @@ struct GeneralPane: View {
     /// 行分隔（demo .frow + .frow 的 0.5px hair；同 ToggleGroupCard 分隔口径）
     private var rowDivider: some View {
         Divider().overlay(Theme.muted(scheme).opacity(0.2))
+    }
+}
+
+// MARK: - 「网络代理」区装配（M3 batch6 release-gate：TUN 行随功能开关进退）
+
+/// 「网络代理」区的行（纯函数可测的装配单元）。
+enum ProxySectionRow: Hashable {
+    case tun
+    case pac
+    case bypass
+}
+
+/// 「网络代理」区的纵向装配（纯函数，`@testable` 可测）：PAC 模式与绕过域名两行
+/// 始终在；TUN 模式行（批⑥ §4）仅当 includeTUN（生产取 `FeatureFlags.privilegedTUN`）
+/// 为 true 时置于最前。分隔由 RowListLayout 只放在相邻两行之间——TUN 行隐藏后不留
+/// 空位或多余分隔。
+enum ProxySectionLayout {
+    static func rows(includeTUN: Bool) -> [ProxySectionRow] {
+        (includeTUN ? [.tun] : []) + [.pac, .bypass]
+    }
+
+    static func items(includeTUN: Bool) -> [RowListItem<ProxySectionRow>] {
+        RowListLayout.items(rows(includeTUN: includeTUN))
+    }
+}
+
+/// 「网络代理」区卡片内容：按 ProxySectionLayout 的装配序列逐项渲染。走 ProxyModeModel
+/// settingsGet/set 链——双轨制不走 @AppStorage；写编排含 applied 态形态翻转重放与
+/// gateway_port 仅警告联动，由 Go 侧编排。
+struct ProxySectionContent: View {
+    @ObservedObject var proxyModeModel: ProxyModeModel
+    /// TUN 行是否参与装配：生产默认取功能开关（R16 闭环前隐藏）；测试显式传 false/true
+    /// 做渲染结构对比。WHY var：带默认值的 `let` 被排除出合成 memberwise init。
+    var includeTUN = FeatureFlags.privilegedTUN
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        ForEach(ProxySectionLayout.items(includeTUN: includeTUN), id: \.self) { item in
+            switch item {
+            case .row(.tun):
+                tunRow
+            case .row(.pac):
+                pacRow
+            case .row(.bypass):
+                SettingsRow(label: "绕过域名",
+                            subtitle: "逗号分隔；留空恢复缺省（默认 localhost/内网段）") {
+                    BypassValueField(model: proxyModeModel)
+                }
+            case .divider:
+                rowDivider
+            }
+        }
+    }
+
+    /// 行分隔（demo .frow + .frow 的 0.5px hair；GeneralPane.rowDivider 同口径）
+    private var rowDivider: some View {
+        Divider().overlay(Theme.muted(scheme).opacity(0.2))
+    }
+
+    /// TUN 模式行（`tun on|off` 编排，首装含提权弹窗；与系统代理为独立开关，切换不
+    /// 改用户意图，由 CLI 编排精确恢复）：功能开关关闭时不进装配序列——行与其模型/
+    /// 桥接层一并有意保留（见 FeatureFlags.privilegedTUN），加固后置 true 即重新可达。
+    private var tunRow: some View {
+        SettingsRow(label: "TUN 模式",
+                    subtitle: "root 特权服务托管内核（首次开启安装服务并弹管理员授权）") {
+            SwitchPill(isOn: Binding(
+                get: { proxyModeModel.tunEnabled },
+                set: { newValue in Task { await proxyModeModel.setTUN(newValue) } }
+            ), small: true, accessibilityLabel: "TUN 模式")
+            .disabled(proxyModeModel.busy)
+        }
+    }
+
+    private var pacRow: some View {
+        SettingsRow(label: "PAC 模式",
+                    subtitle: "PAC 需面板网关（panel_enabled）；绕过默认 localhost/内网段") {
+            SwitchPill(isOn: Binding(
+                get: { proxyModeModel.pacMode },
+                set: { newValue in Task { await proxyModeModel.setPacMode(newValue) } }
+            ), small: true, accessibilityLabel: "PAC 模式")
+            .disabled(proxyModeModel.busy)
+        }
     }
 }
 

@@ -140,41 +140,92 @@ struct CurrentNodeCard: View {
     }
 }
 
-/// ③ 开关组（系统代理 + TUN 可用，批⑥ §4 TUN 占位真化；代理守护 M2 禁用态 + P2
-/// 徽标，demo 显式偏差已声明）。TUN 与系统代理为独立开关（Go 编排保证切换不改
-/// sysproxy 意图）；on 无内核前置——编排自带服务首装/内核拉起（90s 档）。
+/// ③ 开关组的行（纯函数可测的装配单元）。TUN 与系统代理为独立开关（Go 编排保证切换
+/// 不改 sysproxy 意图）；on 无内核前置——编排自带服务首装/内核拉起（90s 档）。
+enum ToggleGroupRow: Hashable {
+    case systemProxy
+    case tun
+    /// 代理守护：M2 禁用占位 + P2 徽标（demo 显式偏差已声明）。
+    case guardPlaceholder
+}
+
+/// ③ 开关组的纵向装配（纯函数，`@testable` 可测）：系统代理行始终在；TUN 行仅当
+/// includeTUN（生产取 `FeatureFlags.privilegedTUN`）为 true 时加入；末行为代理守护
+/// 占位。分隔由 RowListLayout 只放在相邻两行之间——TUN 行隐藏后卡片就是
+/// "系统代理 + 分隔 + 代理守护"，不留空位或多余分隔。
+enum ToggleGroupLayout {
+    static func rows(includeTUN: Bool) -> [ToggleGroupRow] {
+        var rows: [ToggleGroupRow] = [.systemProxy]
+        if includeTUN {
+            rows.append(.tun)
+        }
+        rows.append(.guardPlaceholder)
+        return rows
+    }
+
+    static func items(includeTUN: Bool) -> [RowListItem<ToggleGroupRow>] {
+        RowListLayout.items(rows(includeTUN: includeTUN))
+    }
+}
+
+/// ③ 开关组卡片：按 ToggleGroupLayout 的装配序列逐项渲染。
 struct ToggleGroupCard: View {
     @ObservedObject var model: PanelModel
+    /// TUN 行是否参与装配：生产默认取功能开关 `FeatureFlags.privilegedTUN`（R16 闭环前
+    /// 隐藏）；测试显式传 false/true 做渲染结构对比。
+    /// WHY var：带默认值的 `let` 被排除出合成 memberwise init（NodeRow.selectable 同注）。
+    var includeTUN = FeatureFlags.privilegedTUN
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         VStack(spacing: 2) {
-            ToggleRow(
-                icon: "globe", label: "系统代理",
-                note: "127.0.0.1:7897",
-                isOn: Binding(
-                    // v0.4.7 effective 口径：点击立即翻转（乐观值），不等 networksetup 回读
-                    get: { model.effectiveSysProxy },
-                    set: { newValue in Task { await model.setSysProxy(on: newValue) } }
-                ),
-                disabled: !model.running || model.busy
-            )
-            Divider().overlay(Theme.muted(scheme).opacity(0.2))
-            ToggleRow(
-                icon: "rectangle.on.rectangle", label: "TUN 模式",
-                note: model.tunNote,
-                isOn: Binding(
-                    // 批⑥ effective 口径：同乐观模式（pendingTUN），权威值来自 status tun 段
-                    get: { model.effectiveTUN },
-                    set: { newValue in Task { await model.setTUN(on: newValue) } }
-                ),
-                disabled: model.busy
-            )
-            Divider().overlay(Theme.muted(scheme).opacity(0.2))
-            ToggleRow(icon: "shield.lefthalf.filled", label: "代理守护", note: nil,
-                      isOn: .constant(false), disabled: true, badge: "P2")
+            ForEach(ToggleGroupLayout.items(includeTUN: includeTUN), id: \.self) { item in
+                switch item {
+                case .row(.systemProxy):
+                    systemProxyRow
+                case .row(.tun):
+                    tunRow
+                case .row(.guardPlaceholder):
+                    ToggleRow(icon: "shield.lefthalf.filled", label: "代理守护", note: nil,
+                              isOn: .constant(false), disabled: true, badge: "P2")
+                case .divider:
+                    rowDivider
+                }
+            }
         }
         .cardStyle()
+    }
+
+    private var rowDivider: some View {
+        Divider().overlay(Theme.muted(scheme).opacity(0.2))
+    }
+
+    private var systemProxyRow: some View {
+        ToggleRow(
+            icon: "globe", label: "系统代理",
+            note: "127.0.0.1:7897",
+            isOn: Binding(
+                // v0.4.7 effective 口径：点击立即翻转（乐观值），不等 networksetup 回读
+                get: { model.effectiveSysProxy },
+                set: { newValue in Task { await model.setSysProxy(on: newValue) } }
+            ),
+            disabled: !model.running || model.busy
+        )
+    }
+
+    /// TUN 模式行（批⑥ §4）：功能开关关闭时不进装配序列——行与其模型/桥接层一并
+    /// 有意保留（见 FeatureFlags.privilegedTUN），加固后置 true 即重新可达。
+    private var tunRow: some View {
+        ToggleRow(
+            icon: "rectangle.on.rectangle", label: "TUN 模式",
+            note: model.tunNote,
+            isOn: Binding(
+                // 批⑥ effective 口径：同乐观模式（pendingTUN），权威值来自 status tun 段
+                get: { model.effectiveTUN },
+                set: { newValue in Task { await model.setTUN(on: newValue) } }
+            ),
+            disabled: model.busy
+        )
     }
 }
 

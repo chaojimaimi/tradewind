@@ -142,6 +142,11 @@ final class PanelModel: ObservableObject {
     }
     /// 接入路径：系统代理或 TUN 至少一开（demo 口径 sysProxy || tun；批⑥ TUN 转正）。
     /// WHY effective 口径：菜单栏图标绿点随开关点击立即翻转（v0.4.7）
+    /// WHY 不按 FeatureFlags.privilegedTUN 关门（M3 batch6 release-gate）：开关管的是
+    /// "用户能否在壳里点 TUN"，不是"本机是否实际在走 TUN"——经 CLI 显式确认开启的
+    /// 会话，status --json 的 tun 段如实报告 enabled，图标应照常显示有接入。本属性是
+    /// 纯计算：不订阅、不触发额外的解码或刷新（tun 段的解码在 StatusReport.decode，
+    /// 有意保留），所以"不订阅"也省不下任何工作。
     var intake: Bool { effectiveSysProxy || effectiveTUN }
     var iconState: StatusIconState { StatusIcon.state(running: effectiveRunning, intake: intake) }
     /// 当前节点延迟：activeGroup.nodes 中 currentNode 匹配项的 delay。

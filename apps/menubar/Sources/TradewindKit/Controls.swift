@@ -27,6 +27,31 @@ enum NodeListLayout {
     }
 }
 
+// MARK: - 行列表的分隔装配（M3 batch6 release-gate）
+
+/// 纵向行列表的一个装配项：一行，或相邻两行之间的分隔线。
+enum RowListItem<Row: Hashable>: Hashable {
+    case row(Row)
+    case divider
+}
+
+/// 把行列表展开成"行 + 行间分隔"的装配序列（纯函数，`@testable` 可测）：分隔只
+/// 出现在相邻两行之间——首行之前、末行之后都没有。
+/// WHY 单独成函数：行数会随功能开关增减（如 TUN 行被隐藏）。视图若把分隔写死在
+/// 每一行后面，行一被隐藏就留下空位或多余分隔；由本函数生成则恒为"行数 − 1"条。
+enum RowListLayout {
+    static func items<Row: Hashable>(_ rows: [Row]) -> [RowListItem<Row>] {
+        var items: [RowListItem<Row>] = []
+        for (index, row) in rows.enumerated() {
+            if index > 0 {
+                items.append(.divider)
+            }
+            items.append(.row(row))
+        }
+        return items
+    }
+}
+
 // MARK: - 自绘分段控件（批①.5 §3.3，demo .seg 逐项对齐）
 
 /// 自绘分段控件：容器 mat-card-2 + padding 2 + 圆角 8 + inset 描边 --hair；
