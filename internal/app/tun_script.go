@@ -40,8 +40,9 @@ func installScriptLayout(candidates []string) tunScriptLayout {
 }
 
 // tunSafeExecDirCandidates 生成安装脚本前的候选过滤（用户态 stat）：祖先目录不安全
-// 的候选不进脚本；一个都不剩 → 报错带各候选被排除的原因，不生成脚本。
-func tunSafeExecDirCandidates() ([]string, error) {
+// 的候选不进脚本；一个都不剩 → 报错带各候选被排除的原因，不生成脚本。包级缝隙——
+// 经 productionTunEnv 的测试不依赖本机系统目录的实际属主。
+var tunSafeExecDirCandidates = func() ([]string, error) {
 	safe, rejected := service.SafeExecDirCandidates()
 	return composeSafeCandidates(safe, rejected)
 }

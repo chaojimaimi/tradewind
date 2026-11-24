@@ -30,8 +30,11 @@ Usage:
   tradewind delay [GROUP]                             latency test, default group from last selection
   tradewind mode [rule|global|direct]                 show or switch outbound mode (hot-applied when running)
   tradewind sysproxy on|off                           runtime system proxy toggle (idempotent; on requires core running)
-  tradewind tun on|off|status                         TUN mode via the privileged service (on installs it on first use; 45s readiness window)
-  tradewind tun install|uninstall|reinstall           manage the root helper/launchd daemon explicitly
+  tradewind tun off|status                            TUN mode off (escape hatch) and status — always available
+  tradewind tun on|install|reinstall                  暂未开放: installs/enables the privileged root service; refused by default
+                                                      while the privilege-escalation hardening (R16) is in progress. Local testing only:
+                                                      TRADEDWIND_ALLOW_INSECURE_TUN=1 tradewind tun on
+  tradewind tun uninstall                             remove the privileged helper/daemon — always available
   tradewind list [--json]                             list subscriptions (uid/name/type/updated/traffic/expire)
   tradewind use <UID|NAME>                            switch the current subscription (snapshot + hot reload)
   tradewind subs delete <UID|NAME> [--force]          delete a subscription (current one needs --force)

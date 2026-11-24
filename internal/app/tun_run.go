@@ -294,7 +294,7 @@ func tunProbeServiceCore(ctx context.Context, home paths.Home) (int, error) {
 
 // TunStatus 编排 `tradewind tun status`（§2.2）：合并——settings.tun_enabled /
 // 服务 status（未安装=清晰降级文案）/ helper 与 root 内核副本两项陈旧状态（R4）/
-// core.sock 健康。
+// core.sock 健康 / 联锁状态。诊断面，不受联锁约束。
 func TunStatus(home paths.Home) error {
 	lines, err := tunStatusLines(home)
 	if err != nil {
@@ -324,7 +324,8 @@ func tunStatusLines(home paths.Home) ([]string, error) {
 	} else {
 		lines = append(lines, "core.sock:  unreachable")
 	}
-	return lines, nil
+	// 联锁状态（tun_interlock.go）：受控命令默认拒绝这一事实要在诊断面如实可见
+	return append(lines, tunInterlockStatusLine()), nil
 }
 
 func tunServiceStatusLine() []string {
