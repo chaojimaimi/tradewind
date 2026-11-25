@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -63,6 +64,11 @@ type Server struct {
 	gaveUp  bool // Monitor 重启预算耗尽（内核终亡）→ 新 start 请求可重新准入
 	curGen  int  // 所有权仲裁基线：start 须 > curGen；显式 stop 后归零（见 handleStop）
 	rootCtx context.Context
+	// snapMu 保护 snapshot（最近一份归一化产物，nil = 无；批⑥b §4.4）。独立于 s.mu：
+	// restoreRuntime 只取它（start 路径调用它时调用方已持 s.mu；取锁顺序恒
+	// s.mu → snapMu）。全部触碰点在 snapshot.go。
+	snapMu   sync.Mutex
+	snapshot []byte
 	// verifyExecTrust 执行目录信任链复核（锚所指可执行路径 + 全部祖先目录）。生产=
 	// verifyAnchorExecTrust；测试注入——测试夹具在 /tmp 下，祖先含系统符号链接
 	// /tmp 与全局可写目录，真 Lstat 必拒。
@@ -105,6 +111,9 @@ func (s *Server) Run(ctx context.Context) error {
 	if err := s.verifyHomeTrust(conf); err != nil {
 		return fmt.Errorf("service: core home failed the trust check (fail-closed): %w", err)
 	}
+	// L1 种子（批⑥b §4.4）：先于孤儿收编与任何请求协程——磁盘上的 R 过当前归一化器
+	// 复验后成为快照；拒绝/缺失一律 nil（L2 的孤儿回收因此不重拉，等下一次 start）。
+	s.seedSnapshot(s.conf)
 	if err := s.adoptOrphans(); err != nil {
 		return fmt.Errorf("service: adopt orphans: %w", err)
 	}
@@ -194,17 +203,24 @@ func (s *Server) dispatch(req Request) Response {
 		return s.handleStop()
 	case ActionStatus:
 		return s.handleStatus()
+	case ActionReload:
+		return s.handleReload()
 	default:
 		return Response{OK: false, Error: fmt.Sprintf("service: unknown action %q", req.Action)}
 	}
 }
 
-// handleStart：幂等 no-op 先行（core 托管中 → 不重复 spawn，防端口冲突握手循环，
-// 评审 P1-5；陈旧代际的 no-op 请求同样安全返回），再 generation 仲裁，再 spawn。
+// handleStart（批⑥b §4.4 L3）：幂等 no-op 先行（core 托管中 → 不重复 spawn，防端口
+// 冲突握手循环，评审 P1-5；陈旧代际的 no-op 请求同样安全返回），再 generation 仲裁，
+// 再"归一化 → 提交（promote 快照 + 落盘 R）→ spawn"。start 从不沿用旧快照——用户
+// 在服务空闲期间改的配置，下一次 start 必须生效。归一化拒绝 → rejected:true，curGen
+// 不动、R 不动、不 spawn（I3：内核只加载服务归一化过的配置）。
 // 已知边界（batch6 review P3-1 登记，本版不修）：mu 跨服务端同步握手（spawnCore
 // 内 WaitReady 最长 ~20s）——崩溃重启竞态下 stop/status 请求会排队等锁一次，
 // 客户端 10s/30s 档超时触发调用方回滚/指引（状态自洽，无半开态）。主流时序不撞
-// （幂等 no-op 快路径不持长锁）；无锁化重构留 plan 观察期评估。
+// （幂等 no-op 快路径不持长锁）；无锁化重构留 plan 观察期评估。同理，start 持
+// s.mu 期间的归一化还要等 normalizeGate（最多一份在途 reload 的归一化）——排队
+// 上界是它的一次归一化时长。
 func (s *Server) handleStart(req Request) Response {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -215,11 +231,89 @@ func (s *Server) handleStart(req Request) Response {
 		return Response{OK: false, Error: fmt.Sprintf(
 			"service: stale generation %d (want > %d); run `tradewind start` to refresh", req.Generation, s.curGen)}
 	}
+	res, rej, err := loadNormalized(s.conf)
+	if rej != nil {
+		text := rejectionText(rej)
+		fmt.Fprintf(os.Stderr, "service: start refused: %s\n", text)
+		return Response{OK: false, Rejected: true, Error: text}
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "service: start refused: %v\n", err)
+		return Response{OK: false, Error: err.Error()}
+	}
+	if err := s.commitRuntime(s.conf, res.Bytes); err != nil {
+		fmt.Fprintf(os.Stderr, "service: start refused: %v\n", err)
+		return Response{OK: false, Error: err.Error()}
+	}
 	if err := s.spawnCore(); err != nil {
 		return Response{OK: false, Error: err.Error()}
 	}
 	s.curGen = req.Generation
-	return Response{OK: true, PID: s.mgr.PID()}
+	return Response{OK: true, PID: s.mgr.PID(), Ignored: res.Ignored}
+}
+
+// reloadPushTimeout 是服务端推送（PUT /configs 内联归一化产物）的预算上限，与
+// core.putConfigsTimeout 同档（ctx 与 http.Client 双保险）。
+const reloadPushTimeout = 20 * time.Second
+
+// handleReload（批⑥b §4.4 L4）：归一化在 s.mu 之外先做（纯计算——reload 的持锁
+// 上界不挤占 stop/status，R15）；归一化自身经 normalizeGate 全服务串行（并发 reload
+// 不叠加内存，见 rootstate.go）。托管中 → 归一化产物内联推送内核，内核接受（204）
+// 才提交（promote 快照 + 落盘）；内核 400 → rejected:true，磁盘与快照原封不动；
+// 未托管（从未启动 / 自愈预算耗尽）→ 直接提交。请求零路径、不校验 generation
+// （与 stop/status 同类）。
+func (s *Server) handleReload() Response {
+	res, rej, err := loadNormalized(s.conf)
+	if rej != nil {
+		text := rejectionText(rej)
+		fmt.Fprintf(os.Stderr, "service: reload refused: %s\n", text)
+		return Response{OK: false, Rejected: true, Error: text}
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "service: reload refused: %v\n", err)
+		return Response{OK: false, Error: err.Error()}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.coreManaged() {
+		// 内核的 unix-socket 控制器从不鉴权（实测 mihomo 对 -ext-ctl-unix 不校验
+		// Authorization），secret 恒空
+		kc := core.NewClient(s.conf.KernelSock, "")
+		ctx, cancel := context.WithTimeout(s.rootCtx, reloadPushTimeout)
+		defer cancel()
+		err := kc.PutConfigsPayload(ctx, string(res.Bytes))
+		var se *core.StatusError
+		if errors.As(err, &se) {
+			if se.Code == http.StatusBadRequest {
+				// 日志只记状态码：内核的拒绝理由可能回显配置值（yaml 类型错误会带出
+				// 片段），它只回给调用方——那是用户自己的配置；不进 root 属主的
+				// 日志（I6）
+				text := "service: 内核拒绝新配置：" + kernelRejectMessage(se)
+				fmt.Fprintln(os.Stderr, "service: reload refused by kernel (status 400)")
+				return Response{OK: false, Rejected: true, Error: text}
+			}
+			// 其它状态码：响应体是内核自由文本，过一道闸再回给调用方（不复现 legacy 文案）
+			text := fmt.Sprintf("service: 内核推送失败（status %d）：%s", se.Code, sanitizeForLog(se.Body))
+			fmt.Fprintf(os.Stderr, "service: reload push failed (status %d)\n", se.Code)
+			return Response{OK: false, Error: text}
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "service: reload push failed: %v\n", err)
+			return Response{OK: false, Error: err.Error()}
+		}
+		if err := s.commitRuntime(s.conf, res.Bytes); err != nil {
+			fmt.Fprintf(os.Stderr, "service: reload commit failed: %v\n", err)
+			return Response{OK: false, Error: err.Error()}
+		}
+		fmt.Printf("service: reload pushed to kernel (%d bytes, %d keys ignored)\n", len(res.Bytes), len(res.Ignored))
+		return Response{OK: true, Ignored: res.Ignored}
+	}
+	if err := s.commitRuntime(s.conf, res.Bytes); err != nil {
+		fmt.Fprintf(os.Stderr, "service: reload commit failed: %v\n", err)
+		return Response{OK: false, Error: err.Error()}
+	}
+	fmt.Printf("service: reload persisted (%d bytes, %d keys ignored; core not managed)\n", len(res.Bytes), len(res.Ignored))
+	return Response{OK: true, Ignored: res.Ignored}
 }
 
 // handleStop：优雅停核（Manager Stop 含 StopGrace/SIGKILL）→ 数据目录属主回收 →

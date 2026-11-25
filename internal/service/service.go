@@ -1,7 +1,7 @@
 // Package service 实现 Tradewind 特权服务（路线②，批⑥ §3.1，对标 clash-verge-service）：
 //
 //	root 常驻进程监听 /var/run/tradewind-service.sock（0666），以 root 身份托管
-//	mihomo 内核（TUN 需要 root），对外暴露行 JSON 协议（start/stop/status）。
+//	mihomo 内核（TUN 需要 root），对外暴露行 JSON 协议（start/stop/status/reload）。
 //
 // 安全模型：
 //   - 唯一认证闸 = getpeereid uid 白名单（service.json 锚定）——白名单外 uid 能
@@ -110,11 +110,12 @@ func SidecarPathIn(execDir string) string {
 	return filepath.Join(execDir, "bin", "mihomo.sha256")
 }
 
-// 服务请求动作（协议仅此三个；未知 action 协议层拒绝）。
+// 服务请求动作（协议仅此四个；未知 action 协议层拒绝）。
 const (
 	ActionStart  = "start"
 	ActionStop   = "stop"
 	ActionStatus = "status"
+	ActionReload = "reload"
 )
 
 // Request 是特权服务行 JSON 请求：{action, generation}。
@@ -125,13 +126,19 @@ type Request struct {
 	Generation int    `json:"generation,omitempty"`
 }
 
-// Response 是特权服务行 JSON 响应：{ok, error?, pid?, version?, already_running?}。
+// Response 是特权服务行 JSON 响应：{ok, error?, pid?, version?, already_running?,
+// rejected?, ignored?}。rejected=true 专指"配置被拒"（归一化拒绝，或 reload 时内核
+// 以 400 拒收）——与其余失败（内核不可达、落盘失败等服务侧问题）分开表达，调用方
+// 据此区分"配置本身有问题"与"服务暂时不可用"；ignored 是归一化时被剥离的用户键
+// （点路径），键名/枚举由归一化器保证不含配置值。
 type Response struct {
-	OK             bool   `json:"ok"`
-	Error          string `json:"error,omitempty"`
-	PID            int    `json:"pid,omitempty"`
-	Version        string `json:"version,omitempty"`
-	AlreadyRunning bool   `json:"already_running,omitempty"`
+	OK             bool     `json:"ok"`
+	Error          string   `json:"error,omitempty"`
+	PID            int      `json:"pid,omitempty"`
+	Version        string   `json:"version,omitempty"`
+	AlreadyRunning bool     `json:"already_running,omitempty"`
+	Rejected       bool     `json:"rejected,omitempty"`
+	Ignored        []string `json:"ignored,omitempty"`
 }
 
 // DecodeRequest 严格解码一行请求：未知字段拒收 + 行内不允许尾随数据。
@@ -147,7 +154,7 @@ func DecodeRequest(line []byte) (Request, error) {
 		return Request{}, errors.New("service: bad request: trailing data after JSON object")
 	}
 	switch req.Action {
-	case ActionStart, ActionStop, ActionStatus:
+	case ActionStart, ActionStop, ActionStatus, ActionReload:
 	default:
 		return Request{}, fmt.Errorf("service: unknown action %q", req.Action)
 	}
@@ -310,6 +317,17 @@ func (c *Client) Stop() (Response, error) {
 // Status 查询服务托管的 root core（pid/version；未运行 pid=0）。
 func (c *Client) Status() (Response, error) {
 	return c.Do(Request{Action: ActionStatus})
+}
+
+// ReloadTimeout 是 reload 的客户端预算档（批⑥b §4.4）：可能排队等一次 start 同步
+// 握手（≤20s）+ 内核推送（≤20s）+ 归一化与余量。
+const ReloadTimeout = 60 * time.Second
+
+// Reload 请求服务重读用户 runtime.yaml 并归一化：内核托管中 → 归一化产物内联推送
+// 内核（内核接受后才落盘）；未托管 → 仅落盘。请求零路径（{action:"reload"}），不校
+// 验 generation（与 stop/status 同类）。
+func (c *Client) Reload() (Response, error) {
+	return c.Do(Request{Action: ActionReload})
 }
 
 // Do 执行单次请求：连接 → 写一行 → 读一行 → 解码。

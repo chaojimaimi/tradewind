@@ -79,5 +79,6 @@ func readSafe(path string, wantUID int, maxBytes int64) ([]byte, error) {
 // root 进程里的内存占用面——同账号进程可以递归一份大文件垫高服务内存）。
 const runtimeMaxBytes = 8 << 20
 
-// stageRuntime 是 runtimeMaxBytes 的消费方之一（见 rootstate.go）；syncGeo 的
-// geoSyncMaxBytes 同理，两个上限互不对齐——字节上限是各条目之外的粗闸。
+// writeRuntime 与 seedSnapshot 是 runtimeMaxBytes 的消费方（分别见 rootstate.go 与
+// snapshot.go）；syncGeo 的 geoSyncMaxBytes 同理，几个上限互不对齐——字节上限是
+// 各条目之外的粗闸。

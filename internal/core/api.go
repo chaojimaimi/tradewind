@@ -17,9 +17,18 @@ import (
 // apiTimeout 是单次内核 API 请求的超时。
 const apiTimeout = 10 * time.Second
 
+// putConfigsTimeout 是 reload 内联推送（PUT /configs 携带整份归一化产物）的预算
+// 上限：大订阅产物大、内核解析要时间，10s 档不够；也不允许它无界占住 reload 的
+// 客户端预算。全局 apiTimeout 供其余调用，保持不变。
+const putConfigsTimeout = 20 * time.Second
+
 // apiMaxBody 限制响应体读取上限，防异常内核响应拖垮内存。
 // M1 提升到 8MB：大订阅的 GET /proxies 全量响应可超 1MB（M1-plan §5.1）。
 const apiMaxBody = 8 << 20
+
+// apiMaxErrorBody 是非 2xx 响应体的读取上限：错误体只有一行摘要，8 KiB 足够——
+// 别为一条错误拖回最多 8 MiB。
+const apiMaxErrorBody = 8 << 10
 
 // 延迟测试默认参数（M1-plan §5.1 / DESIGN P0 #5）。
 const (
@@ -98,6 +107,22 @@ func (c *Client) Version(ctx context.Context) (string, error) {
 	return v.Version, nil
 }
 
+// StatusError 是内核非 2xx 响应的携带体：Code 供调用方区分"内核拒收配置"（400）
+// 与其它失败；Body 是原始响应体（≤8 KiB，调用方可从中解析 {"message":...}）。
+// method/endpoint 仅供 Error() 逐字复现 do() 的既有错误文案（legacy 文本有调用方
+// 与测试钉死，不得改变）。
+type StatusError struct {
+	Code int
+	Body string
+	// method/endpoint 只由 doRequest 填充（Error() 复现既有文案所需）。
+	method   string
+	endpoint string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("core: %s %s: status %d: %s", e.method, e.endpoint, e.Code, truncate(e.Body, 200))
+}
+
 // PutConfigs 热重载配置：PUT /configs?force=true，body 携带 runtime.yaml 绝对路径。
 // SAFE_PATHS 约束：path 必须位于 -d 工作目录内（当前布局 runtime.yaml 与 -d 同目录，成立）。
 func (c *Client) PutConfigs(ctx context.Context, configPath string) error {
@@ -106,6 +131,22 @@ func (c *Client) PutConfigs(ctx context.Context, configPath string) error {
 		return fmt.Errorf("core: marshal payload: %w", err)
 	}
 	_, err = c.do(ctx, http.MethodPut, "/configs?force=true", payload)
+	return err
+}
+
+// PutConfigsPayload 热重载配置的另一种形态：PUT /configs?force=true，body **内联**
+// 归一化产物（{"payload": <yaml>}，不给 path）。WHY 内联：path 分支内核会重读磁盘
+// 上的 runtime.yaml，那会强迫"先落盘再推送"，与"内核接受了才落盘"的 reload 次序
+// 冲突（内核 400 拒收时磁盘与快照必须原封不动，批⑥b §4.4）。超时用逐调用副本钉
+// 在 putConfigsTimeout（全局 10s 档不动）。
+func (c *Client) PutConfigsPayload(ctx context.Context, payload string) error {
+	body, err := json.Marshal(map[string]string{"payload": payload})
+	if err != nil {
+		return fmt.Errorf("core: marshal payload: %w", err)
+	}
+	hc := *c.hc // 浅拷贝：Transport 共享，只覆盖本调用的 Timeout
+	hc.Timeout = putConfigsTimeout
+	_, err = doRequest(&hc, c.secret, ctx, http.MethodPut, "/configs?force=true", body)
 	return err
 }
 
@@ -174,8 +215,14 @@ func (c *Client) ProxyDelay(ctx context.Context, name string, timeoutMS int, tes
 	return res.Delay, nil
 }
 
-// do 执行请求；非 2xx 返回携带响应摘要的错误。
+// do 执行请求；非 2xx 返回 *StatusError。
 func (c *Client) do(ctx context.Context, method, endpoint string, body []byte) ([]byte, error) {
+	return doRequest(c.hc, c.secret, ctx, method, endpoint, body)
+}
+
+// doRequest 是 do 的实现体（http.Client 与 secret 显式传入——PutConfigsPayload 的
+// 20s 档超时靠逐调用副本注入，全局 apiTimeout 不动；secret 为空则不带鉴权头）。
+func doRequest(hc *http.Client, secret string, ctx context.Context, method, endpoint string, body []byte) ([]byte, error) {
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
@@ -185,24 +232,28 @@ func (c *Client) do(ctx context.Context, method, endpoint string, body []byte) (
 		return nil, fmt.Errorf("core: build request: %w", err)
 	}
 	// 实测 mihomo unix ctl 对 /version 不强制鉴权，但按方案恒带 Bearer（纵深防御，无害）
-	if c.secret != "" {
-		req.Header.Set("Authorization", "Bearer "+c.secret)
+	if secret != "" {
+		req.Header.Set("Authorization", "Bearer "+secret)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := c.hc.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("core: %s %s: %w", method, endpoint, err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// 错误体只读 8 KiB：错误摘要足够，别为一条错误拖回最多 8 MiB
+		data, err := io.ReadAll(io.LimitReader(resp.Body, apiMaxErrorBody))
+		if err != nil {
+			return nil, fmt.Errorf("core: read response: %w", err)
+		}
+		return nil, &StatusError{Code: resp.StatusCode, Body: string(data), method: method, endpoint: endpoint}
+	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, apiMaxBody))
 	if err != nil {
 		return nil, fmt.Errorf("core: read response: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("core: %s %s: status %d: %s",
-			method, endpoint, resp.StatusCode, truncate(string(data), 200))
 	}
 	return data, nil
 }

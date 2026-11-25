@@ -4,11 +4,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
-// rootstate（批⑥b §4.1）：<core_home> 信任链复核（I2）与 runtime 暂存。geo 同步的
-// 用例在 geo_test.go。
+// rootstate（批⑥b §4.1）：<core_home> 信任链复核（I2）与 loadNormalized/writeRuntime
+// 一对原语。geo 同步的用例在 geo_test.go。
 
 // homeTrustFixture 组装一个"全部达标"的 v3 锚形态（路径只是词法——lstat 注入，
 // 不需要真实存在），返回配置与可达的 lstat 结果表。
@@ -113,10 +114,10 @@ func TestVerifyCoreHomeTrustMatrix(t *testing.T) {
 	}
 }
 
-// TestStageRuntimeMovesUserRuntime stageRuntime 字节级搬运（c1 形态）：目标内容 ==
-// 用户文件；临时文件不残留。
-func TestStageRuntimeMovesUserRuntime(t *testing.T) {
-	dir := shortTempDir(t)
+// loadWriteFixture 组装 loadNormalized / writeRuntime 的最小夹具：data 与
+// service-data 两个目录，属主 = 当前用户（非 root 下 readSafe 的属主校验才过）。
+func loadWriteFixture(t *testing.T, dir string) ConfigFile {
+	t.Helper()
 	dataDir := filepath.Join(dir, "data")
 	coreHome := filepath.Join(dir, "service-data")
 	for _, d := range []string{dataDir, coreHome} {
@@ -124,81 +125,141 @@ func TestStageRuntimeMovesUserRuntime(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	runtime := filepath.Join(dataDir, "runtime.yaml")
-	if err := os.WriteFile(runtime, []byte("proxies: []\n"), 0o600); err != nil {
+	return ConfigFile{
+		DataDir:     dataDir,
+		DataUID:     os.Getuid(),
+		CoreHome:    coreHome,
+		UserRuntime: filepath.Join(dataDir, "runtime.yaml"),
+	}
+}
+
+// TestLoadNormalizedAccepted 接受形态：Bytes == 归一化器的产物，Ignored 原样带出
+// （provider path 被剥离并记入 Ignored）。
+func TestLoadNormalizedAccepted(t *testing.T) {
+	dir := shortTempDir(t)
+	c := loadWriteFixture(t, dir)
+	user := []byte("proxies: []\n")
+	if err := os.WriteFile(c.UserRuntime, user, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	c := ConfigFile{DataDir: dataDir, DataUID: os.Getuid(), CoreHome: coreHome, UserRuntime: runtime}
+	res, rej, err := loadNormalized(c)
+	if err != nil || rej != nil {
+		t.Fatalf("loadNormalized = rej %+v err %v, want accept", rej, err)
+	}
+	want, _ := NormalizeRuntime(user)
+	if string(res.Bytes) != string(want.Bytes) {
+		t.Fatalf("Bytes = %q, want the normalizer's product %q", res.Bytes, want.Bytes)
+	}
 
-	if err := stageRuntime(c); err != nil {
-		t.Fatalf("stageRuntime: %v", err)
+	// Ignored 携带：provider 的 path 被剥离
+	provider := []byte("proxy-providers:\n  sub1:\n    type: http\n    url: https://provider.example.invalid/subscription\n    path: ./sub1.yaml\n")
+	if err := os.WriteFile(c.UserRuntime, provider, 0o600); err != nil {
+		t.Fatal(err)
 	}
-	staged, err := os.ReadFile(RuntimeIn(coreHome))
-	if err != nil {
-		t.Fatalf("read staged runtime: %v", err)
+	res, rej, err = loadNormalized(c)
+	if err != nil || rej != nil {
+		t.Fatalf("loadNormalized(provider) = rej %+v err %v, want accept", rej, err)
 	}
-	if string(staged) != "proxies: []\n" {
-		t.Fatalf("staged runtime = %q", staged)
+	if got, wantIgnored := res.Ignored, []string{"proxy-providers.sub1.path"}; len(got) != 1 || got[0] != wantIgnored[0] {
+		t.Fatalf("Ignored = %v, want %v", got, wantIgnored)
 	}
-	if _, err := os.Lstat(filepath.Join(coreHome, ".runtime.tmp")); !os.IsNotExist(err) {
+}
+
+// TestLoadNormalizedRejected 拒绝形态：rej != nil 且 err == nil（配置问题与服务侧
+// 失败分开表达），Key 指名被拒键。
+func TestLoadNormalizedRejected(t *testing.T) {
+	dir := shortTempDir(t)
+	c := loadWriteFixture(t, dir)
+	if err := os.WriteFile(c.UserRuntime, []byte("proxies: []\nexternal-ui: /tmp/x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, rej, err := loadNormalized(c)
+	if rej == nil || err != nil {
+		t.Fatalf("loadNormalized = rej %+v err %v, want rejection with nil error", rej, err)
+	}
+	if rej.Key != "external-ui" {
+		t.Fatalf("Key = %q, want the rejected key", rej.Key)
+	}
+	if res.Bytes != nil {
+		t.Fatalf("Bytes = %q, want empty on rejection", res.Bytes)
+	}
+}
+
+// TestLoadNormalizedMissing 用户文件缺失 → err != nil 且文案带 "runtime"（服务侧
+// 失败，非配置拒绝）。
+func TestLoadNormalizedMissing(t *testing.T) {
+	dir := shortTempDir(t)
+	c := loadWriteFixture(t, dir)
+	_, rej, err := loadNormalized(c)
+	if err == nil || rej != nil {
+		t.Fatalf("loadNormalized(missing) = rej %+v err %v, want error", rej, err)
+	}
+	if !strings.Contains(err.Error(), "runtime") {
+		t.Fatalf("err = %v, want it to name the runtime read", err)
+	}
+}
+
+// TestLoadNormalizedSymlink 用户文件是符号链接 → readSafe 的 O_NOFOLLOW 闸拒绝。
+func TestLoadNormalizedSymlink(t *testing.T) {
+	dir := shortTempDir(t)
+	c := loadWriteFixture(t, dir)
+	target := filepath.Join(dir, "elsewhere.yaml")
+	if err := os.WriteFile(target, []byte("proxies: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, c.UserRuntime); err != nil {
+		t.Fatal(err)
+	}
+	_, rej, err := loadNormalized(c)
+	if err == nil || rej != nil {
+		t.Fatalf("loadNormalized(symlink) = rej %+v err %v, want error", rej, err)
+	}
+	if !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("err = %v, want a symlink refusal", err)
+	}
+}
+
+// TestWriteRuntime 落盘形态：内容/权限 0600/属主 = euid/临时文件不残留/覆盖既有
+// 文件；CoreHome 缺失 → 失败（调用方拒绝 spawn），绝不留半成品。
+func TestWriteRuntime(t *testing.T) {
+	dir := shortTempDir(t)
+	c := loadWriteFixture(t, dir)
+	first := []byte("first: product\n")
+	if err := writeRuntime(c, first); err != nil {
+		t.Fatalf("writeRuntime: %v", err)
+	}
+	staged, err := os.ReadFile(RuntimeIn(c.CoreHome))
+	if err != nil || string(staged) != string(first) {
+		t.Fatalf("runtime.yaml = %q err %v, want the written bytes", staged, err)
+	}
+	info, err := os.Stat(RuntimeIn(c.CoreHome))
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("perm = %v err = %v, want 0600", info.Mode().Perm(), err)
+	}
+	if sys, ok := info.Sys().(*syscall.Stat_t); !ok || int(sys.Uid) != os.Geteuid() {
+		t.Fatalf("owner uid = %v, want euid %d", sys, os.Geteuid())
+	}
+	if _, err := os.Lstat(filepath.Join(c.CoreHome, ".runtime.tmp")); !os.IsNotExist(err) {
 		t.Fatalf("temp file must not survive (err = %v)", err)
 	}
-	info, err := os.Stat(RuntimeIn(coreHome))
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("staged runtime perm = %v err = %v, want 0600", info.Mode().Perm(), err)
+	// 覆盖既有文件（rename 语义：第二次写入完整替换第一次）
+	second := []byte("second: product\n")
+	if err := writeRuntime(c, second); err != nil {
+		t.Fatalf("writeRuntime(second): %v", err)
 	}
-}
+	staged, err = os.ReadFile(RuntimeIn(c.CoreHome))
+	if err != nil || string(staged) != string(second) {
+		t.Fatalf("runtime.yaml after rewrite = %q err %v, want fully replaced", staged, err)
+	}
 
-// TestStageRuntimeRefuses 缺失 / 符号链接 → 报错，绝不写空文件（M17：内核对缺失
-// 配置会自建默认配置以 root 跑起来）。
-func TestStageRuntimeRefuses(t *testing.T) {
-	dir := shortTempDir(t)
-	dataDir := filepath.Join(dir, "data")
-	coreHome := filepath.Join(dir, "service-data")
-	for _, d := range []string{dataDir, coreHome} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
-			t.Fatal(err)
-		}
+	// CoreHome 缺失 → 失败且无半成品
+	absent := c
+	absent.CoreHome = filepath.Join(dir, "missing-home")
+	if err := writeRuntime(absent, second); err == nil {
+		t.Fatal("writeRuntime into a missing core home must fail")
 	}
-	runtime := filepath.Join(dataDir, "runtime.yaml")
-	c := ConfigFile{DataDir: dataDir, DataUID: os.Getuid(), CoreHome: coreHome, UserRuntime: runtime}
-
-	// 缺失
-	if err := stageRuntime(c); err == nil || !strings.Contains(err.Error(), "refusing to spawn, runtime") {
-		t.Fatalf("stageRuntime(missing) = %v, want refusal", err)
-	}
-	// 符号链接
-	target := filepath.Join(dir, "elsewhere.yaml")
-	if err := os.WriteFile(target, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(target, runtime); err != nil {
-		t.Fatal(err)
-	}
-	if err := stageRuntime(c); err == nil || !strings.Contains(err.Error(), "symbolic link") {
-		t.Fatalf("stageRuntime(symlink) = %v, want refusal", err)
-	}
-	// 两种失败形态下 <core_home>/runtime.yaml 都不曾被写出
-	if _, err := os.Stat(RuntimeIn(coreHome)); !os.IsNotExist(err) {
-		t.Fatalf("staged runtime must not exist after refusals (err = %v)", err)
-	}
-}
-
-// TestStageRuntimeMissingCoreHomeIsError CoreHome 不存在 → 暂存失败（调用方拒绝
-// spawn）——信任链复核先行，这里只验证错误路径不 panic。
-func TestStageRuntimeMissingCoreHomeIsError(t *testing.T) {
-	dir := shortTempDir(t)
-	dataDir := filepath.Join(dir, "data")
-	if err := os.MkdirAll(dataDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	runtime := filepath.Join(dataDir, "runtime.yaml")
-	if err := os.WriteFile(runtime, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	c := ConfigFile{DataDir: dataDir, DataUID: os.Getuid(), CoreHome: filepath.Join(dir, "absent"), UserRuntime: runtime}
-	if err := stageRuntime(c); err == nil {
-		t.Fatal("stageRuntime into a missing core home must fail")
+	if _, err := os.Stat(RuntimeIn(absent.CoreHome)); !os.IsNotExist(err) {
+		t.Fatalf("no target file may appear behind a failed write (err = %v)", err)
 	}
 }
 

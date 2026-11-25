@@ -1,7 +1,9 @@
 // spawn.go：内核 spawn 编排（批⑥b §4.1/§4.4）——从 server.go 拆出（单文件 ≤400 行）。
-// 每次 spawn 的前置序：信任链复核 → stageRuntime → syncGeo → 建 tmp 目录 → spawn
-// → 握手。Monitor 崩溃自愈的内部 respawn 在 Manager 内发生、不经 spawnCore，内核
-// 专属的闸（PreSpawn 钩子、LogOwner、OnSpawned）都挂在 core.Config 上覆盖两条路径。
+// 每次 spawn 的前置序：信任链复核 → restoreRuntime（L5：快照与 R 核对/回写，经
+// PreSpawn 钩子）→ syncGeo → 建 tmp 目录 → spawn → 握手。归一化与落盘在 handleStart
+// （L3）已完成，本文件不再搬运配置字节。Monitor 崩溃自愈的内部 respawn 在 Manager
+// 内发生、不经 spawnCore，内核专属的闸（PreSpawn 钩子、LogOwner、OnSpawned）都挂
+// 在 core.Config 上覆盖两条路径。
 package service
 
 import (
@@ -31,21 +33,14 @@ func coreEnvProduction(c ConfigFile) []string {
 // 唯一的例外是启动期的 adoptOrphans：它先于 listen/acceptLoop 执行，此时还没有
 // 任何请求处理协程，是唯一会碰 s.mu 所保护字段的执行流，无需持锁。
 // pid 记录由 Manager 的 OnSpawned 回调负责（进程一启动就写——覆盖自愈 respawn，
-// F20）。每次 spawn 前复核执行目录与内核工作目录两道信任链：不达标即拒绝并返回
-// 明确错误；Manager 的 PreSpawn 钩子再复核一次，覆盖 Monitor 崩溃自愈的内部
-// respawn（那条路径不经过本函数）。
+// F20）。进入本函数前调用方已把归一化产物提交（promote 快照 + 落盘 R，L3/L2）；
+// 每次 spawn 前复核执行目录与内核工作目录两道信任链：不达标即拒绝并返回明确错误。
 func (s *Server) spawnCore() error {
 	if err := s.verifyExecTrust(s.conf); err != nil {
 		return fmt.Errorf("service: refusing to spawn, exec dir failed the ownership re-check: %w", err)
 	}
 	if err := s.verifyHomeTrust(s.conf); err != nil {
 		return fmt.Errorf("service: refusing to spawn, core home failed the trust re-check: %w", err)
-	}
-	// I3（c1 形态）：内核的 -f 文件只能由服务写入——用户 runtime.yaml 经安全打开
-	// 原子搬运进 <core_home>；失败即拒绝 spawn（内核对缺失配置会自建默认配置以
-	// root 跑起来，M17）。归一化是 c3 的事，本步只做字节级搬运。
-	if err := stageRuntime(s.conf); err != nil {
-		return err
 	}
 	// geo 同步（§4.4）：内部已 best-effort，失败不阻断
 	syncGeo(s.conf)
@@ -70,13 +65,9 @@ func (s *Server) spawnCore() error {
 		OnSpawned: func(pid int) { s.writeCorePID(pid) },
 		Env:       s.coreEnv(s.conf),
 		// Monitor 崩溃自愈的 respawn 在 Manager 内部发生，不经 spawnCore——两道信任
-		// 链同闸。restoreRuntime 是 c3 的内容，本步不挂。
-		PreSpawn: func() error {
-			if err := s.verifyExecTrust(s.conf); err != nil {
-				return err
-			}
-			return s.verifyHomeTrust(s.conf)
-		},
+		// 链复核 + L5 restoreRuntime（快照为 nil 拒绝 spawn；R 与快照漂移即按快照
+		// 回写）经同一份钩子闭包两条路径都过（I3 的最后一道闸）。
+		PreSpawn: s.preSpawnHook(),
 	})
 	if err := mgr.Spawn(); err != nil {
 		return fmt.Errorf("service: spawn core: %w", err)
@@ -135,10 +126,12 @@ func (s *Server) stopCore() {
 	_ = s.stopCoreLocked()
 }
 
-// adoptOrphans 服务自身重启的孤儿收编（批⑥ §3.1/R13）：launchd 拉起时旧子进程
-// mihomo 仍存活（父死后被 launchd 收养，cmd.Wait 不可用）——读 core.pid：pid 存活
-// 且身份匹配（命令行含 -d <core_home>）→ root SIGTERM 回收 → 走正常 start 流程
-// 收编（代价=健康 core 全断重启一次，R13 登记）。
+// adoptOrphans 服务自身重启的孤儿收编（批⑥ §3.1/R13；L2——批⑥b §4.4）：launchd
+// 拉起时旧子进程 mihomo 仍存活（父死后被 launchd 收养，cmd.Wait 不可用）——读
+// core.pid：pid 存活且身份匹配（命令行含 -d <core_home>）→ root SIGTERM 回收。
+// 孤儿一律回收；是否重拉取决于 L1 种子：snapshot != nil → 按快照重拉（"恢复同一
+// 会话"，代价=健康 core 全断重启一次，R13 登记）；snapshot == nil → 不重拉，服务
+// 继续监听——等用户域下一次 start（L3）重新归一化（绝不让内核以默认配置跑起来）。
 func (s *Server) adoptOrphans() error {
 	data, err := os.ReadFile(s.cfg.PIDPath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -159,6 +152,10 @@ func (s *Server) adoptOrphans() error {
 	fmt.Printf("service: reclaiming orphan core (pid %d)\n", pid)
 	if err := killProcessGracefully(pid); err != nil {
 		return fmt.Errorf("service: reclaim orphan pid %d: %w", pid, err)
+	}
+	if s.snapshotCopy() == nil {
+		fmt.Println("service: orphan reclaimed; no normalized runtime snapshot on record, not respawning (waiting for the next start)")
+		return nil
 	}
 	if err := s.spawnCore(); err != nil {
 		return fmt.Errorf("service: adopt: %w", err)

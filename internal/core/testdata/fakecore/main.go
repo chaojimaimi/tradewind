@@ -10,13 +10,22 @@
 //	FAKE_CORE_MODE=no-sock           挂起但不建 sock（握手超时路径）
 //	FAKE_CORE_MODE=dump-args         把 argv 与环境变量写入 FAKE_CORE_DUMP 指定的
 //	                                 文件后照常服务（服务编排测试断言内核参数形态）
+//	FAKE_CORE_MODE=reject-config     /version 照常应答（握手成功），PUT /configs 一律
+//	                                 400 + {"message":"fakecore: config rejected"}
+//	                                 （reload 被内核拒收的路径）
+//	FAKE_CORE_PUT_RECORD=<path>      每个 /configs 请求向该文件追加一行 JSON（O_APPEND）：
+//	                                 {"method":...,"query":...,"body":...}——恰一行每
+//	                                 请求；其余路径（如 /version）不写。reload 推送
+//	                                 测试按行数与内容断言
 //
 // sock 路径取自命令行 -ext-ctl-unix 的值（与 mihomo 参数形态一致）。
 package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -25,6 +34,14 @@ import (
 	"syscall"
 	"time"
 )
+
+// putRecord 是 FAKE_CORE_PUT_RECORD 单行 JSON 的形状（字段序即文档序——struct 而非
+// map，键序稳定，测试可直接前缀断言）。
+type putRecord struct {
+	Method string `json:"method"`
+	Query  string `json:"query"`
+	Body   string `json:"body"`
+}
 
 func main() {
 	sock := sockPathFromArgs()
@@ -37,15 +54,15 @@ func main() {
 		time.Sleep(10 * time.Minute) // 由测试方超时判定后 kill
 	case "crash-after-ms":
 		n, _ := strconv.Atoi(os.Getenv("FAKE_CORE_CRASH_MS"))
-		serve(sock)
+		serve(sock, mode)
 		time.Sleep(time.Duration(n) * time.Millisecond)
 		os.Exit(1) // 模拟内核崩溃（非 0 退出）
 	case "dump-args":
 		dumpArgsEnv(os.Getenv("FAKE_CORE_DUMP"))
-		serve(sock)
+		serve(sock, mode)
 		waitSignal()
 	default:
-		serve(sock)
+		serve(sock, mode)
 		waitSignal()
 	}
 }
@@ -83,7 +100,7 @@ func sockPathFromArgs() string {
 // serve 在 unix socket 上提供假控制器；listen 前先 unlink（模仿 mihomo 自清理残留
 // sock），listen 成功后自 chmod 666（对齐 mihomo：内核建 listener 时自行放权，M1
 // ——服务的 WaitReady 才把它压回收敛权限）。
-func serve(sock string) {
+func serve(sock, mode string) {
 	if sock == "" {
 		fmt.Println("fakecore: no -ext-ctl-unix given")
 		os.Exit(2)
@@ -103,9 +120,45 @@ func serve(sock string) {
 		fmt.Fprint(w, `{"meta":true,"version":"fake-v1.0.0"}`)
 	})
 	mux.HandleFunc("/configs", func(w http.ResponseWriter, r *http.Request) {
+		// 记录先行（请求处理本身不产生分支差异）；仅 /configs 写，其它路径零写入
+		recordPut(r)
+		if mode == "reject-config" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"message":"fakecore: config rejected"}`)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	})
 	go http.Serve(ln, mux)
+}
+
+// recordPut 把单个 /configs 请求追加为记录文件的一行 JSON（O_APPEND：恰一行每请求，
+// 并发写互不覆盖）。记录失败只打日志不失败请求——记录是测试观测面，不是行为闸。
+func recordPut(r *http.Request) {
+	path := os.Getenv("FAKE_CORE_PUT_RECORD")
+	if path == "" {
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+	if err != nil {
+		fmt.Printf("fakecore: record read body: %v\n", err)
+		return
+	}
+	line, err := json.Marshal(putRecord{Method: r.Method, Query: r.URL.RawQuery, Body: string(body)})
+	if err != nil {
+		fmt.Printf("fakecore: record marshal: %v\n", err)
+		return
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		fmt.Printf("fakecore: record open: %v\n", err)
+		return
+	}
+	defer f.Close()
+	if _, err := f.Write(append(line, '\n')); err != nil {
+		fmt.Printf("fakecore: record write: %v\n", err)
+	}
 }
 
 func waitSignal() {

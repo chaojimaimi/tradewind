@@ -3,8 +3,10 @@
 //   - verifyCoreHomeTrust：内核工作目录 <core_home> 的信任链复核（I2）——祖先链逐级
 //     root 属主且 group/other 不可写，CoreHome 自身 0700，<anchor>/logs 与 CoreLog
 //     非符号链接。服务启动时与每次 spawn 前各复核一次，不达标 fail-closed。
-//   - stageRuntime：把用户 runtime.yaml 字节级搬运到 <core_home>/runtime.yaml（c1
-//     形态：归一化是 c3 的事，本步只做安全读取 + 原子落盘）。
+//   - loadNormalized / writeRuntime：归一化输入与产物落盘的一对原语（c3 形态，I3
+//     ——内核只加载服务归一化过的配置）：用户 runtime.yaml 经 readSafe 读取后过
+//     当前归一化器，产物原子写入 <core_home>/runtime.yaml。快照生命周期（L1–L5）
+//     在 snapshot.go。
 //   - syncGeo：把用户目录里的 geo 数据同步进 <core_home>（best-effort，不阻断 spawn）。
 package service
 
@@ -83,20 +85,44 @@ func verifyCoreHomeTrustWith(c ConfigFile, lstat func(string) (ownerStat, error)
 	return nil
 }
 
-// stageRuntime 把用户 runtime.yaml（经 readSafe：O_NOFOLLOW + 属主 + 8 MiB 上限）
-// 原子写入 <core_home>/runtime.yaml。任何一步失败即返回错误（调用方拒绝 spawn）——
-// 绝不留下空文件或半成品：内核对缺失的配置会自建默认配置以 root 跑起来（M17）。
-// c1 只做字节级搬运；归一化与快照生命周期是 c3 的事。
-func stageRuntime(c ConfigFile) error {
+// normalizeGate 串行化配置归一化：全服务同一时刻最多一份在跑（容量 1 的信号量，
+// 排队方不占内存）。WHY：节点数上限要等 yaml 解析完才生效，8 MiB 的敌意输入在
+// 被拒之前先建出约四百万个节点（实测单次峰值约 731 MiB）；reload 的归一化在
+// s.mu 之外做（R15），而每连接一个协程——不限并发的话，同一账号开 N 个连接并发
+// reload 就是 N 倍内存。root 守护进程被 OOM 杀掉会连带停掉 TUN 内核，并让 launchd
+// 进入节流重启（批⑥b c3b 审查 P1）。start 的归一化在 s.mu 之内、彼此本就串行，但
+// 它与 reload 的那份仍然并发，所以闸放在本函数里，两条路径都由构造覆盖。
+//
+// 锁序恒为 s.mu → normalizeGate：闸只在 loadNormalized 内部持有、随它返回即
+// 释放，绝不跨到获取 s.mu 之上——反过来会与"持 s.mu 等闸"的 start 互锁。
+var normalizeGate = make(chan struct{}, 1)
+
+// loadNormalized 读取用户 runtime.yaml（readSafe：O_NOFOLLOW + 属主 + 8 MiB 上限）
+// 并过当前归一化器（c3 形态的 I3）；全程持有 normalizeGate（见上）。三种结局由
+// 返回值区分：
+//   - 读失败 → err != nil（服务侧失败，非配置拒绝——调用方按 {ok:false} 处理）；
+//   - 归一化拒绝 → rej != nil 且 err == nil（调用方回 {ok:false, rejected:true}）；
+//   - 接受 → 返回产物（Bytes = 归一化产物，Ignored = 被剥离的用户键）。
+func loadNormalized(c ConfigFile) (Result, *Rejection, error) {
+	normalizeGate <- struct{}{}
+	defer func() { <-normalizeGate }()
 	data, err := readSafe(c.UserRuntime, c.DataUID, runtimeMaxBytes)
 	if err != nil {
-		return fmt.Errorf("service: refusing to spawn, runtime: %w", err)
+		return Result{}, nil, fmt.Errorf("service: runtime: %w", err)
 	}
+	res, rej := NormalizeRuntime(data)
+	if rej != nil {
+		return Result{}, rej, nil
+	}
+	return res, nil, nil
+}
+
+// writeRuntime 把归一化产物原子写入 <core_home>/runtime.yaml（内核 -f 指向的文件，
+// 服务的唯一写点）。绝不留下空文件或半成品：内核对缺失的配置会自建默认配置以
+// root 跑起来（M17）。临时文件固定在 <core_home> 内（root 独占目录，I1 不涉及）。
+func writeRuntime(c ConfigFile, data []byte) error {
 	tmp := filepath.Join(c.CoreHome, ".runtime.tmp")
-	if err := writeAtomic(tmp, RuntimeIn(c.CoreHome), data); err != nil {
-		return fmt.Errorf("service: refusing to spawn, runtime: %w", err)
-	}
-	return nil
+	return writeAtomic(tmp, RuntimeIn(c.CoreHome), data)
 }
 
 // writeAtomic 原子落盘：先移除可能残留的临时文件，再 O_CREATE|O_EXCL 0600 创建 →

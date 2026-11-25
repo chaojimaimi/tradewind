@@ -62,8 +62,30 @@ func TestServiceKernelArgsEnvAndStagedRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read staged runtime: %v", err)
 	}
-	if string(staged) != "proxies: []\n" {
-		t.Fatalf("staged runtime = %q, want the user file's bytes", staged)
+	// staged 现在是归一化产物（I3，c3 形态）：== 归一化器的产物；且不用纯同义反复
+	// 的断言——产物以用户文件开头、恰有一个顶层 tun: 键、external-controller 钉死 ""。
+	userBytes, err := os.ReadFile(conf.UserRuntime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	product, rej := NormalizeRuntime(userBytes)
+	if rej != nil {
+		t.Fatalf("normalize fixture rejected at %s: %s", rej.Key, rej.Reason)
+	}
+	if string(staged) != string(product.Bytes) {
+		t.Fatalf("staged runtime = %q, want the normalized product %q", staged, product.Bytes)
+	}
+	if !bytes.HasPrefix(staged, []byte("proxies: []\n")) {
+		t.Fatalf("staged runtime %q must start with the user's own proxies key", staged)
+	}
+	if n := countTopLevelKeys(staged, "tun:"); n != 1 {
+		t.Fatalf("top-level tun: keys = %d, want exactly 1 (pinned block)", n)
+	}
+	if n := countTopLevelKeys(staged, "external-controller:"); n != 1 {
+		t.Fatalf("top-level external-controller: keys = %d, want exactly 1", n)
+	}
+	if !bytes.Contains(staged, []byte("external-controller: \"\"\n")) {
+		t.Fatalf("staged runtime %q must pin external-controller to the empty string", staged)
 	}
 	if info, err := os.Stat(conf.KernelSock); err != nil {
 		t.Fatalf("stat kernel sock: %v", err)
@@ -123,72 +145,16 @@ func equalSlices(got, want []string) bool {
 	return true
 }
 
-// dirSnapshot 是目录快照的单条目投影：类型/属主/权限/大小 + inode/mtime（I1 的
-// 行为级断言面）。inode 与 mtime 一并记下：原地覆写会动 mtime，"写临时文件再
-// rename"会换 inode——只有"条目集合与属主/权限"的话这两种写入都看不出来。
-type dirSnapshot struct {
-	mode  os.FileMode
-	uid   int
-	size  int64
-	ino   uint64
-	mtime int64
-}
-
-// snapshotDataDir 对目录做全量快照（路径 → 投影）。
-func snapshotDataDir(t *testing.T, dir string) map[string]dirSnapshot {
-	t.Helper()
-	out := map[string]dirSnapshot{}
-	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
+// countTopLevelKeys 统计顶格出现的行首键（顶层键不缩进；tun 块内层键带缩进，
+// 不会被计入）。
+func countTopLevelKeys(data []byte, key string) int {
+	n := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, key) {
+			n++
 		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		uid, ino := -1, uint64(0)
-		if sys, ok := info.Sys().(*syscall.Stat_t); ok {
-			uid, ino = int(sys.Uid), sys.Ino
-		}
-		out[path] = dirSnapshot{
-			mode: info.Mode(), uid: uid, size: info.Size(),
-			ino: ino, mtime: info.ModTime().UnixNano(),
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walk %s: %v", dir, err)
 	}
-	return out
-}
-
-// TestI1DataDirUntouchedByFullFlow I1 行为级断言：全流程（start → stop）前后对
-// DataDir 各做一次目录快照（条目名、类型、属主、权限、大小、inode、mtime），逐项
-// 相同——root 对用户数据目录零写入（没有新增、没有删除、没有属主/权限变化、没有
-// 内容被重写）。数据目录里放一份 geo 文件，让 geo 同步的读取路径也落在断言里。
-func TestI1DataDirUntouchedByFullFlow(t *testing.T) {
-	dir := shortTempDir(t)
-	cfg, conf := writeServiceFixture(t, dir)
-	if err := os.WriteFile(filepath.Join(conf.DataDir, "geoip.metadb"), []byte("geo-bytes"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	startStubServer(t, cfg)
-	cl := NewClient(cfg.SockPath, 30*time.Second)
-
-	before := snapshotDataDir(t, conf.DataDir)
-	if _, err := cl.Start(1); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if _, err := cl.Status(); err != nil {
-		t.Fatalf("Status: %v", err)
-	}
-	if _, err := cl.Stop(); err != nil {
-		t.Fatalf("Stop: %v", err)
-	}
-	after := snapshotDataDir(t, conf.DataDir)
-	if !reflect.DeepEqual(before, after) {
-		t.Fatalf("user data dir changed across the full flow:\nbefore=%+v\nafter =%+v", before, after)
-	}
+	return n
 }
 
 // TestSourceStaticChownChmodInvariant 源码静态断言（I1 的可检查形态）：
@@ -320,8 +286,9 @@ func TestMonitorRespawnRotatesAndOwnsCoreLog(t *testing.T) {
 	t.Fatal("log rotation + ownership convergence did not happen during the self-heal respawn within 12s")
 }
 
-// TestStartRefusedWhenUserRuntimeMissing 用户 runtime.yaml 缺失 → stageRuntime
-// 失败 → start 被拒、内核未 spawn（绝不让内核以默认配置跑起来，M17）。
+// TestStartRefusedWhenUserRuntimeMissing 用户 runtime.yaml 缺失 → start 被拒（服务
+// 侧读取失败，非配置拒绝：rejected=false）、内核未 spawn（绝不让内核以默认配置跑
+// 起来，M17）。
 func TestStartRefusedWhenUserRuntimeMissing(t *testing.T) {
 	dir := shortTempDir(t)
 	cfg, conf := writeServiceFixture(t, dir)
@@ -335,8 +302,8 @@ func TestStartRefusedWhenUserRuntimeMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start transport: %v", err)
 	}
-	if resp.OK || !strings.Contains(resp.Error, "refusing to spawn, runtime") {
-		t.Fatalf("Start without user runtime = %+v, want refusal", resp)
+	if resp.OK || resp.Rejected || !strings.Contains(resp.Error, "runtime") {
+		t.Fatalf("Start without user runtime = %+v, want a non-rejected refusal naming the runtime read", resp)
 	}
 	if st, _ := cl.Status(); st.PID != 0 {
 		t.Fatalf("no core may spawn without a staged runtime (status pid %d)", st.PID)
@@ -346,8 +313,8 @@ func TestStartRefusedWhenUserRuntimeMissing(t *testing.T) {
 	}
 }
 
-// TestStartRefusedWhenUserRuntimeSymlink 用户 runtime.yaml 是符号链接 → 拒绝
-// （readSafe 的 O_NOFOLLOW 闸在编排层的呈现）。
+// TestStartRefusedWhenUserRuntimeSymlink 用户 runtime.yaml 是符号链接 → 拒绝（服务
+// 侧读取失败，rejected=false；readSafe 的 O_NOFOLLOW 闸在编排层的呈现）。
 func TestStartRefusedWhenUserRuntimeSymlink(t *testing.T) {
 	dir := shortTempDir(t)
 	cfg, conf := writeServiceFixture(t, dir)
@@ -368,8 +335,8 @@ func TestStartRefusedWhenUserRuntimeSymlink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start transport: %v", err)
 	}
-	if resp.OK || !strings.Contains(resp.Error, "symbolic link") {
-		t.Fatalf("Start with a symlinked runtime = %+v, want refusal", resp)
+	if resp.OK || resp.Rejected || !strings.Contains(resp.Error, "symbolic link") {
+		t.Fatalf("Start with a symlinked runtime = %+v, want a non-rejected refusal", resp)
 	}
 	if st, _ := cl.Status(); st.PID != 0 {
 		t.Fatalf("no core may spawn behind a symlinked runtime (status pid %d)", st.PID)

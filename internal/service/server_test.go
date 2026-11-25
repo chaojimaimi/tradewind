@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -385,12 +386,21 @@ func rawRequest(sockPath, payload string) (Response, error) {
 	return ReadResponse(conn)
 }
 
-// TestServiceAdoptsOrphanCore 孤儿收编（R13）：服务启动时 core.pid 记录的孤儿
-// 内核存活且身份匹配（命令行含 -d <core_home>）→ SIGTERM 回收 → 正常 start 流程
-// 收编（新 pid 接管）。
+// TestServiceAdoptsOrphanCore 孤儿收编（R13；L2——批⑥b §4.4）：服务启动时 core.pid
+// 记录的孤儿内核存活且身份匹配（命令行含 -d <core_home>）→ SIGTERM 回收 → L1 种子
+// 已有快照 → 正常 spawn 流程收编（新 pid 接管）。
 func TestServiceAdoptsOrphanCore(t *testing.T) {
 	dir := shortTempDir(t)
 	cfg, conf := writeServiceFixture(t, dir)
+	// 预置 R 为当前归一化器的合法产物（属主 = 当前用户，safeopen 校验放行）：
+	// L1 种子据此采纳快照，L2 才会重拉。种子幂等 → R 保持种子字节不动。
+	seed, rej := NormalizeRuntime([]byte("proxies: []\n"))
+	if rej != nil {
+		t.Fatalf("seed normalize rejected at %s: %s", rej.Key, rej.Reason)
+	}
+	if err := os.WriteFile(RuntimeIn(conf.CoreHome), seed.Bytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	// 手工拉起"孤儿"桩内核（同 Manager 参数形态：-d coreHome -f runtime -ext-ctl-unix sock）
 	orphan := exec.Command(fakeCoreBin, "-d", conf.CoreHome, "-f", RuntimeIn(conf.CoreHome),
 		"-ext-ctl-unix", conf.KernelSock)
@@ -423,6 +433,11 @@ func TestServiceAdoptsOrphanCore(t *testing.T) {
 			var newPID int
 			if _, perr := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &newPID); perr == nil &&
 				newPID > 0 && newPID != orphan.Process.Pid && probeAlive(conf.KernelSock) {
+				// L5 核对通过：收编后的 R 仍是种子字节（未被回写）
+				staged, rerr := os.ReadFile(RuntimeIn(conf.CoreHome))
+				if rerr != nil || !bytes.Equal(staged, seed.Bytes) {
+					t.Fatalf("runtime.yaml after adoption = %q err %v, want the seeded bytes", staged, rerr)
+				}
 				return
 			}
 		}
