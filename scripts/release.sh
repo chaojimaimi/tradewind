@@ -86,7 +86,7 @@ main() {
   #（无 --prerelease 默认 / 资产清单含 zip+appcast / --upload 显式语义保持）
   if [ "${DRY_RUN:-0}" = "1" ]; then
     local assets="tradewind-$VERSION-darwin-arm64.tar.gz tradewind-$VERSION-darwin-arm64.tar.gz.sha256"
-    if [ -n "${SPARKLE_BIN:-}" ] && [ -x "$SPARKLE_BIN/sign_update" ] && [ -f "$HOME/.sparkle/tradewind.ed25519.priv" ]; then
+    if [ -n "${SPARKLE_BIN:-}" ] && [ -x "$SPARKLE_BIN/sign_update" ] && [ -f "${EDDSA_PRIV:-$HOME/.sparkle/tradewind.ed25519.priv}" ]; then
       assets="$assets Tradewind.app.zip appcast.xml"
     else
       assets="$assets (Sparkle 资产链跳过：SPARKLE_BIN/EdDSA 密钥缺失)"
@@ -155,11 +155,17 @@ EOF
   # --- 3.5 Sparkle 资产链（batch5 §3.3）：zip + EdDSA 签名 + appcast 单条目快照 ----
   # SPARKLE_BIN / 私钥任一缺失 → 警告跳过整段链（tarball/sidecar 照常发）；
   # 签名输出解析失败 = 工具在位却产出不可解析 → fail fast（发布半残比失败更糟）。
+  # 密钥双闸自检（batch6b plan §4.7 验签自检）：签名前推导公钥=壳内嵌公钥、签名后 --verify 复验。
   ZIP="$REPO_ROOT/dist/Tradewind.app.zip"
   APPCAST="$REPO_ROOT/dist/appcast.xml"
   SPARKLE_ASSETS=()
   SPARKLE_BIN="${SPARKLE_BIN:-}"
-  EDDSA_PRIV="$HOME/.sparkle/tradewind.ed25519.priv"
+  # 覆盖点（测试注 stub 用，默认=既有约定）；EDPUBKEY_CMD 以私钥路径收尾调用，
+  # 取值不得含空格与通配符（下方不加引号展开，按词切分是其工作方式；不合规的值
+  # 以 command not found 失败，方向安全）
+  EDDSA_PRIV="${EDDSA_PRIV:-$HOME/.sparkle/tradewind.ed25519.priv}"
+  EDDSA_PUB_FILE="${EDDSA_PUB_FILE:-$REPO_ROOT/apps/menubar/sparkle-eddsa-pub.txt}"
+  EDPUBKEY_CMD="${EDPUBKEY_CMD:-go run ./tools/edpubkey --key-file}"
   if [ -z "$SPARKLE_BIN" ]; then
     echo "warning: SPARKLE_BIN unset; skipping Sparkle asset chain (zip/appcast) — tarball/sidecar 照常" >&2
   elif [ ! -x "$SPARKLE_BIN/sign_update" ]; then
@@ -167,6 +173,41 @@ EOF
   elif [ ! -f "$EDDSA_PRIV" ]; then
     echo "warning: EdDSA private key $EDDSA_PRIV missing; skipping Sparkle asset chain（前置动作 batch5 §3.4）" >&2
   else
+    # 覆盖点被改动时在发布记录里留一行：闸 1 的可信度取决于"推导公钥的命令"没被
+    # 调包——EDPUBKEY_CMD 是三者里唯一能把"校验的键"与"签名的键"解耦的，环境里
+    # 残留的调试值不该悄悄让闸 1 变成恒真。只提示不拒绝：能往这个 shell 注入环境
+    # 的人本来就能经 PATH/SPARKLE_BIN 调包 sign_update。
+    [ "$EDDSA_PRIV" = "$HOME/.sparkle/tradewind.ed25519.priv" ] || echo "==> note: EDDSA_PRIV overridden: $EDDSA_PRIV"
+    [ "$EDDSA_PUB_FILE" = "$REPO_ROOT/apps/menubar/sparkle-eddsa-pub.txt" ] || echo "==> note: EDDSA_PUB_FILE overridden: $EDDSA_PUB_FILE"
+    [ "$EDPUBKEY_CMD" = "go run ./tools/edpubkey --key-file" ] || echo "==> note: EDPUBKEY_CMD overridden: $EDPUBKEY_CMD"
+    # 双闸自检·闸 1（签名前；batch6b plan §4.7）：私钥推导公钥 ≠ 壳内嵌公钥 → 拦截。
+    # WHY：错私钥签出的发布装得上、appcast 照发，但每个客户端都在 Sparkle 验签处拒绝
+    # （半残发布比失败更糟）；apps/menubar/sparkle-eddsa-pub.txt 就是壳实际信任的键。
+    # 推导经 edpubkey（唯一允许读私钥文件的东西，只吐公钥；--ed-key-file 红线不变）。
+    # 威胁模型：两道闸防的是"拿错钥匙"这类诚实的失误（陈旧私钥、检出错的公钥文件），
+    # 不是签名机上的攻击者——私钥文件在闸 1、签名、复验三处各读一次，能在其间换掉
+    # 它的人本来就能调包 sign_update 或改 app 包，且仍改不了仓库里的内嵌公钥。
+    DERIVED_PUB="$(cd "$REPO_ROOT" && $EDPUBKEY_CMD "$EDDSA_PRIV")" || {
+      echo "error: cannot derive public key from $EDDSA_PRIV (edpubkey failed); app trusts $EDDSA_PUB_FILE" >&2
+      exit 1
+    }
+    DERIVED_PUB="$(printf '%s' "$DERIVED_PUB" | tr -d '[:space:]')"
+    if [ -z "$DERIVED_PUB" ]; then
+      echo "error: empty public key derived from $EDDSA_PRIV; app trusts $EDDSA_PUB_FILE" >&2
+      exit 1
+    fi
+    if [ ! -f "$EDDSA_PUB_FILE" ]; then
+      echo "error: embedded pub key file $EDDSA_PUB_FILE missing (signing key $EDDSA_PRIV)" >&2
+      exit 1
+    fi
+    EMBEDDED_PUB="$(tr -d '[:space:]' < "$EDDSA_PUB_FILE")" || {
+      echo "error: cannot read embedded pub key file $EDDSA_PUB_FILE (signing key $EDDSA_PRIV)" >&2
+      exit 1
+    }
+    if [ "$DERIVED_PUB" != "$EMBEDDED_PUB" ]; then
+      echo "error: $EDDSA_PRIV does not match app-embedded pub $EDDSA_PUB_FILE — abort before signing" >&2
+      exit 1
+    fi
     echo "==> zip Tradewind.app.zip"
     ditto -c -k --keepParent "$REPO_ROOT/apps/menubar/dist/Tradewind.app" "$ZIP"
     echo "==> sign_update (EdDSA；私钥经 --ed-key-file，不经 argv)"
@@ -174,9 +215,16 @@ EOF
     ED_SIG="$(printf '%s\n' "$SIGN_OUT" | sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p')"
     ZIP_LEN="$(printf '%s\n' "$SIGN_OUT" | sed -n 's/.*[^a-zA-Z]length="\([0-9]*\)".*/\1/p')"
     if [ -z "$ED_SIG" ] || [ -z "$ZIP_LEN" ]; then
-      echo "error: cannot parse sign_update output: $SIGN_OUT" >&2
+      # 不原样回显：sign_update 解码 key 失败时会把整个 key 字符串打进错误信息
+      # （sign_update/main.swift）——≥16 个 base64 字符的连续串一律打码后再回显
+      echo "error: cannot parse sign_update output: $(printf '%s\n' "$SIGN_OUT" | sed -E 's#[A-Za-z0-9+/=]{16,}#<redacted>#g' | cut -c1-400)" >&2
       exit 1
     fi
+    # 双闸自检·闸 2（签名后；batch6b plan §4.7）：--verify 复验不过 → 不写 appcast、不入资产
+    "$SPARKLE_BIN/sign_update" --verify --ed-key-file "$EDDSA_PRIV" "$ZIP" "$ED_SIG" || {
+      echo "error: signature verification failed for $ZIP — abort before writing appcast" >&2
+      exit 1
+    }
     # sparkle:version = build 号（与 build.sh CFBundleVersion 同源同式：同一 commit
     # 的提交计数一致；单调递增保证 Sparkle 版本比较方向正确）
     BUILD_NUMBER="$(git -C "$REPO_ROOT" rev-list --count HEAD)"
