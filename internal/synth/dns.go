@@ -57,9 +57,11 @@ var (
 	dnsFallbackServers = []string{"tls://8.8.8.8:853", "tls://1.1.1.1:853"}
 )
 
-// tunBlockNode 构造 tun 块：system 栈 + auto-route + dns-hijack any:53（DNS 劫持
+// TunBlockNode 构造 tun 块：system 栈 + auto-route + dns-hijack any:53（DNS 劫持
 // 覆盖全部明文查询——系统 DNS 接管（DESIGN #17）因此不进本批）。
-func tunBlockNode() *yaml.Node {
+// 导出供 service 归一化器共用（批⑥b §4.2）：TUN 期间内核 tun 块的唯一来源，
+// 合成注入与归一化钉死读同一份定义，杜绝两处常量漂移。
+func TunBlockNode() *yaml.Node {
 	m := &yaml.Node{Kind: yaml.MappingNode}
 	setMappingValue(m, "enable", scalarNode(true))
 	setMappingValue(m, "stack", scalarNode("system"))

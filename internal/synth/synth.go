@@ -76,7 +76,7 @@ func Synth(subscription []byte, inj Injection, enh *Enhance) ([]byte, error) {
 	// true 注入 tun 块 + dns 白名单块（dns 键替换——模板最小 dns 段被完整覆盖，F5）。
 	// 用户增强 merge 槽写 dns:/tun: 键同被本段覆盖（R7：TUN 期间不可经增强链定制）。
 	if inj.Settings.TunEnabled {
-		setMappingValue(root, "tun", tunBlockNode())
+		setMappingValue(root, "tun", TunBlockNode())
 		setMappingValue(root, "dns", dnsBlockNode())
 	}
 
