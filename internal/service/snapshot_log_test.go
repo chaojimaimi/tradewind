@@ -49,16 +49,17 @@ func TestRestoreRuntimeReplacesNonRegularFile(t *testing.T) {
 
 // TestKernelRejectionReasonStaysOutOfTheLog：内核 400 的理由可能回显配置值（yaml
 // 类型错误会带出片段）——它回给调用方（那是用户自己的配置），但不进服务日志。
+// 日志截获必须在起服务**之前**就位（见 captureServiceLog）。
 func TestKernelRejectionReasonStaysOutOfTheLog(t *testing.T) {
 	dir := shortTempDir(t)
 	cfg, _ := writeServiceFixture(t, dir)
+	logPath := filepath.Join(dir, "service-stderr.log")
+	captureServiceLog(t, logPath)
 	startStubServerTuned(t, cfg, withCoreEnv("FAKE_CORE_MODE=reject-config"))
 	cl := NewClient(cfg.SockPath, 30*time.Second)
 	if r, err := cl.Start(1); err != nil || !r.OK {
 		t.Fatalf("Start = %+v err %v, want ok", r, err)
 	}
-	logPath := filepath.Join(dir, "service-stderr.log")
-	captureFd2(t, logPath)
 
 	resp, err := cl.Reload()
 	if err != nil || resp.OK || !resp.Rejected {
@@ -79,29 +80,31 @@ func TestKernelRejectionReasonStaysOutOfTheLog(t *testing.T) {
 	}
 }
 
-// captureFd2 把进程的 fd 2（服务日志的实际去向：launchd 把它接到 service.log）重定向
-// 到 path，Cleanup 时还原。WHY 在 fd 层截获而不是替换 os.Stderr 变量：服务协程
-// （acceptLoop/monitorLoop）随时可能读 os.Stderr 写日志，换变量与它们构成数据竞争；
-// dup2 之后各协程照常经 fd 2 写入，落到文件。包内测试串行执行，不与 t.Parallel 混用。
-func captureFd2(t *testing.T, path string) {
+// captureServiceLog 把服务日志（代码里一律写 os.Stderr）引到 path，Cleanup 时还原。
+// 必须在起服务之前调用。
+//
+// WHY 换变量而不是重定向 fd 2：`go test -json` 下 testing 包会把 os.Stderr 指到
+// os.Stdout（testing.go，go.dev/issue/33419——两条流共用一把写锁，免得交错输出
+// 搞乱 test2json）。此后服务经 os.Stderr 的写根本不走 fd 2，只在 fd 层重定向的
+// 截获在这种模式下截不到任何东西——带 -json 跑时本用例曾必失败。
+//
+// WHY 这样换不构成数据竞争：只在没有任何服务协程存活的时刻触碰这个变量。本函数
+// 的 Cleanup 先于 startStubServer* 的收尾登记，因而晚于它执行（LIFO），那时 Run
+// 已经返回；本用例起的服务协程都在换完之后才创建。服务运行期间换变量才会与
+// acceptLoop/monitorLoop 的读竞争——那是当初只在 fd 层做的原因。包内测试串行执行，
+// 不与 t.Parallel 混用。
+func captureServiceLog(t *testing.T, path string) {
 	t.Helper()
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	saved, err := syscall.Dup(2)
-	if err != nil {
-		f.Close()
-		t.Fatal(err)
-	}
-	if err := syscall.Dup2(int(f.Fd()), 2); err != nil {
-		syscall.Close(saved)
-		f.Close()
-		t.Fatal(err)
-	}
+	prev := os.Stderr
+	os.Stderr = f
 	t.Cleanup(func() {
-		_ = syscall.Dup2(saved, 2)
-		_ = syscall.Close(saved)
-		_ = f.Close()
+		os.Stderr = prev
+		if err := f.Close(); err != nil {
+			t.Errorf("close captured service log: %v", err)
+		}
 	})
 }
