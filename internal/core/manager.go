@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -94,8 +93,33 @@ func NewManager(cfg Config) *Manager {
 	return &Manager{cfg: cfg}
 }
 
+// errStoppedByOwner 是 Monitor 专用 respawn 的拒绝信号：Owner 已经 Stop，这次自愈
+// 不该发生。Monitor 据此安静收场，而不是当作"重启失败"去触发 onGiveUp。
+var errStoppedByOwner = errors.New("core: manager was stopped; respawn refused")
+
 // Spawn 校验二进制并启动内核子进程，stdout/stderr 落日志。
-func (m *Manager) Spawn() error {
+func (m *Manager) Spawn() error { return m.start(false) }
+
+// respawn 是 Monitor 崩溃自愈专用的启动：与 Spawn 的唯一区别是"Owner 已 Stop 则
+// 拒绝"（见 start）。
+func (m *Manager) respawn() error { return m.start(true) }
+
+// start 是 Spawn / respawn 的公共主体。前置工作（钩子、校验、日志）在锁外做；
+// stopping 的判定与 cmd.Start() 放进同一把 m.mu 临界区。
+//
+// WHY（Stop/respawn 竞争缺陷）：Monitor 在退避等待期间被 Stop 时，旧实现是
+// "先 cmd.Start() 再加锁存句柄"——Stop 锁内置位 stopping、快照到的却是已死的旧
+// 进程，于是正常返回；退避结束后 Monitor 无条件 Spawn，拉起一个调用方已经丢弃
+// 引用的内核（特权形态下 = 失控的 root 内核，后续启动端口冲突）。Stop 同样在
+// m.mu 内置位并快照，互斥之后只剩两种结局：Stop 先进临界区 → respawn 看到
+// stopping 直接拒绝；respawn 先进 → Stop 快照到新进程，照常把它停掉。
+func (m *Manager) start(monitor bool) error {
+	// 自愈路径先做一次无锁预检：Monitor 的早退与这里之间仍有窗口，若 Owner 恰在其间
+	// Stop，预检让本次 respawn 在动日志（轮转、新建、属主收敛）之前就收场。锁内的
+	// 判定（下方）才是正确性所在，这一处只是少留一份被轮转的日志。
+	if monitor && m.isStopping() {
+		return errStoppedByOwner
+	}
 	if m.cfg.PreSpawn != nil {
 		if err := m.cfg.PreSpawn(); err != nil {
 			return fmt.Errorf("core: pre-spawn check: %w", err)
@@ -135,11 +159,18 @@ func (m *Manager) Spawn() error {
 	if m.cfg.Env != nil {
 		cmd.Env = m.cfg.Env
 	}
+	m.mu.Lock()
+	// 只拦自愈：对外的 Spawn 语义不变（调用方每次启动都 new 一个 Manager）
+	if monitor && m.stopping {
+		m.mu.Unlock()
+		logFile.Close()
+		return errStoppedByOwner
+	}
 	if err := cmd.Start(); err != nil {
+		m.mu.Unlock()
 		logFile.Close()
 		return fmt.Errorf("core: spawn %s: %w", m.cfg.BinPath, err)
 	}
-	m.mu.Lock()
 	m.cmd = cmd
 	m.exit = make(chan struct{})
 	m.stopping = false
@@ -232,8 +263,17 @@ func (m *Manager) Monitor(ctx context.Context, onGiveUp func(error)) error {
 			return nil
 		case <-time.After(m.cfg.RestartBackoff[restarts]):
 		}
+		// 退避窗口内被 Stop：循环顶部那次 isStopping 只覆盖"崩溃时已停"，拦不住窗口
+		// 中途的 Stop。这里早退省掉一次无谓的钩子/校验/开日志；漏网的由 start 兜底
+		if m.isStopping() {
+			return nil
+		}
 		restarts++
-		if err := m.Spawn(); err != nil {
+		if err := m.respawn(); err != nil {
+			if errors.Is(err, errStoppedByOwner) {
+				// Owner 的 Stop 赢得临界区：这是主动停止的收场，不是重启失败
+				return nil
+			}
 			return giveUp(fmt.Errorf("respawn: %w", err))
 		}
 		if err := m.WaitReady(ctx); err != nil {
@@ -314,68 +354,4 @@ func (m *Manager) removeSock() {
 // TailLog 读取日志末尾（≤logTailSize 字节）用于错误诊断。
 func (m *Manager) TailLog() string {
 	return tailFile(m.cfg.LogPath, logTailSize)
-}
-
-// openLogFile 打开内核日志（O_APPEND 追加写）。
-// WHY O_NOFOLLOW（batch6 真机 fold-in 2）：特权服务以 root 打开日志路径（批⑥b 起
-// 是 root 属主目录下的 <anchor>/logs/core.log，纵深防御原样保留）——该路径若被换成
-// 指向系统文件的符号链接，跟随打开 = root 往目标追加日志。O_NOFOLLOW 由内核拒绝
-// （ELOOP），不依赖调用前的 Lstat（那有 TOCTOU 窗口）。只作用于路径末段，普通
-// 文件零回归。
-func openLogFile(path string) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
-	if err != nil {
-		if errors.Is(err, syscall.ELOOP) {
-			return nil, fmt.Errorf("core: open log: %s is a symbolic link (refusing to follow)", path)
-		}
-		return nil, fmt.Errorf("core: open log: %w", err)
-	}
-	return f, nil
-}
-
-// rotateLog 超过 logRotateSize 时将日志轮转为 .1（保留 1 份，直接覆盖旧 .1）。
-// Lstat 判符号链接并直接拒绝：跟随 Stat 会读到目标的大小，随后 Rename 移走的是
-// 链接本身——以 root 对用户可控路径做这些动作都不该发生。
-func rotateLog(path string) error {
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("core: stat log: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("core: log path %s is a symbolic link (refusing to rotate)", path)
-	}
-	if info.Size() <= logRotateSize {
-		return nil
-	}
-	if err := os.Rename(path, path+".1"); err != nil {
-		return fmt.Errorf("core: rotate log: %w", err)
-	}
-	return nil
-}
-
-// tailFile 读文件末尾 n 字节。O_NOFOLLOW：日志内容会进错误信息（fail-fast /
-// giveup 的 log tail）——特权服务下若跟随符号链接，root 专读文件的内容会被带进
-// 返回给用户态的错误里。读不了只表现为"日志不可用"，不影响主流程。
-func tailFile(path string, n int64) string {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		return fmt.Sprintf("(log unavailable: %v)", err)
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return fmt.Sprintf("(log unavailable: %v)", err)
-	}
-	offset := info.Size() - n
-	if offset < 0 {
-		offset = 0
-	}
-	buf := make([]byte, info.Size()-offset)
-	if _, err := f.ReadAt(buf, offset); err != nil && !errors.Is(err, io.EOF) {
-		return fmt.Sprintf("(log read failed: %v)", err)
-	}
-	return string(buf)
 }
