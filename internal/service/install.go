@@ -1,10 +1,11 @@
 // install.go：helper 安装子命令（批⑥ §3.3；真机 fold-in 改布局；批⑥b §4.1 改
-// root 专属目录布局）。
+// root 专属目录布局；批⑥b §4.5 加显式确认旗标）。
 //
 // 提权脚本把 helper 副本 + 内核的 root 属主副本拷进执行目录并做执行自测后，调用
 // 本包 Install——plist 与 service.json 由 root 身份的 helper 自写。{data_dir,
-// data_uid, exec_dir} 经内联 argv 传入（argv 无秘密，符合红线；root 无法"自证"
-// 调用者数据目录，评审二轮 P2-c），不读用户可写文件（TOCTOU 不移回配置面，R12）。
+// data_uid, exec_dir, allow_insecure_tun} 经内联 argv 传入（argv 无秘密，符合红线；
+// root 无法"自证"调用者数据目录，评审二轮 P2-c），不读用户可写文件（TOCTOU 不移回
+// 配置面，R12）。
 //
 // LPE 修复（batch6 真机 fold-in）：service.json 的 core_bin/sidecar 指向执行目录下
 // 的 root 属主副本，绝不指向用户可写的 data_dir——旧布局下任何用户态进程替换
@@ -46,11 +47,22 @@ func (realLaunchctl) Run(args ...string) error {
 }
 
 // Install 执行 helper 安装子命令
-// （`tradewind install --data-dir <p> --data-uid <n> --exec-dir <e>`）：校验 argv →
-// 执行目录归 root 所有 → root 内核副本一致性校验 → 建 root 专属目录布局 → 写
-// service.json + daemon plist → bootout（幂等，失败忽略）→ bootstrap。必须 root
-// （提权脚本调用；非 root 直接报错，绝不静默降级为用户态写系统目录）。
-func Install(dataDir string, dataUID int, execDir string, stdout io.Writer) error {
+// （`tradewind install --data-dir <p> --data-uid <n> --exec-dir <e>
+// [--allow-insecure-tun]`）：显式确认旗标在前（未确认即拒绝，不写任何文件、不碰
+// launchd）→ 校验 argv → 执行目录归 root 所有 → root 内核副本一致性校验 → 建
+// root 专属目录布局 → 写 service.json + daemon plist → bootout（幂等，失败忽略）
+// → bootstrap。必须 root（提权脚本调用；非 root 直接报错，绝不静默降级为用户态
+// 写系统目录）。
+func Install(dataDir string, dataUID int, execDir string, allowInsecureTUN bool, stdout io.Writer) error {
+	// 显式确认旗标（批⑥b §4.5，终审 P3-①；阶段一终闸，阶段二随联锁一并删除），
+	// 先于 root 守卫：未确认 → 拒绝且零动作。WHY 由用户态 CLI 判而不是 helper：
+	// `do shell script` 不继承用户环境，root 侧 helper 看不到
+	// TRADEDWIND_ALLOW_INSECURE_TUN——只能由看得到该环境变量的 CLI 决定是否经
+	// argv 传入这个旗标。
+	if !allowInsecureTUN {
+		return errors.New("service: 特权服务尚未完成加固（R16 提权边界），仅限本机自测；" +
+			"如已知悉风险，请以 --allow-insecure-tun 显式传入确认")
+	}
 	if os.Geteuid() != 0 {
 		return errors.New("service: install must run as root (via `tradewind tun install`)")
 	}

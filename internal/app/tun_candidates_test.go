@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -14,16 +15,12 @@ import (
 // 安装脚本的候选过滤（review P2）：祖先目录用户/admin 可写的候选不进脚本；一个都
 // 不剩 → 说明原因，不生成脚本、不提权。
 
-// captureInstallScript 把 elevate 换成"读取已落盘的脚本"（脚本文件在提权执行期间
-// 存在，执行后由编排清理）。
+// captureInstallScript 把 elevate 换成"捕获脚本源码"（批⑥b §4.5 I5：脚本文本经
+// 提权缝隙直达，不再有落盘的脚本文件可读）。
 func captureInstallScript(env *tunEnv) *string {
 	var script string
-	env.elevate = func(path string) error {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		script = string(data)
+	env.elevate = func(source string) error {
+		script = source
 		return nil
 	}
 	return &script
@@ -33,6 +30,7 @@ func captureInstallScript(env *tunEnv) *string {
 // 与全败文案都只列安全候选。
 func TestTunInstallFiltersUnsafeExecDirCandidates(t *testing.T) {
 	home := paths.Home(stubSocketDir(t))
+	seedFakeCore(t, home) // 生成脚本要算内核摘要（批⑥b §4.5）
 	env, _, _, _, _ := newTunTestEnv(t)
 	env.serviceAnchorExists = func() bool { return false } // 尚未安装：非 force 才会走到生成脚本
 	safe := []string{"/Library/Application Support/Tradewind", "/opt/tradewind"}
@@ -105,7 +103,8 @@ func TestTunInstallAbortsWhenNoSafeCandidate(t *testing.T) {
 			if elevated != 0 {
 				t.Fatalf("elevation runs = %d, want 0 (no script may be generated)", elevated)
 			}
-			if _, statErr := os.Stat(tunScriptPath(home)); !errors.Is(statErr, os.ErrNotExist) {
+			// 脚本不落盘（批⑥b §4.5 I5）：用户数据目录里不存在旧实现的脚本文件
+			if _, statErr := os.Stat(filepath.Join(home.String(), "tun-install-script.sh")); !errors.Is(statErr, os.ErrNotExist) {
 				t.Fatalf("no script file may be left behind (err = %v)", statErr)
 			}
 			if tunSettings(t, home).TunEnabled {

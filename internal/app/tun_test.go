@@ -370,6 +370,7 @@ func TestTunOnHelperStale(t *testing.T) {
 func TestTunOnAutoInstallsWhenMissing(t *testing.T) {
 	home := paths.Home(stubSocketDir(t))
 	seedTunOffHome(t, home)
+	seedFakeCore(t, home) // 前置安装要算内核摘要（批⑥b §4.5）
 	env, _, spawns, _, _ := newTunTestEnv(t)
 	var installed bool
 	env.serviceAnchorExists = func() bool { return installed }

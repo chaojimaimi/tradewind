@@ -158,6 +158,7 @@ func TestTunOnStillRollsBackWhenServiceUnreachable(t *testing.T) {
 func TestTunReinstallReconvergesTunSession(t *testing.T) {
 	home := paths.Home(stubSocketDir(t))
 	seedTunOnHome(t, home)
+	seedFakeCore(t, home)      // 生成脚本要算内核摘要（批⑥b §4.5）
 	writeAppliedState(t, home) // 切换前 applied=true：重收敛不得触碰系统代理
 	env, svc, log, _, fake := newLoggedTunEnv(t)
 	settingsBefore, err := os.ReadFile(home.SettingsFile())
@@ -187,6 +188,7 @@ func TestTunReinstallReconvergesTunSession(t *testing.T) {
 func TestTunReinstallNoReconvergeWhenTunOff(t *testing.T) {
 	home := paths.Home(stubSocketDir(t))
 	seedTunOffHome(t, home)
+	seedFakeCore(t, home) // 生成脚本要算内核摘要（批⑥b §4.5）
 	env, _, log, spawns, _ := newLoggedTunEnv(t)
 
 	if err := tunInstallWith(home, env, true); err != nil {
@@ -202,6 +204,7 @@ func TestTunReinstallNoReconvergeWhenTunOff(t *testing.T) {
 func TestTunReinstallReconvergeFailureGivesGuidance(t *testing.T) {
 	home := paths.Home(stubSocketDir(t))
 	seedTunOnHome(t, home)
+	seedFakeCore(t, home) // 生成脚本要算内核摘要（批⑥b §4.5）
 	env, _, log, _, _ := newLoggedTunEnv(t)
 	env.waitServiceCore = func(context.Context, paths.Home) (int, error) {
 		log.record("waitServiceCore")
@@ -241,6 +244,7 @@ func TestTunReinstallSkipsReconvergeWhenInstallFails(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			home := paths.Home(stubSocketDir(t))
 			seedTunOnHome(t, home)
+			seedFakeCore(t, home) // 生成脚本要算内核摘要（批⑥b §4.5）
 			env, _, log, spawns, _ := newLoggedTunEnv(t)
 			c.arrange(&env)
 
@@ -260,6 +264,7 @@ func TestTunReinstallSkipsReconvergeWhenInstallFails(t *testing.T) {
 func TestTunInstallNonForceDoesNotReconverge(t *testing.T) {
 	home := paths.Home(stubSocketDir(t))
 	seedTunOnHome(t, home)
+	seedFakeCore(t, home) // 生成脚本要算内核摘要（批⑥b §4.5）
 	env, _, log, spawns, _ := newLoggedTunEnv(t)
 	var installed bool
 	env.serviceAnchorExists = func() bool { return installed }

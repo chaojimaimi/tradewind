@@ -43,8 +43,9 @@ type tunEnv struct {
 	// safeExecDirCandidates 生成安装脚本前的执行目录候选过滤（review P2）：祖先目录
 	// 不安全的候选不进脚本；一个不剩 → 报错带各候选被排除的原因。
 	safeExecDirCandidates func() ([]string, error)
-	// elevate 提权脚本执行缝隙（测试桩——绝不真实提权）。
-	elevate func(scriptPath string) error
+	// elevate 提权脚本执行缝隙（测试桩——绝不真实提权）。参数语义 = 脚本源码
+	// （批⑥b §4.5 I5：脚本文本只经 osascript 标准输入交付，不落盘）。
+	elevate func(script string) error
 	// stopStart 杀旧 start（复用 stop 编排语义 20s/StopW）。
 	stopStart func(paths.Home) error
 	// spawnStart detached spawn `start --no-sysproxy`。

@@ -2,6 +2,8 @@ package app
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"os/exec"
@@ -35,16 +37,26 @@ func indexOfLine(lines []string, sub string) int {
 }
 
 // TestTunInstallScriptContent 安装脚本内容断言（batch6 真机 fold-in）：候选顺序、
-// rm 先于 cp、执行自测行、遗留位置清理、其余候选清理、全败 exit 3、末行 install
-// 带 --exec-dir、无 rm -rf、无 bashism。
+// rm 先于 cp、摘要复核的位置（cp 之后、chown/自测之前）、执行自测行、遗留位置清理、
+// 其余候选清理、全败 exit 3、末行 install 带 --exec-dir、`--allow-insecure-tun`
+// 仅在放行形态出现、无 rm -rf、无 bashism。
 func TestTunInstallScriptContent(t *testing.T) {
-	script := tunInstallScript("/Applications/Tradewind.app/cli",
-		"/Users/le e/Library/Application Support/tradewind", 501)
+	src := installSources{
+		cliPath: "/Applications/Tradewind.app/cli",
+		cliSHA:  strings.Repeat("ab", 32),
+		coreSHA: strings.Repeat("cd", 32),
+		dataDir: "/Users/le e/Library/Application Support/tradewind",
+		dataUID: 501,
+	}
+	script := tunInstallScript(src, false)
 	lines := scriptLines(script)
 	for _, want := range []string{
 		`CLI='/Applications/Tradewind.app/cli'`,
 		`DATA='/Users/le e/Library/Application Support/tradewind'`,
 		`DATA_UID=501`,
+		// 摘要绑定（批⑥b §4.5）：命令开始时算出的期望摘要定义在脚本顶部
+		`CLI_SHA='` + strings.Repeat("ab", 32) + `'`,
+		`CORE_SHA='` + strings.Repeat("cd", 32) + `'`,
 		`ANCHOR='/Library/Application Support/Tradewind'`,
 		`LEGACY='/Library/PrivilegedHelperTools/io.github.chaojimaimi.tradewind.service'`,
 		`mkdir -p "$ANCHOR" || fail "无法创建锚目录 $ANCHOR" 1`,
@@ -65,6 +77,51 @@ func TestTunInstallScriptContent(t *testing.T) {
 		if indexOfLine(lines, want) < 0 {
 			t.Fatalf("script missing %q:\n%s", want, script)
 		}
+	}
+
+	// 摘要复核（批⑥b §4.5）：三道校验（CLI 副本 / 内核副本 / sidecar 前 64 字符）
+	// 都在 cp 之后、chown/chmod 与执行自测之前；shasum 与 head 一律绝对路径；
+	// 任一失配 → 清理该候选 + exit 5（不试下一候选）
+	cp := indexOfLine(lines, `if ! cp "$CLI" "$CAND/tradewind-service"`)
+	cliChk := indexOfLine(lines, `printf '%s  %s\n' "$CLI_SHA" "$CAND/tradewind-service" | /usr/bin/shasum -a 256 -c -`)
+	coreChk := indexOfLine(lines, `printf '%s  %s\n' "$CORE_SHA" "$CAND/bin/mihomo" | /usr/bin/shasum -a 256 -c -`)
+	sidecarChk := indexOfLine(lines, `/usr/bin/head -c 64 "$CAND/bin/mihomo.sha256"`)
+	chown := indexOfLine(lines, `chown root:wheel "$CAND/tradewind-service"`)
+	if cp < 0 || cliChk < 0 || coreChk < 0 || sidecarChk < 0 || chown < 0 ||
+		!(cp < cliChk && cliChk < coreChk && coreChk < sidecarChk && sidecarChk < chown) {
+		t.Fatalf("digest checks must sit between cp and chown (cp=%d cli=%d core=%d sidecar=%d chown=%d):\n%s",
+			cp, cliChk, coreChk, sidecarChk, chown, script)
+	}
+	if got := strings.Count(script, "abort 5\n"); got != 3 {
+		t.Fatalf("abort 5 branches = %d, want 3 (one per digest check):\n%s", got, script)
+	}
+	if strings.Contains(script, "exit 5\n") {
+		t.Fatalf("digest mismatches must go through abort (which reclaims the fresh anchor), not a bare exit 5:\n%s", script)
+	}
+	// 失败收场：abort 先回收本次新建的空锚目录再退出（rmdir 只删空目录）
+	abortDef := indexOfLine(lines, "abort() {")
+	rmdirAnchor := indexOfLine(lines, `rmdir "$ANCHOR" 2>/dev/null`)
+	if abortDef < 0 || rmdirAnchor != abortDef+1 || indexOfLine(lines, `exit "$1"`) != abortDef+2 {
+		t.Fatalf("abort() must rmdir the anchor before exiting:\n%s", script)
+	}
+	for _, want := range []string{
+		`echo "tradewind: CLI 副本的摘要与开始安装时不一致（授权弹窗期间源文件被替换？），中止" >&2`,
+		`echo "tradewind: 内核副本的摘要与开始安装时不一致（授权弹窗期间源文件被替换？），中止" >&2`,
+		`echo "tradewind: 内核校验文件的摘要与开始安装时不一致（授权弹窗期间源文件被替换？），中止" >&2`,
+	} {
+		if indexOfLine(lines, want) < 0 {
+			t.Fatalf("script missing mismatch explanation %q:\n%s", want, script)
+		}
+	}
+
+	// 显式确认旗标（批⑥b §4.5）：未放行形态绝不出现；放行形态出现在 ④ install 行上
+	if strings.Contains(script, "--allow-insecure-tun") {
+		t.Fatalf("the acknowledgement flag must be absent unless the CLI-side interlock is open:\n%s", script)
+	}
+	withFlag := tunInstallScript(src, true)
+	wantFlagLine := `"$EXE/tradewind-service" install --data-dir "$DATA" --data-uid "$DATA_UID" --exec-dir "$EXE" --allow-insecure-tun`
+	if !strings.Contains(withFlag, wantFlagLine) {
+		t.Fatalf("acknowledged script missing %q:\n%s", wantFlagLine, withFlag)
 	}
 
 	// 候选顺序：锚目录 → libexec → /opt——三个探测在同一条 `||` 链上按序短路，
@@ -96,7 +153,7 @@ func TestTunInstallScriptContent(t *testing.T) {
 
 	// rm 必须先于 cp（新 inode：cp 原地覆写运行中二进制 = ETXTBSY）
 	rm := indexOfLine(lines, `rm -f "$CAND/tradewind-service" "$CAND/bin/mihomo" "$CAND/bin/mihomo.sha256"`)
-	cp := indexOfLine(lines, `if ! cp "$CLI" "$CAND/tradewind-service"`)
+	cp = indexOfLine(lines, `if ! cp "$CLI" "$CAND/tradewind-service"`)
 	if rm < 0 || cp < 0 || rm > cp {
 		t.Fatalf("rm must precede cp (rm=%d cp=%d):\n%s", rm, cp, script)
 	}
@@ -189,7 +246,13 @@ func TestTunUninstallScriptContent(t *testing.T) {
 func TestTunScriptsParseUnderBinSh(t *testing.T) {
 	dir := t.TempDir()
 	scripts := map[string]string{
-		"install.sh":   tunInstallScript("/Applications/Tradewind.app/cli", "/Users/le e/Library/Application Support/tradewind", 501),
+		"install.sh": tunInstallScript(installSources{
+			cliPath: "/Applications/Tradewind.app/cli",
+			cliSHA:  strings.Repeat("ab", 32),
+			coreSHA: strings.Repeat("cd", 32),
+			dataDir: "/Users/le e/Library/Application Support/tradewind",
+			dataUID: 501,
+		}, false),
 		"uninstall.sh": tunUninstallScript(),
 	}
 	for name, body := range scripts {
@@ -215,6 +278,8 @@ type scriptFixture struct {
 	record  string // 桩二进制记录调用参数的目录
 	dataDir string
 	cli     string
+	cliSHA  string // 夹具 CLI 的真实 sha256（摘要绑定用例的期望值）
+	coreSHA string // 夹具内核的真实 sha256
 }
 
 const fakePolicyBlockLogic = `if [ -n "${FAKE_BLOCK_DIR:-}" ]; then
@@ -258,20 +323,41 @@ func newScriptFixture(t *testing.T) *scriptFixture {
 	if err := os.MkdirAll(filepath.Dir(f.cli), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	f.writeExecutable(t, f.cli, "#!/bin/sh\n"+fakePolicyBlockLogic+
+	cliBody := "#!/bin/sh\n" + fakePolicyBlockLogic +
 		`case "$1" in
 version) echo "tradewind fake"; exit 0 ;;
 install) printf '%s\n' "$@" > "$FAKE_RECORD_DIR/install.args"; exit 0 ;;
 esac
 exit 2
-`)
-	f.writeExecutable(t, filepath.Join(f.dataDir, "bin", "mihomo"),
-		"#!/bin/sh\n"+fakePolicyBlockLogic+"echo \"Mihomo Meta fake v1\"\nexit 0\n")
+`
+	f.writeExecutable(t, f.cli, cliBody)
+	f.cliSHA = hexDigest(cliBody)
+	coreBody := "#!/bin/sh\n" + fakePolicyBlockLogic + "echo \"Mihomo Meta fake v1\"\nexit 0\n"
+	f.writeExecutable(t, filepath.Join(f.dataDir, "bin", "mihomo"), coreBody)
+	f.coreSHA = hexDigest(coreBody)
+	// sidecar 前 64 字符 = 夹具内核的真实摘要（安装脚本的第三道摘要复核）
 	if err := os.WriteFile(filepath.Join(f.dataDir, "bin", "mihomo.sha256"),
-		[]byte("0000000000000000000000000000000000000000000000000000000000000000  mihomo\n"), 0o644); err != nil {
+		[]byte(f.coreSHA+"  mihomo\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return f
+}
+
+// hexDigest 计算内容的 sha256 hex（夹具摘要的期望值）。
+func hexDigest(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+// sources 返回与夹具一致的 installSources（真实摘要——摘要绑定生效的基准形态）。
+func (f *scriptFixture) sources() installSources {
+	return installSources{
+		cliPath: f.cli,
+		cliSHA:  f.cliSHA,
+		coreSHA: f.coreSHA,
+		dataDir: f.dataDir,
+		dataUID: 501,
+	}
 }
 
 func (f *scriptFixture) writeExecutable(t *testing.T, path, body string) {
@@ -387,7 +473,7 @@ func TestTunInstallScriptFirstCandidatePasses(t *testing.T) {
 	}
 	c1 := f.layout.candidates[0]
 
-	code, stderr := f.run(t, tunInstallScriptFor(f.cli, f.dataDir, 501, f.layout), "")
+	code, stderr := f.run(t, tunInstallScriptFor(f.sources(), f.layout, false), "")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr:\n%s", code, stderr)
 	}
@@ -420,7 +506,7 @@ func TestTunInstallScriptFallsBackWhenPolicyBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	code, stderr := f.run(t, tunInstallScriptFor(f.cli, f.dataDir, 501, f.layout), c1)
+	code, stderr := f.run(t, tunInstallScriptFor(f.sources(), f.layout, false), c1)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr:\n%s", code, stderr)
 	}
@@ -447,7 +533,7 @@ func TestTunInstallScriptFallsBackWhenPolicyBlocks(t *testing.T) {
 func TestTunInstallScriptAllCandidatesBlocked(t *testing.T) {
 	f := newScriptFixture(t)
 
-	code, stderr := f.run(t, tunInstallScriptFor(f.cli, f.dataDir, 501, f.layout), f.root)
+	code, stderr := f.run(t, tunInstallScriptFor(f.sources(), f.layout, false), f.root)
 	if code != 3 {
 		t.Fatalf("exit = %d, want 3; stderr:\n%s", code, stderr)
 	}
@@ -467,6 +553,43 @@ func TestTunInstallScriptAllCandidatesBlocked(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(f.record, "install.args")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("helper install must not run when every candidate is blocked (err = %v)", err)
 	}
+	// 失败收场：本次新建的空锚目录一并回收（否则卸载判据——service.json 的存在性
+	// ——永远看不到它，/Library 下留一个无主的空目录）
+	if _, err := os.Stat(f.layout.anchorDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the fresh empty anchor dir must be reclaimed on exit 3 (err = %v)", err)
+	}
+}
+
+// TestTunInstallScriptDigestMismatchReclaimsFreshAnchor 摘要失配发生在"非锚"候选上
+// 时，① 步新建的空锚目录也要被回收：候选自身的 clean_candidate 够不着锚目录，
+// 靠 abort 里的 rmdir。若锚目录早已存在且非空（既有安装），rmdir 失败、原样保留。
+func TestTunInstallScriptDigestMismatchReclaimsFreshAnchor(t *testing.T) {
+	f := newScriptFixture(t)
+	// 首候选（= 锚目录）被系统策略拦掉，让失配落在第二个候选上
+	bad := f.sources()
+	bad.cliSHA = strings.Repeat("11", 32)
+	code, stderr := f.run(t, tunInstallScriptFor(bad, f.layout, false), f.layout.anchorDir)
+	if code != 5 {
+		t.Fatalf("exit = %d, want 5; stderr:\n%s", code, stderr)
+	}
+	if _, err := os.Stat(f.layout.anchorDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the fresh empty anchor dir must be reclaimed on exit 5 (err = %v)", err)
+	}
+	// 对照：锚目录非空时 rmdir 失败，目录与其内容原样保留
+	if err := os.MkdirAll(f.layout.anchorDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	keep := filepath.Join(f.layout.anchorDir, "service.json")
+	if err := os.WriteFile(keep, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, _ = f.run(t, tunInstallScriptFor(bad, f.layout, false), f.layout.anchorDir)
+	if code != 5 {
+		t.Fatalf("exit = %d, want 5 on the second run", code)
+	}
+	if data, err := os.ReadFile(keep); err != nil || string(data) != "{}" {
+		t.Fatalf("a non-empty pre-existing anchor must be preserved: %q err = %v", data, err)
+	}
 }
 
 // TestTunInstallScriptMissingSource 源文件缺失（数据目录无内核）→ exit 4 并指明
@@ -477,7 +600,7 @@ func TestTunInstallScriptMissingSource(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	code, stderr := f.run(t, tunInstallScriptFor(f.cli, f.dataDir, 501, f.layout), "")
+	code, stderr := f.run(t, tunInstallScriptFor(f.sources(), f.layout, false), "")
 	if code != 4 {
 		t.Fatalf("exit = %d, want 4; stderr:\n%s", code, stderr)
 	}
@@ -488,6 +611,86 @@ func TestTunInstallScriptMissingSource(t *testing.T) {
 		if _, err := os.Stat(cand); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("no candidate may be touched when sources are missing (err = %v)", err)
 		}
+	}
+}
+
+// TestTunInstallScriptDigestMismatchAborts 摘要失配（批⑥b §4.5）：任一道复核不过
+// → stderr 一行说明 + 清理该候选 + exit 5；不试下一候选（源文件是同一份，换位置
+// 没有意义），④ 步 install 从未被调用（记录桩证明）。夹具的 CLI/内核/Helper 都是
+// 测试自写的 shell 脚本——绝不执行真实的 tradewind 二进制。
+func TestTunInstallScriptDigestMismatchAborts(t *testing.T) {
+	cases := []struct {
+		name    string
+		wantErr string // stderr 必含的失配说明
+		mutate  func(t *testing.T, f *scriptFixture) installSources
+	}{
+		{"cli copy", "CLI 副本的摘要", func(t *testing.T, f *scriptFixture) installSources {
+			src := f.sources()
+			src.cliSHA = strings.Repeat("11", 32) // 与夹具 CLI 不符的期望摘要
+			return src
+		}},
+		{"core copy", "内核副本的摘要", func(t *testing.T, f *scriptFixture) installSources {
+			src := f.sources()
+			src.coreSHA = strings.Repeat("22", 32) // 与夹具内核不符的期望摘要
+			return src
+		}},
+		{"sidecar", "内核校验文件的摘要", func(t *testing.T, f *scriptFixture) installSources {
+			// sidecar 前 64 字符 ≠ CORE_SHA
+			if err := os.WriteFile(filepath.Join(f.dataDir, "bin", "mihomo.sha256"),
+				[]byte(strings.Repeat("33", 32)+"  mihomo\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return f.sources()
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newScriptFixture(t)
+			src := c.mutate(t, f)
+
+			code, stderr := f.run(t, tunInstallScriptFor(src, f.layout, false), "")
+			if code != 5 {
+				t.Fatalf("exit = %d, want 5; stderr:\n%s", code, stderr)
+			}
+			if !strings.Contains(stderr, c.wantErr) || !strings.Contains(stderr, "摘要与开始安装时不一致") {
+				t.Fatalf("stderr must explain the digest mismatch (%q):\n%s", c.wantErr, stderr)
+			}
+			// 候选已清理：三文件不存在（clean_candidate 连空目录一并回收）
+			c1 := f.layout.candidates[0]
+			f.assertCandidateClean(t, c1)
+			// 未试下一候选：第二候选从未被创建
+			c2 := f.layout.candidates[1]
+			if _, err := os.Stat(c2); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("next candidate must not be probed after a digest mismatch (err = %v)", err)
+			}
+			// ④ 步从未执行：记录桩上没有 install 调用
+			if _, err := os.Stat(filepath.Join(f.record, "install.args")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("helper install must never run after a digest mismatch (err = %v)", err)
+			}
+		})
+	}
+}
+
+// TestTunInstallScriptAcceptsUppercaseSidecar 校验文件写的是大写十六进制时不算失配：
+// core.VerifyBinary 先转小写再比对、对它照常接受，安装脚本的第三道复核必须同口径
+// ——否则手握大写 sidecar 的用户会被 exit 5 挡在安装之外（而内核校验本身是过的）。
+func TestTunInstallScriptAcceptsUppercaseSidecar(t *testing.T) {
+	f := newScriptFixture(t)
+	upper := strings.ToUpper(f.coreSHA)
+	if upper == f.coreSHA {
+		t.Skip("fixture digest has no letters to upper-case")
+	}
+	if err := os.WriteFile(filepath.Join(f.dataDir, "bin", "mihomo.sha256"),
+		[]byte(upper+"  mihomo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, stderr := f.run(t, tunInstallScriptFor(f.sources(), f.layout, false), "")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (an upper-case sidecar is valid); stderr:\n%s", code, stderr)
+	}
+	if _, err := os.Stat(filepath.Join(f.record, "install.args")); err != nil {
+		t.Fatalf("step ④ (helper install) must be reached: %v", err)
 	}
 }
 

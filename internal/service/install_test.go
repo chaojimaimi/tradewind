@@ -77,6 +77,33 @@ func readWrittenAnchor(t *testing.T, p installPlan) (ConfigFile, os.FileMode) {
 	return got, info.Mode().Perm()
 }
 
+// TestInstallRequiresExplicitAckFlag helper 显式确认旗标（批⑥b §4.5，终审 P3-①）：
+// allow=false → 报错带旗标名，且零副作用——service.json / plist / logs / service-data
+// 均未出现、launchd 未碰。旗标检查先于 root 守卫，非 root 测试进程即覆盖本用例。
+func TestInstallRequiresExplicitAckFlag(t *testing.T) {
+	p := newInstallPlan(t)
+	lc := &fakeLaunchctl{}
+
+	err := Install(p.dataDir, p.dataUID, p.execDir, false, &strings.Builder{})
+	if err == nil || !strings.Contains(err.Error(), "--allow-insecure-tun") ||
+		!strings.Contains(err.Error(), "尚未完成加固") {
+		t.Fatalf("err = %v, want the explicit-acknowledgement refusal naming the flag", err)
+	}
+	for _, path := range []string{
+		filepath.Join(p.configDir, "service.json"),
+		filepath.Join(p.launchDaemonsDir, DaemonLabel+".plist"),
+		p.logsDir(),
+		p.coreHome(),
+	} {
+		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("%s must not be written when the acknowledgement flag is absent (err = %v)", path, statErr)
+		}
+	}
+	if len(lc.calls) != 0 {
+		t.Fatalf("launchd must not be touched: %v", lc.calls)
+	}
+}
+
 // TestInstallDaemonWritesRootOwnedLayout helper install v3 布局（批⑥b §4.1）：
 // service.json 的 helper_path/core_bin/sidecar 全部指向执行目录（root 属主副本），
 // 内核工作目录/内核 sock/代理 sock/日志收进锚目录，归一化输入留在数据目录；

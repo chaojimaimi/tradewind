@@ -51,6 +51,7 @@ func newPublicEntrySandbox(t *testing.T) *publicEntrySandbox {
 	t.Helper()
 	s := &publicEntrySandbox{home: paths.Home(stubSocketDir(t))}
 	seedTunOffHome(t, s.home)
+	seedFakeCore(t, s.home) // 联锁放行后生成安装脚本要算内核摘要（批⑥b §4.5）
 	// 服务视为未安装（锚指向不存在的路径 → 客户端工厂直接报未安装，不碰真 socket）；
 	// 遗留位置同理指向临时路径，不读真系统目录
 	pointTunAnchorAt(t, filepath.Join(s.home.String(), "absent", "service.json"))
@@ -100,7 +101,7 @@ func (s *publicEntrySandbox) snapshot(t *testing.T, name string) fileSnapshot {
 	case "state":
 		path = s.home.StateFile()
 	case "script":
-		path = tunScriptPath(s.home)
+		path = filepath.Join(s.home.String(), "tun-install-script.sh")
 	default:
 		t.Fatalf("unknown snapshot %q", name)
 	}
@@ -246,7 +247,7 @@ func TestTunInterlockPassesThroughWhenAcknowledged(t *testing.T) {
 				t.Fatalf("elevation seam calls = %d, want exactly 1 (orchestration reached the elevated install)", s.elevations)
 			}
 			if s.snapshot(t, "script").exists {
-				t.Fatal("the install script is cleaned up after the elevated run")
+				t.Fatal("the install script must never be written to disk (批⑥b §4.5 I5)")
 			}
 		})
 	}
