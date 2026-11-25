@@ -286,18 +286,19 @@ func TestWaitLoopTunHealthNotify(t *testing.T) {
 	}()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if len(*notified) >= 1 {
+		if len(notified.List()) >= 1 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	cancel()
 	<-done
-	if len(*notified) != 1 {
-		t.Fatalf("notified = %v, want exactly one per outage episode", *notified)
+	got := notified.List()
+	if len(got) != 1 {
+		t.Fatalf("notified = %v, want exactly one per outage episode", got)
 	}
-	if !strings.Contains((*notified)[0], "tun status") {
-		t.Fatalf("notification = %q", (*notified)[0])
+	if !strings.Contains(got[0], "tun status") {
+		t.Fatalf("notification = %q", got[0])
 	}
 }
 
@@ -323,20 +324,20 @@ func TestWatcherTunBranchBeforeAppliedEarlyReturn(t *testing.T) {
 	if err := w.tick(); err != nil { // tick 1：失联计数 1，不通知
 		t.Fatalf("tick 1: %v", err)
 	}
-	if len(*notified) != 0 {
-		t.Fatalf("one failing tick must not notify: %v", *notified)
+	if got := notified.List(); len(got) != 0 {
+		t.Fatalf("one failing tick must not notify: %v", got)
 	}
 	if err := w.tick(); err != nil { // tick 2：连续 2 → 通知
 		t.Fatalf("tick 2: %v", err)
 	}
-	if len(*notified) != 1 {
-		t.Fatalf("notified = %v, want exactly one", *notified)
+	if got := notified.List(); len(got) != 1 {
+		t.Fatalf("notified = %v, want exactly one", got)
 	}
 	if err := w.tick(); err != nil { // tick 3：同周期不重复通知
 		t.Fatalf("tick 3: %v", err)
 	}
-	if len(*notified) != 1 {
-		t.Fatalf("notified = %v, want still one per episode", *notified)
+	if got := notified.List(); len(got) != 1 {
+		t.Fatalf("notified = %v, want still one per episode", got)
 	}
 }
 
@@ -362,8 +363,8 @@ func TestWatcherTunReachableResets(t *testing.T) {
 			t.Fatalf("tick %d: %v", i+1, err)
 		}
 	}
-	if len(*notified) != 0 {
-		t.Fatalf("reachable core must never notify: %v", *notified)
+	if got := notified.List(); len(got) != 0 {
+		t.Fatalf("reachable core must never notify: %v", got)
 	}
 }
 

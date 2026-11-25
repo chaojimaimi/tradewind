@@ -151,17 +151,36 @@ func watcherHome(t *testing.T, form string) (paths.Home, *watcherFakeRunner) {
 	return home, fake
 }
 
+// notifierRecorder 记录通知缝隙收到的调用。WHY 要锁：通知可能来自后台协程
+// （tunHealthLoop 等），测试主协程同时在轮询读取——无锁切片一写一读是数据竞争
+// （`go test -race` 实报于 TestWaitLoopTunHealthNotify，批⑥遗留的测试卫生问题）。
+type notifierRecorder struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (r *notifierRecorder) add(title, body string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, title+"/"+body)
+	return nil
+}
+
+// List 返回到目前为止的调用记录（副本，可安全地在通知协程仍在跑时轮询）。
+func (r *notifierRecorder) List() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.calls...)
+}
+
 // stubWatcherNotifier 替换通知缝隙并记录调用；t.Cleanup 还原。
-func stubWatcherNotifier(t *testing.T) *[]string {
+func stubWatcherNotifier(t *testing.T) *notifierRecorder {
 	t.Helper()
-	var notified []string
+	rec := &notifierRecorder{}
 	old := runNotifier
-	runNotifier = func(title, body string) error {
-		notified = append(notified, title+"/"+body)
-		return nil
-	}
+	runNotifier = rec.add
 	t.Cleanup(func() { runNotifier = old })
-	return &notified
+	return rec
 }
 
 // resetLastApply 归零进程内 grace 变量（包级状态跨测试污染防御）。
@@ -199,8 +218,8 @@ func TestWatcherManualHijackMatrix(t *testing.T) {
 	if st.SysProxy.HijackEvents != 1 || st.SysProxy.LastRestore <= 0 {
 		t.Fatalf("events = %+v, want HijackEvents=1 LastRestore>0", st.SysProxy)
 	}
-	if len(*notified) != 1 {
-		t.Fatalf("notified = %v, want exactly one", *notified)
+	if got := notified.List(); len(got) != 1 {
+		t.Fatalf("notified = %v, want exactly one", got)
 	}
 	// 干净态复检：恢复后期望命中，零新增写入命令（巡检探测照常）
 	before := fake.callCount()

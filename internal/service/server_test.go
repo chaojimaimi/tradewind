@@ -25,7 +25,6 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "TestMain: mkdir: %v\n", err)
 		os.Exit(1)
 	}
-	defer os.RemoveAll(dir)
 	fakeCoreBin = filepath.Join(dir, "fakecore")
 	build := exec.Command("go", "build", "-o", fakeCoreBin, "../core/testdata/fakecore")
 	build.Stdout, build.Stderr = os.Stdout, os.Stderr
@@ -33,7 +32,11 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "TestMain: build fakecore: %v\n", err)
 		os.Exit(1)
 	}
-	os.Exit(m.Run())
+	// WHY 不用 defer：os.Exit 不执行 defer——批⑥起写的是 `defer os.RemoveAll` +
+	// `os.Exit(m.Run())`，结果每跑一次就在 /tmp 留下一个装着桩内核二进制的目录
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
 }
 
 // shortTempDir 返回 /tmp 下的短路径临时目录。WHY 不用 t.TempDir()：macOS unix
@@ -281,6 +284,9 @@ func TestServiceStaleGenerationRejected(t *testing.T) {
 	s.conf = conf
 	s.rootCtx = context.Background()
 	allowTrust(s)
+	// 本用例绕过 startStubServer 直接驱动 handleStart，下面 Start(6) 会真的拉起一个
+	// 桩内核——必须自己收尾，否则每跑一次就留下一个无主的桩内核进程（批⑥遗留）
+	t.Cleanup(s.stopCore)
 	s.curGen = 5 // 模拟"上一代 start 已以 5 准入"
 
 	resp := s.handleStart(Request{Action: ActionStart, Generation: 5})
