@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/chaojimaimi/tradewind/internal/paths"
+	"github.com/chaojimaimi/tradewind/internal/service"
 	"github.com/chaojimaimi/tradewind/internal/store"
 )
 
@@ -115,7 +116,11 @@ func tunOffWith(ctx context.Context, home paths.Home, env tunEnv) error {
 		// 幂等需实际形态探针（batch6 review P2-2，对称侧）：core 仍可达 = 漂移态
 		// （kill 窗口/旧会话残留——配置说关但 core 在跑）→ 落入 converge 收敛；
 		// 不可达才是目标态，no-op 返回（绝不无谓 spawn）。
-		if !CoreReachable(home) {
+		// 批⑥b §4.3：两条 socket 都探——settings 说关而核还在跑的漂移态，用户态
+		// 与代理入口两种形态都可能是残留，任一可达都要落入收敛。
+		secret := store.ReadSecret(home)
+		if !coreReachableAt(home.SockFile(), secret) &&
+			!coreReachableAt(formSockPath(true, home), secret) {
 			fmt.Println("tun: already disabled; nothing to do") // 幂等（评审三轮 P3，防双发 bounce）
 			return nil
 		}
@@ -147,12 +152,51 @@ func saveTunEnabled(home paths.Home, settings store.Settings, on bool) error {
 	return store.SaveSettings(home, settings)
 }
 
-// tunPreflightOn `tun on` 前置检查（§2.2 步 3 + §3.2）：服务未安装 → 提权安装；
+// tunPrecheckConfig `tun on` 的归一化预检（批⑥b §4.4）：对"此刻按 TUN 形态合成
+// 出来的配置"跑一次与服务端同一个纯函数。WHY 必须 tun=true：此刻 settings.tun_enabled
+// 还是 false，照它合成得到的是非 TUN 形态；TUN 形态的合成器会在链末把 tun、dns 两
+// 个块整体替换，合并槽里写在 dns 下的键根本到不了服务端——用非 TUN 形态预检会对
+// 这些键假拒绝，并误导用户去删一个本不必删的合并槽。WHY 要预检：收敛流程里新 start
+// 是 detached 进程，它被服务拒绝的原因用户看不到，只会等满 45s 看到一句 "TUN core
+// not ready" 再回滚。预检与稍后服务端的真判定是同一个函数、同一份输入；两者之间
+// 用户又改了配置的竞态由服务端兜底。
+func tunPrecheckConfig(home paths.Home) error {
+	secret, err := store.EnsureSecret(home)
+	if err != nil {
+		return err
+	}
+	out, warnings, err := synthesizeBytes(home, secret, true)
+	if err != nil {
+		// 合成本身失败：后面 start 也会失败，早失败省一次折腾
+		return tunPrecheckError(err)
+	}
+	for _, w := range warnings {
+		fmt.Fprintln(os.Stderr, "warning:", w) // 与 Synthesize 同款告警行
+	}
+	if _, rej := service.NormalizeRuntime(out); rej != nil {
+		var rejErr error = rej // *Rejection → error 才能被 %w 包裹
+		return tunPrecheckError(rejErr)
+	}
+	return nil
+}
+
+// tunPrecheckError 预检失败的统一包装（合成本身失败与归一化拒绝同一个口径）。WHY
+// 说"设置与状态"而不说"任何状态"：EnsureSecret 在全新安装上会顺手建好 secret 文件
+// （引导产物，start 同样会建）——除此之外此刻什么都还没动。
+func tunPrecheckError(err error) error {
+	return fmt.Errorf("app: 当前配置不能用于 TUN 模式（TUN 未开启，未改动设置与状态），请修正后重试：%w", err)
+}
+
+// tunPreflightOn `tun on` 前置检查（§2.2 步 3 + §3.2）：归一化预检（批⑥b §4.4，
+// 第一件事——别让用户为一个注定被拒的配置去输管理员密码）；服务未安装 → 提权安装；
 // helper 或 root 内核副本 sha256 与当前不一致 → 提示走 reinstall（本命令不自动
 // 重装，避免提权弹窗叠加）；服务不可达 → 在杀旧 start **之前**报错（真机 fold-in：
 // 否则白折腾一次用户态 core 重启后才在服务 stop 处失败回滚）；geoip.metadb 缺失
 // → 钉死来源下载，失败报错不半开 TUN。
 func tunPreflightOn(ctx context.Context, home paths.Home, env tunEnv) error {
+	if err := tunPrecheckConfig(home); err != nil {
+		return err
+	}
 	if !env.serviceAnchorExists() {
 		return tunInstallWith(home, env, false)
 	}

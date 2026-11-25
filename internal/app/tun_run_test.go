@@ -17,8 +17,9 @@ import (
 	"github.com/chaojimaimi/tradewind/internal/store"
 )
 
-// stubTunSeams 覆盖 TUN 分流全局缝隙（客户端工厂→假服务；锚→临时文件），
-// t.Cleanup 还原。绝不触真 /var/run socket / 真系统锚。
+// stubTunSeams 覆盖 TUN 分流全局缝隙（客户端工厂→假服务；锚→临时文件；TUN 形态
+// 的内核 API 入口→短路径桩，绝不触真 /var/run socket / 真锚目录），
+// t.Cleanup 还原。
 func stubTunSeams(t *testing.T, svc *fakeTunService) string {
 	t.Helper()
 	old := tunNewClient
@@ -31,7 +32,20 @@ func stubTunSeams(t *testing.T, svc *fakeTunService) string {
 	oldCfg := tunServiceConfigPath
 	tunServiceConfigPath = anchor
 	t.Cleanup(func() { tunServiceConfigPath = oldCfg })
+	stubBrokerSockPath(t)
 	return anchor
+}
+
+// stubBrokerSockPath 把 TUN 形态的内核 API 入口缝隙（tunBrokerSockPath）指向短路径
+// 桩并返回该路径（默认无监听=不可达；需要可达的用例自行 listenVersionStubAt）。
+// 绝不触真锚目录的 <anchor>/core.sock。
+func stubBrokerSockPath(t *testing.T) string {
+	t.Helper()
+	sock := filepath.Join(stubSocketDir(t), "broker.sock")
+	old := tunBrokerSockPath
+	tunBrokerSockPath = sock
+	t.Cleanup(func() { tunBrokerSockPath = old })
+	return sock
 }
 
 // versionMux 最小 /version 桩（双确认/探活/就绪轮询共用）。
@@ -43,20 +57,33 @@ func versionMux() http.Handler {
 	return mux
 }
 
+// listenVersionStubAt 在指定 socket 路径上起 /version 桩（用户态 sock 与 TUN 代理
+// 入口桩共用）。
+func listenVersionStubAt(t *testing.T, sockPath string) {
+	t.Helper()
+	listenHandlerAt(t, sockPath, versionMux())
+}
+
+// listenHandlerAt 在指定 socket 路径上起指定 handler 的桩；t.Cleanup 关停并摘除。
+func listenHandlerAt(t *testing.T, sockPath string, handler http.Handler) {
+	t.Helper()
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen stub sock: %v", err)
+	}
+	srv := &http.Server{Handler: handler}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		_ = os.Remove(sockPath)
+	})
+}
+
 // listenVersionStub 在指定 home 的 core.sock 上起 /version 桩（startCoreViaService
 // 双确认、postHandshake 探活、waitCoreReady 用）。
 func listenVersionStub(t *testing.T, home paths.Home) {
 	t.Helper()
-	ln, err := net.Listen("unix", home.SockFile())
-	if err != nil {
-		t.Fatalf("listen stub sock: %v", err)
-	}
-	srv := &http.Server{Handler: versionMux()}
-	go func() { _ = srv.Serve(ln) }()
-	t.Cleanup(func() {
-		_ = srv.Close()
-		_ = os.Remove(home.SockFile())
-	})
+	listenVersionStubAt(t, home.SockFile())
 }
 
 // TestStartCoreViaServiceGenerationCarried startCore 分流（§2.1 分流 1）：服务 start
@@ -71,7 +98,7 @@ func TestStartCoreViaServiceGenerationCarried(t *testing.T) {
 	}
 	svc := &fakeTunService{startOK: true, startPID: 4242}
 	stubTunSeams(t, svc)
-	listenVersionStub(t, home) // /version 双确认
+	listenVersionStubAt(t, tunBrokerSockPath) // /version 双确认（TUN 形态拨代理入口）
 
 	pid, err := startCoreViaService(context.Background(), home, "stub")
 	if err != nil {
@@ -109,10 +136,12 @@ func TestRunTunBranchEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeExecutableCore(t, home) // Run 的 VerifyBinary 前置（TUN 模式下不 spawn，仅校验）
-	listenVersionStub(t, home)   // startCoreViaService 双确认 + postHandshake 探活
 
 	svc := &fakeTunService{startOK: true, startPID: 424242}
 	stubTunSeams(t, svc)
+	// startCoreViaService 双确认 + postHandshake 探活：本会话 settings 是 TUN 形态，
+	// 两处都按 settings 拨代理入口（批⑥b §4.3）
+	listenVersionStubAt(t, tunBrokerSockPath)
 
 	done := make(chan error, 1)
 	go func() {
@@ -227,9 +256,9 @@ func startCmdlineOrphan(t *testing.T, home paths.Home) int {
 func TestDegradeRestartTunBranch(t *testing.T) {
 	home := paths.Home(stubSocketDir(t))
 	seedRuntimeInputs(t, home)
-	listenVersionStub(t, home)
 	svc := &fakeTunService{startOK: true, startPID: 4343}
 	stubTunSeams(t, svc)
+	listenVersionStubAt(t, tunBrokerSockPath) // 降级重启后的 /version 轮询拨代理入口
 	st := store.DefaultState()
 	st.Core = store.CoreState{Desired: store.DesiredRunning, PID: 4343, Generation: 5, Tun: true}
 	if err := store.SaveState(home, st); err != nil {
@@ -274,6 +303,7 @@ func TestDegradeRestartTunUnreachable(t *testing.T) {
 func TestWaitLoopTunHealthNotify(t *testing.T) {
 	notified := stubWatcherNotifier(t)
 	home := paths.Home(stubSocketDir(t)) // 无 sock = 失联
+	stubBrokerSockPath(t)                // 健康环恒探代理入口：桩路径无监听 = 失联
 	old := tunHealthInterval
 	tunHealthInterval = 30 * time.Millisecond
 	t.Cleanup(func() { tunHealthInterval = old })

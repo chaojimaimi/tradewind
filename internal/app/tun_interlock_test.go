@@ -50,6 +50,7 @@ type publicEntrySandbox struct {
 func newPublicEntrySandbox(t *testing.T) *publicEntrySandbox {
 	t.Helper()
 	s := &publicEntrySandbox{home: paths.Home(stubSocketDir(t))}
+	stubBrokerSockPath(t) // TUN 形态的内核 API 入口→短路径桩（绝不触真锚目录）
 	seedTunOffHome(t, s.home)
 	seedFakeCore(t, s.home) // 联锁放行后生成安装脚本要算内核摘要（批⑥b §4.5）
 	// 服务视为未安装（锚指向不存在的路径 → 客户端工厂直接报未安装，不碰真 socket）；
@@ -279,8 +280,12 @@ func TestTunInterlockEscapeHatchesUnaffected(t *testing.T) {
 			if len(lines) == 0 || lines[len(lines)-1] != tunInterlockStatusLine() {
 				t.Fatalf("status lines = %q, want the interlock line last", lines)
 			}
-			if !strings.Contains(lines[len(lines)-1], "联锁关闭（R16 加固中）") || !strings.HasPrefix(lines[len(lines)-1], "interlock:  ") {
-				t.Fatalf("interlock line = %q, want the R16 wording on the aligned label column", lines[len(lines)-1])
+			// 两态文案（批⑥b §4.7）：关=R16 措辞；开=已显式放行——标签列对齐不变
+			interlockLine := lines[len(lines)-1]
+			if !strings.HasPrefix(interlockLine, "interlock:  ") ||
+				(!strings.Contains(interlockLine, "联锁关闭（R16 加固中）") &&
+					!strings.Contains(interlockLine, "已显式放行（仅限本机自测）")) {
+				t.Fatalf("interlock line = %q, want one of the two state wordings on the aligned label column", interlockLine)
 			}
 			if err := TunStatus(s.home); err != nil {
 				t.Fatalf("TunStatus: %v", err)

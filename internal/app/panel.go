@@ -44,10 +44,13 @@ func startGateway(home paths.Home, settings store.Settings) (*panelServer, strin
 		return nil, "", nil
 	}
 	gw := panel.NewGateway(panel.Config{
-		Port:     settings.GatewayPort,
-		UIDir:    home.UIDir(),
-		Token:    token,
-		SockPath: home.SockFile(),
+		Port:  settings.GatewayPort,
+		UIDir: home.UIDir(),
+		Token: token,
+		// 上游按本会话形态分流（批⑥b §4.3 F22）：TUN → 服务代理入口；用户态 →
+		// <data_dir>/core.sock。WHY 看 settings 不看 state：网关在 postHandshake
+		// 写状态之前就起来了，照 state 取会拿到上一会话的形态
+		SockPath: startFormSockPath(home, settings),
 		Secret:   store.ReadSecret(home),
 		// /pac 实时合成源（批④ §3.2）：每请求重读 settings——mixed_port/bypass
 		// 变更即反映；LoadSettings/Validate 失败 → 网关 503（不兜底输出）

@@ -13,6 +13,48 @@ import (
 	"github.com/chaojimaimi/tradewind/internal/sysproxy"
 )
 
+// synthesizeBytes 合成 runtime.yaml 的字节（不落盘、不打印告警）。tun 决定合成形态
+// （TUN 形态在链末注入 tun/dns 块）——`tun on` 的归一化预检传 true（此刻
+// settings.tun_enabled 还是 false，照它合成得到的是非 TUN 形态，会对合并槽 dns 下
+// 的键假拒绝）。
+func synthesizeBytes(home paths.Home, secret string, tun bool) (out []byte, warnings []string, err error) {
+	settings, err := store.LoadSettings(home)
+	if err != nil {
+		return nil, nil, err
+	}
+	// 形态由调用方钉死
+	settings.TunEnabled = tun
+	return synthesizeWith(home, secret, settings)
+}
+
+// synthesizeWith 用调用方给的 settings 合成字节。WHY 收 settings 而不是自己读：
+// Synthesize 只读一次 settings——形态与合成取值必须出自同一次读盘（读两次之间用户
+// 改了 tun_enabled，就会按旧形态合成新设置）。
+func synthesizeWith(home paths.Home, secret string, settings store.Settings) (out []byte, warnings []string, err error) {
+	idx, err := store.LoadIndex(home)
+	if err != nil {
+		return nil, nil, err
+	}
+	// 无 current 订阅时合成纯模板（裸内核也可启动，便于先 add 后 start）
+	var sub []byte
+	if item, ok := idx.CurrentItem(); ok {
+		sub, err = os.ReadFile(home.ProfileFile(item.File))
+		if err != nil {
+			return nil, nil, fmt.Errorf("app: read current profile %s: %w", item.File, err)
+		}
+	}
+	enh, err := loadEnhanceLayers(home, idx.Current)
+	if err != nil {
+		return nil, nil, err
+	}
+	var warns []string
+	out, err = synth.Synth(sub, synth.Injection{Settings: settings, Secret: secret, Warnings: &warns}, enh)
+	if err != nil {
+		return nil, nil, err
+	}
+	return out, warns, nil
+}
+
 // Synthesize 合成 runtime.yaml（模板 embed + 订阅 current + 增强链 + settings + secret 注入）。
 // 增强链槽文件缺失=空转（零开销）；未命中/撞名告警经 stderr 输出（不进 runtime，
 // batch3 §3.2）。synth.Synth 保持纯函数——文件读取与告警打印都收口在本编排。
@@ -21,24 +63,7 @@ func Synthesize(home paths.Home, secret string) error {
 	if err != nil {
 		return err
 	}
-	idx, err := store.LoadIndex(home)
-	if err != nil {
-		return err
-	}
-	// 无 current 订阅时合成纯模板（裸内核也可启动，便于先 start 后 add）
-	var sub []byte
-	if item, ok := idx.CurrentItem(); ok {
-		sub, err = os.ReadFile(home.ProfileFile(item.File))
-		if err != nil {
-			return fmt.Errorf("app: read current profile %s: %w", item.File, err)
-		}
-	}
-	enh, err := loadEnhanceLayers(home, idx.Current)
-	if err != nil {
-		return err
-	}
-	var warnings []string
-	out, err := synth.Synth(sub, synth.Injection{Settings: settings, Secret: secret, Warnings: &warnings}, enh)
+	out, warnings, err := synthesizeWith(home, secret, settings)
 	if err != nil {
 		return err
 	}

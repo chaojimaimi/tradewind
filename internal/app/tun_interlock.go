@@ -46,9 +46,13 @@ func requireTunInterlockOpen(cmd string) error {
 		errTunInterlocked, tunInterlockAllowEnv, tunInterlockAllowVal, cmd)
 }
 
-// tunInterlockStatusLine 是 `tun status` 里说明联锁状态的一行（诊断面如实标注当前
-// 受控命令默认拒绝，以及本机自测的出路；标签列与其余状态行同样补齐到 12 列）。
+// tunInterlockStatusLine 是 `tun status` 里说明联锁状态的一行（批⑥b §4.7 终审
+// P3-②：按联锁状态分两态——关闭如实标注受控命令默认拒绝与本机自测的出路，放行
+// 如实标注"仅限本机自测"并劝阻日常使用；标签列与其余状态行同样补齐到 12 列）。
 func tunInterlockStatusLine() string {
+	if tunInterlockOpen() {
+		return "interlock:  已显式放行（仅限本机自测）——tun on/install/reinstall 可用；加固完成前不要在日常使用中开启 TUN"
+	}
 	return fmt.Sprintf("interlock:  联锁关闭（R16 加固中）——tun on/install/reinstall 默认拒绝；本机自测需显式确认 %s=%s",
 		tunInterlockAllowEnv, tunInterlockAllowVal)
 }

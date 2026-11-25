@@ -26,8 +26,9 @@ const delayConcurrency = 8
 const snapshotTimeout = 5 * time.Second
 
 // coreClient 构造 unix socket 客户端（只读 secret——运行中的内核必有 secret 文件）。
+// 路径按当前会话形态分流（批⑥b §4.3：TUN 形态拨服务的代理入口）。
 func coreClient(home paths.Home) *core.Client {
-	return core.NewClient(home.SockFile(), store.ReadSecret(home))
+	return core.NewClient(coreSockPath(home), store.ReadSecret(home))
 }
 
 // requireCore 统一前置探测：未运行给行动指引而非底层 dial 报错。

@@ -20,15 +20,9 @@ const reloadProbeTimeout = 2 * time.Second
 const degradeWaitTimeout = 15 * time.Second
 
 // CoreReachable 探测内核是否在跑（sock 存在且 /version 可达）。只读。
+// 按当前会话形态选 socket（批⑥b §4.3 F22）：TUN 形态拨服务的代理入口。
 func CoreReachable(home paths.Home) bool {
-	if _, err := os.Stat(home.SockFile()); err != nil {
-		return false
-	}
-	client := core.NewClient(home.SockFile(), store.ReadSecret(home))
-	ctx, cancel := context.WithTimeout(context.Background(), reloadProbeTimeout)
-	defer cancel()
-	_, err := client.Version(ctx)
-	return err == nil
+	return coreReachableAt(coreSockPath(home), store.ReadSecret(home))
 }
 
 // ReloadIfRunning 内核运行中 → 重新合成 + PUT /configs?force=true 热重载；
@@ -64,6 +58,11 @@ func ReloadIfRunningPreSynthesizedW(ctx context.Context, home paths.Home, progre
 // 未运行 → 返回 nil（落盘由调用方负责）。热重载失败 → 降级重启：回收内核进程，
 // 由 start 进程的崩溃重启逻辑以新配置拉起（M0-plan §7.1 降级路径的最简形态）。
 func reloadIfRunning(ctx context.Context, home paths.Home, progress io.Writer, synthesize bool) error {
+	// TUN 形态分流（批⑥b §4.4）：root 内核的原生 socket 用户域不可达，热重载改走
+	// 服务 reload 动作（判据 state.Core.Tun + 锚存在性，与 degrade 分流同源）
+	if coreInTunForm(home) && serviceConfigInstalled() {
+		return reloadViaService(ctx, home, progress, synthesize)
+	}
 	if !CoreReachable(home) {
 		return nil // 未运行：仅落盘
 	}
@@ -111,7 +110,7 @@ func degradeRestartW(home paths.Home, secret string, progress io.Writer) error {
 	if err := killProcessGracefully(st.Core.PID); err != nil {
 		return fmt.Errorf("app: degrade restart: %w", err)
 	}
-	if waitCoreReady(home, secret, degradeWaitTimeout) {
+	if waitCoreReady(home.SockFile(), secret, degradeWaitTimeout) {
 		fmt.Fprintln(progress, "core restarted with new config")
 		return nil
 	}
@@ -141,16 +140,17 @@ func degradeRestartTun(home paths.Home, st store.State, secret string, progress 
 	if !resp.OK {
 		return fmt.Errorf("app: tun degrade start refused: %s", resp.Error)
 	}
-	if !waitCoreReady(home, secret, degradeWaitTimeout) {
+	if !waitCoreReady(formSockPath(true, home), secret, degradeWaitTimeout) {
 		return errors.New("app: core did not come back after degrade restart; run `tradewind start`")
 	}
 	fmt.Fprintln(progress, "core restarted with new config")
 	return nil
 }
 
-// waitCoreReady 轮询 /version 直到就绪或超时。
-func waitCoreReady(home paths.Home, secret string, timeout time.Duration) bool {
-	client := core.NewClient(home.SockFile(), secret)
+// waitCoreReady 轮询给定 socket 上的 /version 直到就绪或超时（批⑥b §4.3：路径由
+// 调用方按会话形态给出——start 进程内按 settings、CLI 按 state）。
+func waitCoreReady(sockPath, secret string, timeout time.Duration) bool {
+	client := core.NewClient(sockPath, secret)
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		ctx, cancel := context.WithTimeout(context.Background(), reloadProbeTimeout)

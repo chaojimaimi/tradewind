@@ -18,6 +18,7 @@ type tunServiceClientT interface {
 	Start(generation int) (service.Response, error)
 	Stop() (service.Response, error)
 	Status() (service.Response, error)
+	Reload() (service.Response, error)
 }
 
 // tunEnv 是 tun 编排家族的可注入环境（selfUpdateEnv 同款形态）：测试构造假编排，
@@ -77,7 +78,9 @@ func productionTunEnv(home paths.Home) tunEnv {
 		spawnStart:            spawnTunStartDetached,
 		waitServiceCore:       tunProbeServiceCore,
 		waitUserCore: func(home paths.Home, timeout time.Duration) bool {
-			return waitCoreReady(home, store.ReadSecret(home), timeout)
+			// tun off / 回滚重拉的用户态就绪判定恒拨用户态 socket（root core 已被
+			// 服务 stop 收敛，批⑥b §4.3）
+			return waitCoreReady(home.SockFile(), store.ReadSecret(home), timeout)
 		},
 		ensureGeoip:    ensureGeoipMetadb,
 		sysproxyRunner: sysproxy.SystemRunner(),

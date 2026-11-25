@@ -76,8 +76,9 @@ func startCoreViaService(ctx context.Context, home paths.Home, secret string) (i
 	if !resp.OK {
 		return 0, fmt.Errorf("app: tun service start refused: %s", resp.Error)
 	}
-	// 就绪双确认（语义同 F10：spawn 主体换成服务，/version 轮询收口）
-	if !waitCoreReady(home, secret, 10*time.Second) {
+	// 就绪双确认（语义同 F10：spawn 主体换成服务，/version 轮询收口）；TUN 形态
+	// 拨服务的代理入口（批⑥b §4.3）
+	if !waitCoreReady(formSockPath(true, home), secret, 10*time.Second) {
 		return 0, errors.New("app: core.sock not ready after service start")
 	}
 	fmt.Printf("core spawned via service (pid %d, root)\n", resp.PID)
@@ -208,7 +209,8 @@ func tunHealthLoop(ctx context.Context, home paths.Home) {
 			return
 		case <-time.After(tunHealthInterval):
 		}
-		if CoreReachable(home) {
+		// 只在 TUN 形态的等待循环里启动，恒探代理入口（批⑥b §4.3）
+		if coreReachableAt(formSockPath(true, home), store.ReadSecret(home)) {
 			streak, notified = 0, false
 			continue
 		}
@@ -286,7 +288,9 @@ func tunProbeServiceCore(ctx context.Context, home paths.Home) (int, error) {
 	if !resp.OK || resp.PID <= 0 {
 		return 0, errors.New("app: service reports no managed core")
 	}
-	if !CoreReachable(home) {
+	// 单次服务就绪探针：/version 双确认恒拨代理入口（本探针只服务 TUN 形态，
+	// 批⑥b §4.3）
+	if !coreReachableAt(formSockPath(true, home), store.ReadSecret(home)) {
 		return 0, errors.New("app: core.sock not reachable")
 	}
 	return resp.PID, nil
@@ -314,18 +318,30 @@ func tunStatusLines(home paths.Home) ([]string, error) {
 	}
 	lines := []string{fmt.Sprintf("tun_enabled: %t", settings.TunEnabled)}
 	if !serviceConfigInstalled() {
-		lines = append(lines, "service:    not installed（`tradewind tun install` 安装特权服务；`tun on` 会自动安装）")
+		lines = append(lines, tunNotInstalledLine())
 	} else {
 		lines = append(lines, tunServiceStatusLine()...)
 		lines = append(lines, tunBinaryStatusLines(home)...)
 	}
-	if CoreReachable(home) {
+	// core.sock 健康按当前会话形态探（批⑥b §4.3：TUN 形态即服务的代理入口）
+	if coreReachableAt(coreSockPath(home), store.ReadSecret(home)) {
 		lines = append(lines, "core.sock:  healthy")
 	} else {
 		lines = append(lines, "core.sock:  unreachable")
 	}
 	// 联锁状态（tun_interlock.go）：受控命令默认拒绝这一事实要在诊断面如实可见
 	return append(lines, tunInterlockStatusLine()), nil
+}
+
+// tunNotInstalledLine 未安装行按联锁状态分两态（批⑥b §4.7 终审 P3-③）：联锁开着
+// → 既有安装指引不变；关着 → 点明受控命令默认拒绝与本机自测的确认出口（环境变量
+// 名与值复用联锁常量，不写第二份字面量）。
+func tunNotInstalledLine() string {
+	if tunInterlockOpen() {
+		return "service:    not installed（`tradewind tun install` 安装特权服务；`tun on` 会自动安装）"
+	}
+	return fmt.Sprintf("service:    not installed（联锁关闭：`tradewind tun install` 与 `tun on` 默认拒绝；本机自测需显式确认 %s=%s）",
+		tunInterlockAllowEnv, tunInterlockAllowVal)
 }
 
 func tunServiceStatusLine() []string {

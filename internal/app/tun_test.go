@@ -25,6 +25,7 @@ type fakeTunService struct {
 	starts       []int
 	stops        int
 	statuses     int
+	reloads      int
 	startOK      bool
 	startPID     int
 	startRefused string
@@ -67,6 +68,13 @@ func (f *fakeTunService) Status() (service.Response, error) {
 	return service.Response{OK: true, PID: f.startPID, Version: "fake"}, nil
 }
 
+func (f *fakeTunService) Reload() (service.Response, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reloads++
+	return service.Response{OK: true}, nil
+}
+
 func (f *fakeTunService) stopCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -84,6 +92,7 @@ func (f *fakeTunService) startCount() int {
 // 计数、sysproxy 假 runner。
 func newTunTestEnv(t *testing.T) (tunEnv, *fakeTunService, *int, *int, *fakeNetRunner) {
 	t.Helper()
+	stubBrokerSockPath(t) // TUN 形态的内核 API 入口→短路径桩（默认不可达）
 	svc := &fakeTunService{startOK: true, startPID: 42000}
 	spawns := 0
 	stopStarts := 0

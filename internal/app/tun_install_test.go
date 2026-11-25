@@ -381,6 +381,9 @@ func (failingStatusClient) Stop() (service.Response, error) {
 func (failingStatusClient) Status() (service.Response, error) {
 	return service.Response{}, errors.New("dial: refused")
 }
+func (failingStatusClient) Reload() (service.Response, error) {
+	return service.Response{}, errors.New("down")
+}
 
 // TestTunDaemonLogPathDefault 批⑥b §4.6：服务日志默认落在 root 属主锚目录的
 // logs/ 下、属主为数据目录用户（迁出 admin 可写的 /Library/Logs，R22 闭环）。

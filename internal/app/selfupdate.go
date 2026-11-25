@@ -70,7 +70,7 @@ func ProductionEnv(ctx context.Context, home paths.Home, progress io.Writer) sel
 		autostartOn:       autostartEnabled,
 		reachable:         CoreReachable,
 		stopCore:          func(home paths.Home) error { return StopW(home, progress) },
-		waitReady:         waitCoreReady,
+		waitReady:         waitCoreReadyForForm, // 批⑥b §4.3：按 settings 取形态（WHY 见函数注释）
 		kickstart:         kickstartAgentCore,
 		spawnStart:        spawnDetachedCoreStart,
 		runBinaryVersion:  runBinaryVersionOutput,
@@ -79,10 +79,11 @@ func ProductionEnv(ctx context.Context, home paths.Home, progress io.Writer) sel
 	}
 }
 
-// coreVersionProbeFor 生产 /version 探针（reload.go 同款 sock 客户端，2s 档）。
+// coreVersionProbeFor 生产 /version 探针（reload.go 同款 sock 客户端，2s 档；路径
+// 按当前会话形态分流，批⑥b §4.3）。
 func coreVersionProbeFor(ctx context.Context, home paths.Home) func(paths.Home) (string, bool) {
 	return func(h paths.Home) (string, bool) {
-		client := core.NewClient(h.SockFile(), store.ReadSecret(h))
+		client := core.NewClient(coreSockPath(h), store.ReadSecret(h))
 		cctx, cancel := context.WithTimeout(ctx, reloadProbeTimeout)
 		defer cancel()
 		v, err := client.Version(cctx)

@@ -170,11 +170,13 @@ func MarshalStatusJSON(out StatusJSON) (string, error) {
 }
 
 // probeCore 经 unix socket 探测内核健康；sock 不存在或请求失败即不健康。
+// 路径按当前会话形态分流（批⑥b §4.3：TUN 形态拨服务的代理入口）。
 func probeCore(home paths.Home) (version string, healthy bool) {
-	if _, err := os.Stat(home.SockFile()); err != nil {
+	sock := coreSockPath(home)
+	if _, err := os.Stat(sock); err != nil {
 		return "", false
 	}
-	client := core.NewClient(home.SockFile(), store.ReadSecret(home))
+	client := core.NewClient(sock, store.ReadSecret(home))
 	ctx, cancel := context.WithTimeout(context.Background(), healthProbeTimeout)
 	defer cancel()
 	v, err := client.Version(ctx)

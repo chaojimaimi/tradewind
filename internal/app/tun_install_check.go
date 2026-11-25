@@ -150,7 +150,7 @@ func tunBinaryStatusLinesFor(home paths.Home, cliPath string) []string {
 	if !ok {
 		return []string{
 			"helper:     unknown（service.json 不可读或为旧布局）",
-			"warning: 服务锚无效或为旧布局（内核副本曾在用户可写目录），请执行 `tradewind tun reinstall`",
+			"warning: 服务锚无效或为旧布局（批⑥b 前内核以用户数据目录为工作目录），请执行 `tradewind tun reinstall`",
 		}
 	}
 	helperCurrent := sha256FilesEqual(cliPath, cfg.HelperPath)

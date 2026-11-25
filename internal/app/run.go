@@ -165,7 +165,7 @@ func postHandshake(ctx context.Context, home paths.Home, mgr *core.Manager, tunP
 		_ = earlyFailureShutdown(home, mgr, settings.TunEnabled)
 		return 0, err
 	}
-	version, _ := core.NewClient(home.SockFile(), store.ReadSecret(home)).Version(ctx)
+	version, _ := core.NewClient(startFormSockPath(home, settings), store.ReadSecret(home)).Version(ctx)
 	ready := fmt.Sprintf("ready: core=%s pid=%d mixed=127.0.0.1:%d sysproxy=%v",
 		version, pid, settings.MixedPort, opts.ApplySysProxy)
 	if settings.TunEnabled {
