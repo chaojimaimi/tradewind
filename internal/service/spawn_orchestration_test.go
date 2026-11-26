@@ -204,6 +204,7 @@ func TestSourceStaticChownChmodInvariant(t *testing.T) {
 	want := map[string]bool{
 		filepath.Join("server.go"):                true, // 服务 socket listen（/var/run 下按路径 chmod 0666）
 		filepath.Join("..", "core", "manager.go"): true, // WaitReady 握手后收敛内核原生 sock
+		filepath.Join("broker.go"):                true, // 代理入口 socket（锚目录内，监听后按路径 chmod 0666）
 	}
 	if !reflect.DeepEqual(chmods, want) {
 		t.Fatalf("os.Chmod( sites = %v, want exactly %v", chmods, want)

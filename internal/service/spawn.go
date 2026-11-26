@@ -29,25 +29,14 @@ func coreEnvProduction(c ConfigFile) []string {
 	}
 }
 
-// spawnCore 以 root 身份 spawn + 同步握手 + 启动 Monitor 自愈。调用方须持 s.mu——
-// 唯一的例外是启动期的 adoptOrphans：它先于 listen/acceptLoop 执行，此时还没有
-// 任何请求处理协程，是唯一会碰 s.mu 所保护字段的执行流，无需持锁。
+// spawnCore 以 root 身份 spawn + 同步握手 + 起代理入口 + 启动 Monitor 自愈。调用方
+// 须持 s.mu——唯一的例外是启动期的 adoptOrphans：它先于 listen/acceptLoop 执行，
+// 此时还没有任何请求处理协程，是唯一会碰 s.mu 所保护字段的执行流，无需持锁。
 // pid 记录由 Manager 的 OnSpawned 回调负责（进程一启动就写——覆盖自愈 respawn，
-// F20）。进入本函数前调用方已把归一化产物提交（promote 快照 + 落盘 R，L3/L2）；
-// 每次 spawn 前复核执行目录与内核工作目录两道信任链：不达标即拒绝并返回明确错误。
+// F20）。进入本函数前调用方已把归一化产物提交（promote 快照 + 落盘 R，L3/L2）。
 func (s *Server) spawnCore() error {
-	if err := s.verifyExecTrust(s.conf); err != nil {
-		return fmt.Errorf("service: refusing to spawn, exec dir failed the ownership re-check: %w", err)
-	}
-	if err := s.verifyHomeTrust(s.conf); err != nil {
-		return fmt.Errorf("service: refusing to spawn, core home failed the trust re-check: %w", err)
-	}
-	// geo 同步（§4.4）：内部已 best-effort，失败不阻断
-	syncGeo(s.conf)
-	// 内核显式 TMPDIR 指到 <core_home>/tmp（root 0700）——杜绝内核版本日后把 root
-	// 临时文件落进共享的 /tmp
-	if err := os.MkdirAll(filepath.Join(s.conf.CoreHome, "tmp"), 0o700); err != nil {
-		return fmt.Errorf("service: refusing to spawn, mkdir tmp: %w", err)
+	if err := s.prepareSpawn(); err != nil {
+		return err
 	}
 	uid := s.conf.DataUID // LogOwner 取副本——Manager 只读该值
 	mgr := core.NewManager(core.Config{
@@ -83,8 +72,43 @@ func (s *Server) spawnCore() error {
 	}
 	s.mgr = mgr
 	s.gaveUp = false
+	if err := s.bringUpBroker(mgr); err != nil {
+		return err
+	}
 	go s.monitorLoop(mgr)
 	fmt.Printf("service: core spawned (pid %d)\n", mgr.PID())
+	return nil
+}
+
+// prepareSpawn 是每次 spawn 的前置序：执行目录与内核工作目录两道信任链复核（不达标
+// 即拒绝并返回明确错误）→ geo 同步（§4.4，内部已 best-effort）→ 内核专属 tmp 目录。
+// 两条 spawn 路径（本函数与 Monitor 自愈的 PreSpawn 钩子）都要过前两道。
+func (s *Server) prepareSpawn() error {
+	if err := s.verifyExecTrust(s.conf); err != nil {
+		return fmt.Errorf("service: refusing to spawn, exec dir failed the ownership re-check: %w", err)
+	}
+	if err := s.verifyHomeTrust(s.conf); err != nil {
+		return fmt.Errorf("service: refusing to spawn, core home failed the trust re-check: %w", err)
+	}
+	syncGeo(s.conf)
+	// 内核显式 TMPDIR 指到 <core_home>/tmp（root 0700）——杜绝内核版本日后把 root
+	// 临时文件落进共享的 /tmp
+	if err := os.MkdirAll(filepath.Join(s.conf.CoreHome, "tmp"), 0o700); err != nil {
+		return fmt.Errorf("service: refusing to spawn, mkdir tmp: %w", err)
+	}
+	return nil
+}
+
+// bringUpBroker 起代理入口（批⑥b §4.3）：内核握手成功才监听。起不来则不带病运行——
+// 停核、清 pid 记录，按握手失败同款收场。必须在启动 Monitor **之前**：否则 Monitor
+// 会把这里的 Stop 当成一次崩溃去自愈。调用方持 s.mu。
+func (s *Server) bringUpBroker(mgr *core.Manager) error {
+	if err := s.broker.start(s.conf.BrokerSock, s.conf.KernelSock, s.conf.AllowedUIDs); err != nil {
+		s.mgr = nil
+		_ = mgr.Stop()
+		_ = os.Remove(s.cfg.PIDPath)
+		return fmt.Errorf("service: core broker: %w", err)
+	}
 	return nil
 }
 
@@ -111,6 +135,8 @@ func (s *Server) stopCoreLocked() error {
 	}
 	mgr := s.mgr
 	s.mgr = nil
+	// 先关代理再停核（批⑥b §4.3）：在途请求随连接切断，不会有请求打到正在退出的内核
+	s.broker.close()
 	if err := mgr.Stop(); err != nil {
 		return fmt.Errorf("service: stop core: %w", err)
 	}

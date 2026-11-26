@@ -61,8 +61,9 @@ type Server struct {
 
 	mu      sync.Mutex
 	mgr     *core.Manager
-	gaveUp  bool // Monitor 重启预算耗尽（内核终亡）→ 新 start 请求可重新准入
-	curGen  int  // 所有权仲裁基线：start 须 > curGen；显式 stop 后归零（见 handleStop）
+	gaveUp  bool       // Monitor 重启预算耗尽（内核终亡）→ 新 start 请求可重新准入
+	curGen  int        // 所有权仲裁基线：start 须 > curGen；显式 stop 后归零（见 handleStop）
+	broker  *apiBroker // 用户域 API 入口（<anchor>/core.sock 白名单代理，批⑥b §4.3/I4）
 	rootCtx context.Context
 	// snapMu 保护 snapshot（最近一份归一化产物，nil = 无；批⑥b §4.4）。独立于 s.mu：
 	// restoreRuntime 只取它（start 路径调用它时调用方已持 s.mu；取锁顺序恒
@@ -86,6 +87,7 @@ type Server struct {
 func NewServer(cfg ServerConfig) *Server {
 	return &Server{
 		cfg:             cfg,
+		broker:          newAPIBroker(),
 		verifyExecTrust: verifyAnchorExecTrust,
 		verifyHomeTrust: verifyCoreHomeTrust,
 		coreEnv:         coreEnvProduction,
@@ -126,6 +128,7 @@ func (s *Server) Run(ctx context.Context) error {
 	<-ctx.Done()
 	fmt.Println("service: shutting down...")
 	s.stopCore()
+	s.broker.close() // 幂等：stopCore 已关过则 no-op（批⑥b §4.3）
 	_ = ln.Close()
 	// sock 清理：mihomo 退出不 unlink 的残留由控制进程收敛（Manager 同语义）
 	_ = os.Remove(s.cfg.SockPath)
