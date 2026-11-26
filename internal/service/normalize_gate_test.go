@@ -209,9 +209,11 @@ func TestStartWaitsForNormalizeGate(t *testing.T) {
 
 // TestReloadNeverHoldsGateWhileTakingMu（锁序 s.mu → normalizeGate 的回归）：reload
 // 在 s.mu 之外归一化、之后才取 s.mu。测试先占住 s.mu，再发 reload：它的归一化
-// 取闸、完成、**归还闸**，然后才在 s.mu 上等——所以此刻闸必须重新可取。若有人把
-// 闸改成跨到取 s.mu 之上，闸会被等锁的 reload 一直占着，而持 s.mu 的 start 又在
-// 等闸——互锁；这里以"闸在持锁期间重新可取"把它钉死。
+// 取闸、完成、**归还闸**，然后才在 s.mu 上等——所以持 s.mu 期间闸必须保持空闲。
+// 若有人把闸改成跨到取 s.mu 之上，闸会被等锁的 reload 一直占着，而持 s.mu 的 start
+// 又在等闸——互锁。观测用窗口式（连续占用 ≥200ms 即失败）而非一次快照：快照的
+// 首轮轮询几乎必然跑在 reload 取闸之前、看到的是空闲，抓不住违反形状（变异验证
+// 实证）；而 reload 的归一化是毫秒级的一次短暂占用，绝不会连续占到 200ms。
 func TestReloadNeverHoldsGateWhileTakingMu(t *testing.T) {
 	dir := shortTempDir(t)
 	cfg, _ := writeServiceFixture(t, dir)
@@ -230,7 +232,25 @@ func TestReloadNeverHoldsGateWhileTakingMu(t *testing.T) {
 		_, err := cl.Reload()
 		done <- err
 	}()
-	waitGateFree(t, 5*time.Second) // reload 归一化完毕、正在 s.mu 上等
+	waitGateFree(t, 5*time.Second) // reload 已归还闸（或尚未取闸）、正在 s.mu 上等
+	// 持 s.mu 期间持续观测闸。判据是"连续占用时长"而不是"是否出现过占用"：
+	// waitGateFree 只保证某一瞬时空闲，reload 的归一化可能此刻才刚开始（毫秒级的
+	// 短暂占用，须容忍）；跨锁持闸则会占到 unlock 为止（数秒）——这是违反形状。
+	observed := time.Now()
+	var occupiedSince time.Time
+	for time.Since(observed) < 600*time.Millisecond {
+		if gateIsFree() {
+			occupiedSince = time.Time{}
+		} else {
+			if occupiedSince.IsZero() {
+				occupiedSince = time.Now()
+			} else if time.Since(occupiedSince) >= 200*time.Millisecond {
+				t.Fatalf("normalizeGate has been held for %v while s.mu is taken (the gate must not extend across the lock)",
+					time.Since(occupiedSince))
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	select {
 	case err := <-done:
 		t.Fatalf("reload completed while s.mu was held by the test: %v", err)

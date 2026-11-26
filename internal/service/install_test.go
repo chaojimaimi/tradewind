@@ -244,14 +244,19 @@ func TestInstallRejectsMissingRootCopy(t *testing.T) {
 }
 
 // TestInstallRejectsRelativeExecDir 相对 exec_dir → 拒绝（root 下的相对路径随
-// 工作目录漂移，属注入面）。
+// 工作目录漂移，属注入面）。planInstall 在任何磁盘访问之前拒绝相对路径——这里
+// 不再 seed 桩内核（旧写法会往包目录里漏 relative/exec/bin/ 两个文件），并钉住
+// 包目录不被污染。
 func TestInstallRejectsRelativeExecDir(t *testing.T) {
 	p := newInstallPlan(t)
 	p.execDir = "relative/exec"
-	seedRootCoreCopy(t, p, "")
 	if err := installDaemon(p, &fakeLaunchctl{}, &strings.Builder{}); err == nil ||
-		!strings.Contains(err.Error(), "exec_dir") {
+		!strings.Contains(err.Error(), "exec_dir") ||
+		!strings.Contains(err.Error(), "must be absolute") {
 		t.Fatalf("err = %v, want relative exec_dir rejection", err)
+	}
+	if _, statErr := os.Lstat("relative"); !os.IsNotExist(statErr) {
+		t.Fatalf("package dir must stay clean, found a \"relative\" entry: %v", statErr)
 	}
 }
 

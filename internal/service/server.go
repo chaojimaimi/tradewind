@@ -279,30 +279,8 @@ func (s *Server) handleReload() Response {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.coreManaged() {
-		// 内核的 unix-socket 控制器从不鉴权（实测 mihomo 对 -ext-ctl-unix 不校验
-		// Authorization），secret 恒空
-		kc := core.NewClient(s.conf.KernelSock, "")
-		ctx, cancel := context.WithTimeout(s.rootCtx, reloadPushTimeout)
-		defer cancel()
-		err := kc.PutConfigsPayload(ctx, string(res.Bytes))
-		var se *core.StatusError
-		if errors.As(err, &se) {
-			if se.Code == http.StatusBadRequest {
-				// 日志只记状态码：内核的拒绝理由可能回显配置值（yaml 类型错误会带出
-				// 片段），它只回给调用方——那是用户自己的配置；不进 root 属主的
-				// 日志（I6）
-				text := "service: 内核拒绝新配置：" + kernelRejectMessage(se)
-				fmt.Fprintln(os.Stderr, "service: reload refused by kernel (status 400)")
-				return Response{OK: false, Rejected: true, Error: text}
-			}
-			// 其它状态码：响应体是内核自由文本，过一道闸再回给调用方（不复现 legacy 文案）
-			text := fmt.Sprintf("service: 内核推送失败（status %d）：%s", se.Code, sanitizeForLog(se.Body))
-			fmt.Fprintf(os.Stderr, "service: reload push failed (status %d)\n", se.Code)
-			return Response{OK: false, Error: text}
-		}
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "service: reload push failed: %v\n", err)
-			return Response{OK: false, Error: err.Error()}
+		if resp := s.pushToKernel(res.Bytes); resp != nil {
+			return *resp
 		}
 		if err := s.commitRuntime(s.conf, res.Bytes); err != nil {
 			fmt.Fprintf(os.Stderr, "service: reload commit failed: %v\n", err)
@@ -317,6 +295,38 @@ func (s *Server) handleReload() Response {
 	}
 	fmt.Printf("service: reload persisted (%d bytes, %d keys ignored; core not managed)\n", len(res.Bytes), len(res.Ignored))
 	return Response{OK: true, Ignored: res.Ignored}
+}
+
+// pushToKernel 把归一化产物内联推给运行中的内核（调用方持 s.mu）。返回 nil = 内核已
+// 接受；非 nil = 应答失败：内核 400 → rejected:true（日志只记状态码，理由只回调用方，
+// I6）；其它状态码与传输错误 → 普通失败。
+func (s *Server) pushToKernel(payload []byte) *Response {
+	// 内核的 unix-socket 控制器从不鉴权（实测 mihomo 对 -ext-ctl-unix 不校验
+	// Authorization），secret 恒空
+	kc := core.NewClient(s.conf.KernelSock, "")
+	ctx, cancel := context.WithTimeout(s.rootCtx, reloadPushTimeout)
+	defer cancel()
+	err := kc.PutConfigsPayload(ctx, string(payload))
+	var se *core.StatusError
+	if errors.As(err, &se) {
+		if se.Code == http.StatusBadRequest {
+			// 日志只记状态码：内核的拒绝理由可能回显配置值（yaml 类型错误会带出
+			// 片段），它只回给调用方——那是用户自己的配置；不进 root 属主的
+			// 日志（I6）
+			text := "service: 内核拒绝新配置：" + kernelRejectMessage(se)
+			fmt.Fprintln(os.Stderr, "service: reload refused by kernel (status 400)")
+			return &Response{OK: false, Rejected: true, Error: text}
+		}
+		// 其它状态码：响应体是内核自由文本，过一道闸再回给调用方（不复现 legacy 文案）
+		text := fmt.Sprintf("service: 内核推送失败（status %d）：%s", se.Code, sanitizeForLog(se.Body))
+		fmt.Fprintf(os.Stderr, "service: reload push failed (status %d)\n", se.Code)
+		return &Response{OK: false, Error: text}
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "service: reload push failed: %v\n", err)
+		return &Response{OK: false, Error: err.Error()}
+	}
+	return nil
 }
 
 // handleStop：优雅停核（Manager Stop 含 StopGrace/SIGKILL）→ 数据目录属主回收 →
