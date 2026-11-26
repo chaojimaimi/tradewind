@@ -112,14 +112,14 @@ fittingSize 路径下 maxHeight 收缩为 0 致整块不渲染）；延迟徽标
 ### 安装与启动
 
 1. 将 `Tradewind.app` 拷入 `/Applications`（或任意位置）。
-2. **Gatekeeper 放行**：首次打开请**右键点击 Tradewind.app → 打开 → 打开**
-   （ad-hoc 签名无公证，直接双击会被拦截；自用可接受，见 DESIGN §7.7）。
+2. **Gatekeeper 放行**：首次打开请到**系统设置 → 隐私与安全性 → 仍要打开**
+   （自签身份无公证，直接双击会被拦截；macOS 15 起右键「打开」已不能绕过 Gatekeeper；
+   自用可接受，见 DESIGN §7.7）。
 3. 壳要求本机可寻到 `tradewind` CLI：装到 `/opt/homebrew/bin` 或 `/usr/local/bin`，
    或设环境变量 `TRADEDWIND_CLI=/path/to/tradewind` 后从终端启动壳。
 4. 数据面凭据来自 `tradewind status --json` 的 `panel_url`（面板网关 token 入口）。
 
-已知限制（M2）：壳关闭期间今日流量欠计；设置窗口/连接面板/启停快捷键/TUN/DNS 接管/
-增强链/代理守护归 M3+。
+已知限制：壳关闭期间今日流量欠计。
 
 ## 安全说明
 

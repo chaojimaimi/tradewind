@@ -145,21 +145,18 @@ struct CurrentNodeCard: View {
 enum ToggleGroupRow: Hashable {
     case systemProxy
     case tun
-    /// 代理守护：M2 禁用占位 + P2 徽标（demo 显式偏差已声明）。
-    case guardPlaceholder
 }
 
 /// ③ 开关组的纵向装配（纯函数，`@testable` 可测）：系统代理行始终在；TUN 行仅当
-/// includeTUN（生产取 `FeatureFlags.privilegedTUN`）为 true 时加入；末行为代理守护
-/// 占位。分隔由 RowListLayout 只放在相邻两行之间——TUN 行隐藏后卡片就是
-/// "系统代理 + 分隔 + 代理守护"，不留空位或多余分隔。
+/// includeTUN（生产取 `FeatureFlags.privilegedTUN`）为 true 时加入。分隔由
+/// RowListLayout 只放在相邻两行之间——TUN 行隐藏后卡片是单行"系统代理"（无分隔），
+/// 显示时为"系统代理 + 分隔 + TUN"，不留空位或多余分隔。
 enum ToggleGroupLayout {
     static func rows(includeTUN: Bool) -> [ToggleGroupRow] {
         var rows: [ToggleGroupRow] = [.systemProxy]
         if includeTUN {
             rows.append(.tun)
         }
-        rows.append(.guardPlaceholder)
         return rows
     }
 
@@ -185,9 +182,6 @@ struct ToggleGroupCard: View {
                     systemProxyRow
                 case .row(.tun):
                     tunRow
-                case .row(.guardPlaceholder):
-                    ToggleRow(icon: "shield.lefthalf.filled", label: "代理守护", note: nil,
-                              isOn: .constant(false), disabled: true, badge: "P2")
                 case .divider:
                     rowDivider
                 }

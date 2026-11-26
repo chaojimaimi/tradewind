@@ -18,23 +18,22 @@ import Testing
 
     @Test func toggleGroupOmitsTUNRowWhenOff() {
         let rows = ToggleGroupLayout.rows(includeTUN: false)
-        #expect(rows == [.systemProxy, .guardPlaceholder])
+        #expect(rows == [.systemProxy])
         #expect(!rows.contains(.tun))
     }
 
     @Test func toggleGroupIncludesTUNRowWhenOn() {
         let rows = ToggleGroupLayout.rows(includeTUN: true)
-        #expect(rows == [.systemProxy, .tun, .guardPlaceholder])
+        #expect(rows == [.systemProxy, .tun])
         #expect(rows.contains(.tun))
     }
 
-    /// 隐藏后的纵向结构回到"系统代理 + 分隔 + 代理守护"：系统代理行保留，分隔恰在
-    /// 两行之间一条——首行之前、末行之后都没有（不留空位或多余分隔）。
-    @Test func toggleGroupHiddenShapeIsSystemProxyDividerGuard() {
-        #expect(ToggleGroupLayout.items(includeTUN: false)
-                == [.row(.systemProxy), .divider, .row(.guardPlaceholder)])
+    /// TUN 隐藏时纵向结构是单行"系统代理"，无分隔；显示时恰一条分隔在"系统代理"
+    /// 与"TUN 模式"两行之间——首行之前、末行之后都没有（不留空位或多余分隔）。
+    @Test func toggleGroupItemsShapeFollowsTheFlag() {
+        #expect(ToggleGroupLayout.items(includeTUN: false) == [.row(.systemProxy)])
         #expect(ToggleGroupLayout.items(includeTUN: true)
-                == [.row(.systemProxy), .divider, .row(.tun), .divider, .row(.guardPlaceholder)])
+                == [.row(.systemProxy), .divider, .row(.tun)])
     }
 
     // MARK: - 设置窗口「网络代理」区：行可见性（纯函数）
