@@ -76,7 +76,7 @@ func (s *Server) spawnCore() error {
 		return err
 	}
 	go s.monitorLoop(mgr)
-	fmt.Printf("service: core spawned (pid %d)\n", mgr.PID())
+	svcOutf("service: core spawned (pid %d)", mgr.PID())
 	return nil
 }
 
@@ -120,7 +120,7 @@ func (s *Server) monitorLoop(mgr *core.Manager) {
 		s.gaveUp = true
 		s.mu.Unlock()
 		_ = os.Remove(s.cfg.PIDPath)
-		fmt.Fprintf(os.Stderr, "service: core restart budget exhausted: %v\n", giveUp)
+		svcErrf("service: core restart budget exhausted: %v", giveUp)
 	})
 	if err != nil {
 		return // giveUp 回调已处理；Monitor 返回值仅诊断
@@ -141,7 +141,7 @@ func (s *Server) stopCoreLocked() error {
 		return fmt.Errorf("service: stop core: %w", err)
 	}
 	_ = os.Remove(s.cfg.PIDPath)
-	fmt.Println("service: core stopped")
+	svcOutf("service: core stopped")
 	return nil
 }
 
@@ -152,12 +152,21 @@ func (s *Server) stopCore() {
 	_ = s.stopCoreLocked()
 }
 
-// adoptOrphans 服务自身重启的孤儿收编（批⑥ §3.1/R13；L2——批⑥b §4.4）：launchd
-// 拉起时旧子进程 mihomo 仍存活（父死后被 launchd 收养，cmd.Wait 不可用）——读
-// core.pid：pid 存活且身份匹配（命令行含 -d <core_home>）→ root SIGTERM 回收。
-// 孤儿一律回收；是否重拉取决于 L1 种子：snapshot != nil → 按快照重拉（"恢复同一
-// 会话"，代价=健康 core 全断重启一次，R13 登记）；snapshot == nil → 不重拉，服务
-// 继续监听——等用户域下一次 start（L3）重新归一化（绝不让内核以默认配置跑起来）。
+// adoptOrphans 服务自身重启的孤儿收编（批⑥ §3.1/R13；L2——批⑥b §4.4；c8 ③）：
+// launchd 拉起时旧子进程 mihomo 仍存活（父死后被 launchd 收养，cmd.Wait 不可用）——
+// 读 core.pid：只要存在 pid 记录（文件读到了、内容是合法 pid），无论记录指向的内核
+// 是死是活，都按同一套逻辑走：
+//  1. 活且身份匹配（命令行含 -d <core_home>）→ root SIGTERM 回收（孤儿一律回收）；
+//  2. 随后按 L1 快照重拉：snapshot != nil → spawnCore（"恢复同一会话"，代价=健康
+//     core 全断重启一次，R13 登记）；snapshot == nil → 不重拉，服务继续监听——等
+//     用户域下一次 start（L3）重新归一化（绝不让内核以默认配置跑起来）。
+//
+// WHY 死分支也快照重拉（c8 ③，2026-11-26 真机实录）：内核被杀后 launchd 同毫秒拉回
+// 服务实例，内核却在收编检查之前又被 SIGTERM 终止——旧实现"已死/身份不符直接
+// return"，服务终态 running + no managed core 半态挂死，快照重拉挂在活分支后面够
+// 不着。有快照说明上一会话在跑，恢复它是既有设计意图。pid 复用防护保留：活但身份
+// 不符 = 内核已不在（记录是陈旧的）→ 不回收、但照新逻辑重拉。没有记录（文件不存在）
+// → 完全维持现状（全新安装不自发拉核）。
 func (s *Server) adoptOrphans() error {
 	data, err := os.ReadFile(s.cfg.PIDPath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -172,15 +181,14 @@ func (s *Server) adoptOrphans() error {
 		return nil
 	}
 	_ = os.Remove(s.cfg.PIDPath)
-	if !processAlive(pid) || !coreProcessMatches(pid, s.conf.CoreHome) {
-		return nil // 已死或身份不符（pid 复用防护）：无可收编
-	}
-	fmt.Printf("service: reclaiming orphan core (pid %d)\n", pid)
-	if err := killProcessGracefully(pid); err != nil {
-		return fmt.Errorf("service: reclaim orphan pid %d: %w", pid, err)
+	if processAlive(pid) && coreProcessMatches(pid, s.conf.CoreHome) {
+		svcOutf("service: reclaiming orphan core (pid %d)", pid)
+		if err := killProcessGracefully(pid); err != nil {
+			return fmt.Errorf("service: reclaim orphan pid %d: %w", pid, err)
+		}
 	}
 	if s.snapshotCopy() == nil {
-		fmt.Println("service: orphan reclaimed; no normalized runtime snapshot on record, not respawning (waiting for the next start)")
+		svcOutf("service: no normalized runtime snapshot on record; not respawning (waiting for the next start)")
 		return nil
 	}
 	if err := s.spawnCore(); err != nil {

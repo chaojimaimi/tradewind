@@ -253,6 +253,9 @@ func applyPolicy(key string, val *yaml.Node, ignored *[]string) *Rejection {
 		return checkInt(key, val, "must be a non-negative integer",
 			func(v int64) bool { return v >= 0 })
 	}
+	if tunDeniedBoolKeys[key] {
+		return checkBoolTunDenied(key, val)
+	}
 	if boolKeys[key] {
 		return checkBool(key, val)
 	}
@@ -309,6 +312,21 @@ func enumList(choices map[string]bool) string {
 func checkBool(key string, val *yaml.Node) *Rejection {
 	if val.Kind != yaml.ScalarNode || val.Tag != "!!bool" {
 		return &Rejection{Key: key, Reason: "must be a boolean"}
+	}
+	return nil
+}
+
+// checkBoolTunDenied 值条件拒绝·bool（tunDeniedBoolKeys 的判定器）：类型检查与
+// checkBool 同口径（非 bool 标量仍报 "must be a boolean"——类型错误不冒充策略拒绝），
+// 显式真值才落到 TUN 拒绝（Reason 与 rejectKeys 同款措辞）。yaml.v3 的 !!bool 只解出
+// true/True/TRUE 与 false/False/FALSE 六种字面量。
+func checkBoolTunDenied(key string, val *yaml.Node) *Rejection {
+	if val.Kind != yaml.ScalarNode || val.Tag != "!!bool" {
+		return &Rejection{Key: key, Reason: "must be a boolean"}
+	}
+	switch val.Value {
+	case "true", "True", "TRUE":
+		return &Rejection{Key: key, Reason: key + " is not allowed in TUN mode"}
 	}
 	return nil
 }

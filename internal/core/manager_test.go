@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +40,34 @@ func TestSpawnHandshakeSuccessAndStop(t *testing.T) {
 	}
 	if !m.exitClosed() {
 		t.Fatal("process should have exited after Stop")
+	}
+}
+
+// TestSpawnSetsIndependentProcessGroup（c8 ②）：spawn 出的内核进程自成一组
+// （pgid == pid）。WHY 钉住：launchd 重启作业时清理死作业的遗留进程（2026-11-26
+// 真机实测），内核若与服务同组会在收编检查前被一并带走——独立进程组让内核只随
+// Stop() 的显式信号退出。macOS 无 /proc，经 ps -o pgid 读取。
+func TestSpawnSetsIndependentProcessGroup(t *testing.T) {
+	dir := shortTempDir(t)
+	m := NewManager(stubConfig(t, dir, "normal"))
+	if err := m.Spawn(); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	t.Cleanup(func() { _ = m.Stop() })
+	if err := m.WaitReady(context.Background()); err != nil {
+		t.Fatalf("WaitReady: %v", err)
+	}
+	pid := m.PID()
+	out, err := exec.Command("ps", "-o", "pgid=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		t.Fatalf("ps pgid: %v", err)
+	}
+	pgid, perr := strconv.Atoi(strings.TrimSpace(string(out)))
+	if perr != nil {
+		t.Fatalf("pgid parse %q: %v", out, perr)
+	}
+	if pgid != pid {
+		t.Fatalf("kernel pgid = %d, want %d (must lead its own process group)", pgid, pid)
 	}
 }
 
@@ -203,4 +234,62 @@ func assertSockPerm(t *testing.T, sockPath string, want os.FileMode) {
 	if info.Mode().Perm() != want {
 		t.Fatalf("sock perm = %o, want %o", info.Mode().Perm(), want)
 	}
+}
+
+// TestMonitorRespawnLogsALine（c8 ⑤）：Monitor 自愈 respawn 成功后必须落一行带时间
+// 戳的日志（"core: respawned by monitor (pid %d)"）。WHY 钉住：这条路径不经过服务的
+// spawnCore、原本零日志——2026-11-26 真机事故里"新内核凭空出现"无任何线索。stdout
+// 换变量截获（`go test -json` 下 testing 包把 os.Stderr 指到 os.Stdout，fd 层重定向
+// 截不到；service 包 captureServiceLog 同款原理）——换变量只在无并发写者的窗口内做：
+// Monitor 在测试协程同步执行，桩内核的输出走 logFile。
+func TestMonitorRespawnLogsALine(t *testing.T) {
+	dir := shortTempDir(t)
+	cfg := stubConfig(t, dir, "crash-after-ms", "FAKE_CORE_CRASH_MS=300")
+	cfg.RestartBackoff = []time.Duration{30 * time.Millisecond}
+	m := NewManager(cfg)
+	logPath := filepath.Join(dir, "stdout.log")
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev := os.Stdout
+	os.Stdout = f
+	if err := m.Spawn(); err != nil {
+		os.Stdout = prev
+		t.Fatalf("Spawn: %v", err)
+	}
+	if err := m.WaitReady(context.Background()); err != nil {
+		os.Stdout = prev
+		t.Fatalf("initial handshake: %v", err)
+	}
+	// 预算恰 1 次：崩溃 → 自愈 respawn 成功（此处应落日志）→ 再崩 → giveUp 返回
+	_ = m.Monitor(context.Background(), func(error) {})
+	os.Stdout = prev
+	if err := f.Close(); err != nil {
+		t.Fatalf("close captured stdout: %v", err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(data), "\n") != 1 {
+		t.Fatalf("the respawn window must log exactly one line, got:\n%s", data)
+	}
+	line := strings.TrimSuffix(string(data), "\n")
+	if len(line) < 20 {
+		t.Fatalf("log line too short for a timestamp: %q", line)
+	}
+	if _, err := time.Parse(logTimestamp, line[:19]); err != nil {
+		t.Fatalf("timestamp prefix %q does not parse as %q: %v", line[:19], logTimestamp, err)
+	}
+	rest := line[20:]
+	const want = "core: respawned by monitor (pid "
+	if !strings.HasPrefix(rest, want) || !strings.HasSuffix(rest, ")") {
+		t.Fatalf("log line = %q, want %q<pid>)", rest, want)
+	}
+	pid, perr := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(rest, want), ")"))
+	if perr != nil || pid != m.PID() {
+		t.Fatalf("logged pid = %d err %v, want mgr.PID() = %d", pid, perr, m.PID())
+	}
+	_ = m.Stop()
 }

@@ -350,3 +350,13 @@ private final class SetFailingRunner: CommandLineRunning, @unchecked Sendable {
         #expect(GeneralPaneLogic.intervalDisabled(type: nil) == false) // 旧 CLI 缺键：保守可用
     }
 }
+
+// MARK: - c8 ④（TUN 形态 allow-lan 开关置灰判定）
+
+@Suite struct AllowLanDisabledTests {
+    @Test func tunOnDisablesAllowLanSwitch() {
+        #expect(GeneralPaneLogic.allowLanDisabled(tunEnabled: true)) // TUN 开：置灰（服务端硬拒）
+        #expect(GeneralPaneLogic.allowLanDisabled(tunEnabled: false) == false)
+        #expect(GeneralPaneLogic.allowLanDisabled(tunEnabled: nil) == false) // 旧 CLI 缺键：保守可用
+    }
+}

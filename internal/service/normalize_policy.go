@@ -53,9 +53,17 @@ var strMaxKeys = map[string]int{
 
 // 直通·bool。
 var boolKeys = map[string]bool{
-	"allow-lan": true, "unified-delay": true, "ipv6": true, "tcp-concurrent": true,
+	"unified-delay": true, "ipv6": true, "tcp-concurrent": true,
 	"inbound-tfo": true, "inbound-mptcp": true, "etag-support": true,
 	"disable-keep-alive": true, "geodata-mode": true,
+}
+
+// 值条件拒绝·bool：键保留在允许面里（synth 每次都按 settings 注入这个键——整键拒绝
+// 会把合法的 false 一并打掉），但显式真值在 TUN 形态硬拒；false/缺省照旧放行。
+// WHY（2026-11-26 用户拍板）：真机发现 allow-lan: true 能经 settings → reload 推进
+// root 内核，局域网拿到一个无鉴权的代理端口——TUN 形态下面向局域网的开入站一律不收。
+var tunDeniedBoolKeys = map[string]bool{
+	"allow-lan": true,
 }
 
 // 直通·int ≥ 0。

@@ -22,7 +22,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"strings"
 	"unicode/utf8"
@@ -65,25 +64,25 @@ func (s *Server) commitRuntime(c ConfigFile, data []byte) error {
 func (s *Server) seedSnapshot(c ConfigFile) {
 	data, err := readSafe(RuntimeIn(c.CoreHome), os.Geteuid(), runtimeMaxBytes)
 	if errors.Is(err, os.ErrNotExist) {
-		fmt.Println("service: no runtime.yaml in core home yet; config snapshot stays empty until the first start")
+		svcOutf("service: no runtime.yaml in core home yet; config snapshot stays empty until the first start")
 		return
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "service: runtime seed skipped: %v\n", err)
+		svcErrf("service: runtime seed skipped: %v", err)
 		return
 	}
 	res, rej := NormalizeRuntime(data)
 	if rej != nil {
-		fmt.Fprintf(os.Stderr, "service: runtime seed skipped: %s\n", rejectionText(rej))
+		svcErrf("service: runtime seed skipped: %s", rejectionText(rej))
 		return
 	}
 	s.setSnapshot(res.Bytes)
 	if !bytes.Equal(data, res.Bytes) {
 		if werr := writeRuntime(c, res.Bytes); werr != nil {
-			fmt.Fprintf(os.Stderr, "service: runtime seed rewrite failed: %v\n", werr)
+			svcErrf("service: runtime seed rewrite failed: %v", werr)
 			return
 		}
-		fmt.Fprintf(os.Stderr, "service: runtime seed rewrote disk (%d -> %d bytes)\n", len(data), len(res.Bytes))
+		svcErrf("service: runtime seed rewrote disk (%d -> %d bytes)", len(data), len(res.Bytes))
 	}
 }
 
@@ -109,7 +108,7 @@ func (s *Server) restoreRuntime(c ConfigFile) error {
 		return err
 	}
 	// 一行日志、只带字节计数（配置内容绝不进日志）
-	fmt.Fprintf(os.Stderr, "service: runtime restored from snapshot (disk had %d bytes, snapshot %d bytes)\n",
+	svcErrf("service: runtime restored from snapshot (disk had %d bytes, snapshot %d bytes)",
 		len(cur), len(snap))
 	return nil
 }

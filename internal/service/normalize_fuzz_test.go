@@ -18,7 +18,7 @@ import (
 )
 
 func FuzzNormalize(f *testing.F) {
-	f.Add([]byte("mode: rule\nallow-lan: true\n"))
+	f.Add([]byte("mode: rule\nallow-lan: false\n")) // 真值形态（allow-lan: true）被 c8 ④ 拒，种子走接受路径
 	f.Add([]byte("proxies:\n  - name: n\n    type: ss\n    server: 1.2.3.4\n    port: 1\n    password: p\n"))
 	f.Add([]byte("tun: x\nexternal-controller: y\ndns:\n  listen: \"\"\n"))
 	f.Add([]byte("proxy-providers:\n  p:\n    type: http\n    url: https://x.invalid/a\n    path: ./p.yaml\n"))

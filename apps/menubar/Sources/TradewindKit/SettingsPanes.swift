@@ -162,12 +162,17 @@ struct GeneralPane: View {
                 NumberValueField(model: model, field: .gatewayPort, snapshot: settings)
             }
             rowDivider
-            SettingsRow(label: "允许局域网", subtitle: "允许局域网设备使用本代理") {
+            // c8 ④：TUN 形态下 allow-lan 真值在服务端归一化器硬拒 → 开关置灰 + 副标题
+            // 点明原因（表单信息用 settings get --json 现成的 tun_enabled，零契约改动）
+            SettingsRow(label: "允许局域网",
+                        subtitle: GeneralPaneLogic.allowLanDisabled(tunEnabled: settings.tunEnabled)
+                            ? "TUN 形态下不允许 allow-lan"
+                            : "允许局域网设备使用本代理") {
                 SwitchPill(isOn: Binding(
                     get: { settings.allowLan },
                     set: { newValue in Task { await model.setAllowLan(newValue) } }
                 ), small: true, accessibilityLabel: "允许局域网")
-                .disabled(model.busy)
+                .disabled(model.busy || GeneralPaneLogic.allowLanDisabled(tunEnabled: settings.tunEnabled))
             }
         }
     }

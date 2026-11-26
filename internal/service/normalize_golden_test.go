@@ -69,7 +69,7 @@ port: 7890
 socks-port: 7891
 redir-port: 7892
 tproxy-port: 7893
-allow-lan: true
+allow-lan: false
 unified-delay: true
 mode: rule
 log-level: info

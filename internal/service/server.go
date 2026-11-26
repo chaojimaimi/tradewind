@@ -123,10 +123,10 @@ func (s *Server) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("service: listening on %s (allowed_uids=%v)\n", s.cfg.SockPath, s.conf.AllowedUIDs)
+	svcOutf("service: listening on %s (allowed_uids=%v)", s.cfg.SockPath, s.conf.AllowedUIDs)
 	go s.acceptLoop(ln)
 	<-ctx.Done()
-	fmt.Println("service: shutting down...")
+	svcOutf("service: shutting down...")
 	s.stopCore()
 	s.broker.close() // 幂等：stopCore 已关过则 no-op（批⑥b §4.3）
 	_ = ln.Close()
@@ -163,7 +163,7 @@ func (s *Server) acceptLoop(ln net.Listener) {
 				return // 正常关停（Run 关闭 listener）
 			default:
 			}
-			fmt.Fprintf(os.Stderr, "service: accept: %v\n", err)
+			svcErrf("service: accept: %v", err)
 			return
 		}
 		go s.handleConn(conn)
@@ -175,18 +175,18 @@ func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 	uid, err := peerUID(conn)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "service: %v\n", err)
+		svcErrf("service: %v", err)
 		return
 	}
 	if !containsInt(s.conf.AllowedUIDs, uid) {
 		// 断连 + 计数日志（服务日志可见，评审 P3）：不回包不提示，直接断
-		fmt.Fprintf(os.Stderr, "service: rejected uid %d (not in allowed_uids)\n", uid)
+		svcErrf("service: rejected uid %d (not in allowed_uids)", uid)
 		return
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(requestReadTimeout))
 	line, err := bufio.NewReaderSize(conn, maxRequestLine).ReadString('\n')
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "service: uid %d read: %v\n", uid, err)
+		svcErrf("service: uid %d read: %v", uid, err)
 		return
 	}
 	req, err := DecodeRequest([]byte(line))
@@ -237,15 +237,15 @@ func (s *Server) handleStart(req Request) Response {
 	res, rej, err := loadNormalized(s.conf)
 	if rej != nil {
 		text := rejectionText(rej)
-		fmt.Fprintf(os.Stderr, "service: start refused: %s\n", text)
+		svcErrf("service: start refused: %s", text)
 		return Response{OK: false, Rejected: true, Error: text}
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "service: start refused: %v\n", err)
+		svcErrf("service: start refused: %v", err)
 		return Response{OK: false, Error: err.Error()}
 	}
 	if err := s.commitRuntime(s.conf, res.Bytes); err != nil {
-		fmt.Fprintf(os.Stderr, "service: start refused: %v\n", err)
+		svcErrf("service: start refused: %v", err)
 		return Response{OK: false, Error: err.Error()}
 	}
 	if err := s.spawnCore(); err != nil {
@@ -269,11 +269,11 @@ func (s *Server) handleReload() Response {
 	res, rej, err := loadNormalized(s.conf)
 	if rej != nil {
 		text := rejectionText(rej)
-		fmt.Fprintf(os.Stderr, "service: reload refused: %s\n", text)
+		svcErrf("service: reload refused: %s", text)
 		return Response{OK: false, Rejected: true, Error: text}
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "service: reload refused: %v\n", err)
+		svcErrf("service: reload refused: %v", err)
 		return Response{OK: false, Error: err.Error()}
 	}
 	s.mu.Lock()
@@ -283,17 +283,17 @@ func (s *Server) handleReload() Response {
 			return *resp
 		}
 		if err := s.commitRuntime(s.conf, res.Bytes); err != nil {
-			fmt.Fprintf(os.Stderr, "service: reload commit failed: %v\n", err)
+			svcErrf("service: reload commit failed: %v", err)
 			return Response{OK: false, Error: err.Error()}
 		}
-		fmt.Printf("service: reload pushed to kernel (%d bytes, %d keys ignored)\n", len(res.Bytes), len(res.Ignored))
+		svcOutf("service: reload pushed to kernel (%d bytes, %d keys ignored)", len(res.Bytes), len(res.Ignored))
 		return Response{OK: true, Ignored: res.Ignored}
 	}
 	if err := s.commitRuntime(s.conf, res.Bytes); err != nil {
-		fmt.Fprintf(os.Stderr, "service: reload commit failed: %v\n", err)
+		svcErrf("service: reload commit failed: %v", err)
 		return Response{OK: false, Error: err.Error()}
 	}
-	fmt.Printf("service: reload persisted (%d bytes, %d keys ignored; core not managed)\n", len(res.Bytes), len(res.Ignored))
+	svcOutf("service: reload persisted (%d bytes, %d keys ignored; core not managed)", len(res.Bytes), len(res.Ignored))
 	return Response{OK: true, Ignored: res.Ignored}
 }
 
@@ -314,16 +314,16 @@ func (s *Server) pushToKernel(payload []byte) *Response {
 			// 片段），它只回给调用方——那是用户自己的配置；不进 root 属主的
 			// 日志（I6）
 			text := "service: 内核拒绝新配置：" + kernelRejectMessage(se)
-			fmt.Fprintln(os.Stderr, "service: reload refused by kernel (status 400)")
+			svcErrf("service: reload refused by kernel (status 400)")
 			return &Response{OK: false, Rejected: true, Error: text}
 		}
 		// 其它状态码：响应体是内核自由文本，过一道闸再回给调用方（不复现 legacy 文案）
 		text := fmt.Sprintf("service: 内核推送失败（status %d）：%s", se.Code, sanitizeForLog(se.Body))
-		fmt.Fprintf(os.Stderr, "service: reload push failed (status %d)\n", se.Code)
+		svcErrf("service: reload push failed (status %d)", se.Code)
 		return &Response{OK: false, Error: text}
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "service: reload push failed: %v\n", err)
+		svcErrf("service: reload push failed: %v", err)
 		return &Response{OK: false, Error: err.Error()}
 	}
 	return nil
@@ -376,6 +376,6 @@ func writeResponse(conn net.Conn, resp Response) {
 		return
 	}
 	if _, err := conn.Write(append(line, '\n')); err != nil {
-		fmt.Fprintf(os.Stderr, "service: write response: %v\n", err)
+		svcErrf("service: write response: %v", err)
 	}
 }

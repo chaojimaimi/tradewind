@@ -40,15 +40,16 @@ var parseProxySourceTypes = []string{
 // 枚举键的键名（mode/log-level/…），choice 值只进 Reason 文案，不参与划分。
 func policySets() map[string]map[string]bool {
 	return map[string]map[string]bool{
-		"pinned":    pinnedKeys,
-		"port":      portKeys,
-		"enum":      setOf(enumKeys),
-		"strMax":    setOf(strMaxKeys),
-		"bool":      boolKeys,
-		"nonNegInt": nonNegIntKeys,
-		"seqStr":    seqStrKeys,
-		"struct":    structKeys,
-		"reject":    rejectKeys,
+		"pinned":        pinnedKeys,
+		"port":          portKeys,
+		"enum":          setOf(enumKeys),
+		"strMax":        setOf(strMaxKeys),
+		"bool":          boolKeys,
+		"tunDeniedBool": tunDeniedBoolKeys,
+		"nonNegInt":     nonNegIntKeys,
+		"seqStr":        seqStrKeys,
+		"struct":        structKeys,
+		"reject":        rejectKeys,
 	}
 }
 

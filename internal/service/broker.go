@@ -106,8 +106,9 @@ func (b *apiBroker) start(sockPath, kernelSock string, allowedUIDs []int) error 
 		MaxHeaderBytes:    brokerMaxHeaderBytes,
 		// WHY 不设 ReadTimeout/WriteTimeout：它们会让被劫持的 WebSocket 连接
 		//（/logs /traffic /connections）在超时后断流。慢请求由有界读兜底。
-		// ErrorLog 不带时间戳：与 service.log 里其余行同一种格式。
-		ErrorLog: log.New(os.Stderr, "", 0),
+		// ErrorLog 经时间戳化 io.Writer（svcLogWriter）：service.log 全部行统一带
+		// 时间戳（c8 ①，真机排障定位需要），log.New flags 留空由写入器统一格式。
+		ErrorLog: log.New(svcLogWriter(os.Stderr), "", 0),
 	}
 	b.srv = srv
 	b.path = sockPath
@@ -147,7 +148,7 @@ func (b *apiBroker) settle(srv *http.Server, err error, sockPath string) {
 	b.srv, b.path = nil, ""
 	_ = os.Remove(sockPath)
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
-		fmt.Fprintf(os.Stderr, "service: broker serve: %v\n", err)
+		svcErrf("service: broker serve: %v", err)
 	}
 }
 
@@ -231,14 +232,14 @@ func (l *authListener) Accept() (net.Conn, error) {
 		}
 		uid, uerr := peerUID(conn)
 		if uerr != nil {
-			fmt.Fprintf(os.Stderr, "service: %v\n", uerr)
+			svcErrf("service: %v", uerr)
 			_ = conn.Close()
 			continue
 		}
 		if !l.allowed[uid] {
 			// 断连 + 计数日志：不回包不提示，直接断（服务 socket 同语义）
 			_ = conn.Close()
-			fmt.Fprintf(os.Stderr, "service: broker rejected uid %d (not in allowed_uids)\n", uid)
+			svcErrf("service: broker rejected uid %d (not in allowed_uids)", uid)
 			continue
 		}
 		return conn, nil
@@ -272,7 +273,7 @@ func (h *brokerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// I6：未受信输入不原样进日志——方法/路径都过 routeLogText。WHY 记解码后的
 		// Path 而不是判定用的 RawPath：换行这类控制字符只有在解码形态里才现形、才会
 		// 被丢弃（RawPath 里它们是 %0A，字母数字落在白名单内反而被保留）。
-		fmt.Fprintf(os.Stderr, "service: broker denied %s %s\n",
+		svcErrf("service: broker denied %s %s",
 			routeLogText(r.Method), routeLogText(r.URL.Path))
 		writeBrokerJSON(w, http.StatusForbidden, brokerBlockedBody)
 		return
@@ -283,7 +284,7 @@ func (h *brokerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !modePatchAllowed(body) {
-			fmt.Fprintf(os.Stderr, "service: broker denied %s %s\n",
+			svcErrf("service: broker denied %s %s",
 				routeLogText(r.Method), routeLogText(r.URL.Path))
 			writeBrokerJSON(w, http.StatusForbidden, brokerBlockedBody)
 			return
@@ -338,7 +339,7 @@ func newBrokerReverseProxy(kernelSock string) *httputil.ReverseProxy {
 			// 客户端已断开（r.Context() 已取消）→ 只应答不记日志，防刷日志；
 			// 其余（上游拨号失败等）记一行净化后的错误。不回显 socket 路径。
 			if r.Context().Err() == nil {
-				fmt.Fprintf(os.Stderr, "service: broker upstream: %s\n", sanitizeForLog(err.Error()))
+				svcErrf("service: broker upstream: %s", sanitizeForLog(err.Error()))
 			}
 			writeBrokerJSON(w, http.StatusBadGateway, brokerUpstreamDown)
 		},

@@ -218,3 +218,20 @@ func TestNormalizeScalarValueChecks(t *testing.T) {
 		rejectAt(t, tc.in, tc.wantKey)
 	}
 }
+
+// TestNormalizeAllowLanValueConditional（c8 ④）：allow-lan 是值条件拒绝键——显式
+// 真值在 TUN 形态硬拒（真机发现 root 内核可被局域网无鉴权使用，2026-11-26 用户
+// 拍板）；false/缺省照旧放行（synth 每次都按 settings 注入这个键，整键拒绝会打掉
+// 合法注入）。"true" 字符串形态仍被 bool 类型检查拒绝（与既有 bool 处理一致，见
+// TestNormalizeScalarValueChecks 的 "bool as string" 用例）——两种形态都到不了内核。
+func TestNormalizeAllowLanValueConditional(t *testing.T) {
+	for _, lit := range []string{"true", "True", "TRUE"} {
+		rej := rejectAt(t, "mode: rule\nallow-lan: "+lit+"\n", "allow-lan")
+		if rej.Reason != "allow-lan is not allowed in TUN mode" {
+			t.Fatalf("allow-lan: %s reason = %q, want the TUN-mode policy wording", lit, rej.Reason)
+		}
+	}
+	mustAccept(t, "mode: rule\nallow-lan: false\n")
+	mustAccept(t, "mode: rule\n") // 缺省：放行
+	rejectAt(t, "mode: rule\nallow-lan: \"true\"\n", "allow-lan")
+}

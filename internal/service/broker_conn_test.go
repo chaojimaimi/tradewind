@@ -306,9 +306,12 @@ func TestBrokerDeniedLogIsSanitized(t *testing.T) {
 	if !strings.Contains(string(logData), wantLine) {
 		t.Fatalf("log must contain the truncated line %q:\n%s", wantLine, logData)
 	}
+	// 行首带时间戳（c8 ①）：路径长度只对 "service: broker denied GET " 之后、换行
+	// 之前的部分计量——时间戳与 "service: " 前缀不在计量内
 	for _, line := range strings.Split(string(logData), "\n") {
-		if strings.HasPrefix(line, "service: broker denied GET /") && len(line) > len("service: broker denied GET ")+brokerRouteLogMax {
-			t.Fatalf("denied path in the log exceeds %d bytes: %q (%d bytes)", brokerRouteLogMax, line, len(line))
+		rest, ok := strings.CutPrefix(line, "service: broker denied GET ")
+		if ok && len(rest) > brokerRouteLogMax {
+			t.Fatalf("denied path in the log exceeds %d bytes: %q (%d bytes)", brokerRouteLogMax, line, len(rest))
 		}
 	}
 }

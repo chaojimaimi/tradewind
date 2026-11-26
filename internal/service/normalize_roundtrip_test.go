@@ -50,17 +50,17 @@ func roundTripCorpus() map[string]string {
 		"str keys quoted":           "bind-address: \"*\"\ninterface-name: 'en0'\nsecret: ''\nglobal-ua: \"Clash\\nv1\"\nglobal-client-fingerprint: \"random\"\n",
 		"seq of str quoted":         "authentication: [\"user:pass\", 'a b', \"\", \"null\", \"#x\", \"a,b\", \"[x]\", \"- x\"]\nlan-allowed-ips: ['::1/128', \"0.0.0.0/0\"]\n",
 		// 注释：随节点走，不得改变结构；钉死键值节点上的注释随节点一起被替换掉
-		"comments everywhere":     "# head of doc\n# second head line\nmode: rule # line comment\nallow-lan: true\n# head of dns\ndns:\n  enable: true # inline\n  # comment between\n  listen: \"\"\n  nameserver:\n    # comment in seq\n    - 223.5.5.5 # trailing\n    - 1.1.1.1\n  # foot of nameserver\nhosts:\n  a: 1 # c1\n  b: 2\n# standalone with: colon and - dash and \"quotes\"\n# --- looks like doc start\n# ...\n#\t tab indented comment\nprofile:\n  store-selected: true\n# tail comment without newline",
+		"comments everywhere":     "# head of doc\n# second head line\nmode: rule # line comment\nallow-lan: false\n# head of dns\ndns:\n  enable: true # inline\n  # comment between\n  listen: \"\"\n  nameserver:\n    # comment in seq\n    - 223.5.5.5 # trailing\n    - 1.1.1.1\n  # foot of nameserver\nhosts:\n  a: 1 # c1\n  b: 2\n# standalone with: colon and - dash and \"quotes\"\n# --- looks like doc start\n# ...\n#\t tab indented comment\nprofile:\n  store-selected: true\n# tail comment without newline",
 		"comment on pinned value": "tun: # user comment on tun\n  enable: false\nmode: rule\nexternal-controller: 1.2.3.4:9090 # ec comment\nhosts: {a: 1}\n",
 		// 文档级形态
-		"doc markers":               "---\nmode: rule\nallow-lan: true\n...\n",
+		"doc markers":               "---\nmode: rule\nallow-lan: false\n...\n",
 		"doc markers with comments": "# before\n--- # after start\nmode: rule\n... # after end\n",
 		// %TAG 把 !! 指向别处：普通标量仍解析为核心 tag，接受；产物不得携带指令
 		"tag directive redefining !!": "%TAG !! tag:example.com,2000:app/\n---\nmode: rule\nhosts: {a: 1, b: x}\n",
 		"empty mapping":               "{}\n",
 		"empty flow spaced":           "{ }\n",
 		"only pinned keys":            "tun: x\nexternal-controller: y\n",
-		"crlf":                        "mode: rule\r\nallow-lan: true\r\nhosts:\r\n  a: 1\r\n",
+		"crlf":                        "mode: rule\r\nallow-lan: false\r\nhosts:\r\n  a: 1\r\n",
 		"bom":                         "\xef\xbb\xbfmode: rule\n",
 		"no trailing newline":         "mode: rule",
 		"indent 4":                    "dns:\n    enable: true\n    nameserver:\n        - 223.5.5.5\n    listen: \"\"\n",

@@ -60,6 +60,14 @@ enum GeneralPaneLogic {
         guard let type else { return false }
         return type != "remote"
     }
+
+    /// c8 ④：TUN 形态下"允许局域网"开关置灰——allow-lan 真值在服务端归一化器被硬拒
+    /// （2026-11-26 真机发现 root 内核可被局域网无鉴权使用，用户拍板），推送注定被拒。
+    /// tunEnabled 为 nil（旧 CLI 缺键）按未开启处理：保守可用口径，与 intervalDisabled
+    /// 的缺省语义一致（不误禁旧 CLI 场景）。
+    static func allowLanDisabled(tunEnabled: Bool?) -> Bool {
+        tunEnabled == true
+    }
 }
 
 /// 通用页 number 字段元数据（键名与 Go settings set 白名单对齐，范围同 Validate）。

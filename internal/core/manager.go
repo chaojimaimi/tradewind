@@ -156,6 +156,13 @@ func (m *Manager) start(monitor bool) error {
 		"-ext-ctl-unix", m.cfg.SockPath)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
+	// WHY 独立进程组（c8 ②，2026-11-26 真机实测）：launchd 重启作业时会清理死作业的
+	// 遗留进程，内核若与服务同进程组，会在新服务实例的收编检查之前被一并带走——
+	// adoptOrphans 永远见不到活孤儿。Setpgid 让内核自成一组（pgid == pid），只随
+	// Stop() 的显式信号退出；SIGTERM/SIGKILL 按 pid 发（Process.Signal/Kill），
+	// 不受 Setpgid 影响。用户域 `tradewind start` 的前台 Ctrl+C 链路同样不受影响：
+	// start 进程自己收 SIGINT → mgr.Stop → 按 pid 发。
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if m.cfg.Env != nil {
 		cmd.Env = m.cfg.Env
 	}
@@ -288,6 +295,10 @@ func (m *Manager) Monitor(ctx context.Context, onGiveUp func(error)) error {
 			// fail-fast：进程又立即崩溃 → 回到顶部继续消耗预算
 			continue
 		}
+		// 自愈 respawn 成功补一行日志（c8 ⑤，2026-11-26 真机实录）：这条路径不经过
+		// 服务的 spawnCore、原本零日志——排障时"新内核凭空出现"无任何线索。格式族
+		// 与服务侧 "core spawned" 一致（时间戳行，见 logline.go 的格式约定）。
+		coreOutf("core: respawned by monitor (pid %d)", m.PID())
 	}
 }
 
@@ -347,7 +358,7 @@ func (m *Manager) isStopping() bool {
 func (m *Manager) removeSock() {
 	if err := os.Remove(m.cfg.SockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		// sock 清理失败不影响停止流程；目录 700 下残留 sock 无安全面，下次 mihomo listen 前自清
-		fmt.Fprintf(os.Stderr, "core: remove sock %s: %v\n", m.cfg.SockPath, err)
+		coreErrf("core: remove sock %s: %v", m.cfg.SockPath, err)
 	}
 }
 

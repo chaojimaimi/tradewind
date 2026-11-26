@@ -170,7 +170,7 @@ const geoSyncMaxBytes = 256 << 20
 func syncGeo(c ConfigFile) {
 	for _, name := range geoSyncNames {
 		if err := syncOneGeo(c, name); err != nil {
-			fmt.Fprintf(os.Stderr, "service: geo sync skipped %s: %v\n", name, err)
+			svcErrf("service: geo sync skipped %s: %v", name, err)
 		}
 	}
 }

@@ -493,6 +493,12 @@ func TestTunOffIdempotent(t *testing.T) {
 func TestTunStatusLines(t *testing.T) {
 	home := paths.Home(stubSocketDir(t))
 	seedTunOffHome(t, home)
+	// "未安装"分支不得依赖本机状态：真机上可能真的装了服务（2026-11-26 实录——装完
+	// 服务后本用例读到真实锚，降级分支永不触发）。先钉死缝隙再调。
+	oldCfg := tunServiceConfigPath
+	tunServiceConfigPath = filepath.Join(home.String(), "absent-service.json")
+	t.Cleanup(func() { tunServiceConfigPath = oldCfg })
+
 	lines, err := tunStatusLines(home)
 	if err != nil {
 		t.Fatalf("tunStatusLines: %v", err)
@@ -506,13 +512,11 @@ func TestTunStatusLines(t *testing.T) {
 	old := tunNewClient
 	tunNewClient = func(time.Duration) (tunServiceClientT, error) { return svc, nil }
 	t.Cleanup(func() { tunNewClient = old })
-	oldCfg := tunServiceConfigPath
 	anchor := filepath.Join(home.String(), "service.json")
 	if err := os.WriteFile(anchor, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	tunServiceConfigPath = anchor
-	t.Cleanup(func() { tunServiceConfigPath = oldCfg })
 
 	lines, err = tunStatusLines(home)
 	if err != nil {

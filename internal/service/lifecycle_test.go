@@ -152,6 +152,124 @@ func TestOrphanReclaimedWithoutSnapshotStaysDown(t *testing.T) {
 	}
 }
 
+// TestOrphanDeadPIDRecordRespawnsFromSnapshot (L2/c8 ③)：core.pid 记录指向已死 pid
+// → 服务启动时按快照重拉。这正是真机缺陷形态（2026-11-26）：内核被 launchd 对死
+// 作业的清理带走晚于服务被拉回、早于收编检查——旧实现死分支直接 return，服务停在
+// "running, no managed core" 半态；有快照说明上一会话在跑，恢复它是既有设计意图。
+func TestOrphanDeadPIDRecordRespawnsFromSnapshot(t *testing.T) {
+	dir := shortTempDir(t)
+	cfg, conf := writeServiceFixture(t, dir)
+	// 预置 R 为当前归一化器的合法产物（属主 = 当前用户）→ L1 种子据此采纳快照
+	seed, rej := NormalizeRuntime([]byte("proxies: []\n"))
+	if rej != nil {
+		t.Fatalf("seed normalize rejected at %s: %s", rej.Key, rej.Reason)
+	}
+	if err := os.WriteFile(RuntimeIn(conf.CoreHome), seed.Bytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// 造一个"已死 pid 记录"：Run 收尸过的进程 pid 必然不在（ESRCH）
+	dead := exec.Command("true")
+	if err := dead.Run(); err != nil {
+		t.Fatalf("run true: %v", err)
+	}
+	if processAlive(dead.Process.Pid) {
+		t.Skipf("pid %d unexpectedly alive (reused); not a dead-record fixture", dead.Process.Pid)
+	}
+	if err := os.WriteFile(cfg.PIDPath, []byte(fmt.Sprintf("%d\n", dead.Process.Pid)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	startStubServer(t, cfg)
+	// 死分支也重拉：core.pid 记录新内核、原生 sock 可达（不再是半态）
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(cfg.PIDPath)
+		if err == nil {
+			var newPID int
+			if _, perr := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &newPID); perr == nil &&
+				newPID > 0 && newPID != dead.Process.Pid && processAlive(newPID) && probeAlive(conf.KernelSock) {
+				// L5 核对通过：重拉后的 R 仍是种子字节（未被回写）
+				staged, rerr := os.ReadFile(RuntimeIn(conf.CoreHome))
+				if rerr != nil || !bytes.Equal(staged, seed.Bytes) {
+					t.Fatalf("runtime.yaml after the dead-branch respawn = %q err %v, want the seeded bytes", staged, rerr)
+				}
+				return
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("the service must respawn from the snapshot when core.pid points at a dead kernel (15s)")
+}
+
+// TestOrphanStaleButAliveRecordReclaimedOnlyOnMatch (L2/c8 ③)：pid 复用防护保留——
+// 记录指向的 pid 活着但身份不符（命令行不含 -d <core_home>）= 内核已不在（记录是
+// 陈旧的）→ 不回收（绝不 SIGTERM 一个不相干进程）、但照新逻辑按快照重拉。本用例用
+// 测试进程自身的 pid 当"活而不符"记录：若回归成"活即回收"，测试进程会收到 SIGTERM
+// 而当场死掉。
+func TestOrphanStaleButAliveRecordReclaimedOnlyOnMatch(t *testing.T) {
+	dir := shortTempDir(t)
+	cfg, conf := writeServiceFixture(t, dir)
+	seed, rej := NormalizeRuntime([]byte("proxies: []\n"))
+	if rej != nil {
+		t.Fatalf("seed normalize rejected at %s: %s", rej.Key, rej.Reason)
+	}
+	if err := os.WriteFile(RuntimeIn(conf.CoreHome), seed.Bytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// 活但身份不符的记录：测试进程自己的命令行是 go test / 本包测试二进制，绝不含
+	// "-d <core_home>"
+	if err := os.WriteFile(cfg.PIDPath, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	startStubServer(t, cfg)
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(cfg.PIDPath)
+		if err == nil {
+			var newPID int
+			if _, perr := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &newPID); perr == nil &&
+				newPID > 0 && newPID != os.Getpid() && processAlive(newPID) && probeAlive(conf.KernelSock) {
+				return
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("a stale-alive record must be respawned over from the snapshot (without reclaiming the mismatched pid)")
+}
+
+// TestNoPIDRecordStartsNoCore (L2/c8 ③ 回归锚)：没有 core.pid 记录（文件不存在）→
+// 完全维持现状——即使快照在也不自发拉核（全新安装不自己长出内核，等用户域 start）。
+func TestNoPIDRecordStartsNoCore(t *testing.T) {
+	dir := shortTempDir(t)
+	cfg, conf := writeServiceFixture(t, dir)
+	// 快照在（R 合法 → L1 种子采纳），但无 pid 记录
+	seed, rej := NormalizeRuntime([]byte("proxies: []\n"))
+	if rej != nil {
+		t.Fatalf("seed normalize rejected at %s: %s", rej.Key, rej.Reason)
+	}
+	if err := os.WriteFile(RuntimeIn(conf.CoreHome), seed.Bytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	startStubServer(t, cfg)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if probeAlive(conf.KernelSock) {
+			t.Fatal("no core may spawn without a core.pid record (fresh install stays core-less)")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if _, err := os.Stat(cfg.PIDPath); !os.IsNotExist(err) {
+		t.Fatalf("core.pid must stay absent without a record (err = %v)", err)
+	}
+	cl := NewClient(cfg.SockPath, 10*time.Second)
+	st, err := cl.Status()
+	if err != nil || !st.OK || st.PID != 0 {
+		t.Fatalf("Status = %+v err %v, want ok pid=0 (service up, no core)", st, err)
+	}
+}
+
 // TestSelfHealRestoresRuntimeFromSnapshot (L5 经 Monitor 自愈路径)：运行中 R 被篡改
 // → SIGKILL 内核 → 自愈 respawn 的 PreSpawn 钩子按快照把磁盘补回。
 func TestSelfHealRestoresRuntimeFromSnapshot(t *testing.T) {
