@@ -57,28 +57,53 @@ func seedIndex(t *testing.T, home paths.Home, selected []store.ProxySelection) s
 }
 
 func TestUpsertSelection(t *testing.T) {
-	sels := upsertSelection(nil, "G1", "n1")
-	sels = upsertSelection(sels, "G2", "n2")
-	sels = upsertSelection(sels, "G1", "n9")
+	sels := upsertSelection(nil, "G1", "n1", false)
+	sels = upsertSelection(sels, "G2", "n2", true)
+	sels = upsertSelection(sels, "G1", "n9", true)
 	if len(sels) != 2 || sels[0].Group != "G1" || sels[0].Node != "n9" {
 		t.Fatalf("upsert result = %+v, want G1 updated in place", sels)
 	}
+	if !sels[0].Pinned || !sels[1].Pinned {
+		t.Fatalf("pinned flags = %+v, want carried into the records", sels)
+	}
 }
 
-func TestSelectionsFromFiltersAndSorts(t *testing.T) {
+// TestSelectionsFromRecordsPinnedAndTrailingGlobal 快照记 pinned + GLOBAL 追加在末尾
+// （批⑥b §4.8）：Selector 记 now、fixed 非空的 URLTest/Fallback 记 pinned=true、
+// 未固定的自动组无标记；其余组的排序不变；对得到的新列表，resolveDelayGroup 的
+// 取组结果与改动前相同（首条，GLOBAL 在末尾不抢首条）。
+func TestSelectionsFromRecordsPinnedAndTrailingGlobal(t *testing.T) {
 	proxies := map[string]core.Proxy{
-		"GLOBAL": {Name: "GLOBAL", Type: "Selector", Now: "x"}, // 聚合组必须排除
+		"GLOBAL": {Name: "GLOBAL", Type: "Selector", Now: "组A"}, // 聚合组：只记在末尾
 		"B组":     {Name: "B组", Type: "Selector", Now: "node-b"},
-		"A组":     {Name: "A组", Type: "URLTest", Now: ""}, // now 空：未选择不记录
-		"node-a": {Name: "node-a", Type: "Socks5"},
-		"C组":     {Name: "C组", Type: "Fallback", Now: "node-c"},
+		"A组":     {Name: "A组", Type: "URLTest", Now: "", Fixed: "node-a"}, // now 空：未选择不记录
+		"C组":     {Name: "C组", Type: "URLTest", Now: "node-c", Fixed: "node-c"},
+		"D组":     {Name: "D组", Type: "Fallback", Now: "node-d", Fixed: "node-d"},
+		"E组":     {Name: "E组", Type: "URLTest", Now: "node-e"}, // 未固定自动组：无标记
+		"node-b": {Name: "node-b", Type: "Socks5"},
 	}
 	sels := selectionsFrom(proxies)
-	if len(sels) != 2 || sels[0].Group != "B组" || sels[0].Node != "node-b" {
-		t.Fatalf("selections = %+v, want B组/C组 sorted without GLOBAL", sels)
+	want := []store.ProxySelection{
+		{Group: "B组", Node: "node-b"},
+		{Group: "C组", Node: "node-c", Pinned: true},
+		{Group: "D组", Node: "node-d", Pinned: true},
+		{Group: "E组", Node: "node-e"},
+		{Group: "GLOBAL", Node: "组A"},
 	}
-	if sels[1].Group != "C组" {
-		t.Fatalf("selections[1] = %+v", sels[1])
+	if len(sels) != len(want) {
+		t.Fatalf("selections = %+v, want %+v", sels, want)
+	}
+	for i := range want {
+		if sels[i] != want[i] {
+			t.Fatalf("selections[%d] = %+v, want %+v (full: %+v)", i, sels[i], want[i], sels)
+		}
+	}
+	// 新列表上 resolveDelayGroup 取首条的语义不变
+	home := paths.Home(stubSocketDir(t))
+	seedIndex(t, home, sels)
+	g, err := resolveDelayGroup(home, proxies, "")
+	if err != nil || g != "B组" {
+		t.Fatalf("delay group = %q err %v, want first entry 组名 B组", g, err)
 	}
 }
 
@@ -86,6 +111,10 @@ func TestSelectRecordsOnSuccessNotOnFailure(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"version":"stub"}`))
+	})
+	mux.HandleFunc("/proxies", func(w http.ResponseWriter, r *http.Request) {
+		// Select 的补读（批⑥b §4.8）：组是 Selector → pinned=false
+		w.Write([]byte(`{"proxies":{"🚀 组":{"name":"🚀 组","type":"Selector","now":"节点-B"}}}`))
 	})
 	mux.HandleFunc("/proxies/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/bad") {
@@ -121,8 +150,9 @@ func TestSelectRecordsOnSuccessNotOnFailure(t *testing.T) {
 }
 
 // TestUnpinSendsDeleteAndValidatesArgs 锁定 v0.4.16 unpin 链路：DELETE /proxies/{group}
-// 且组名 PathEscape（emoji 组名）；空组名显式报错；unpin 不回写 profiles（固定态是
-// 内核运行时状态，无"期望选择"需持久化）。
+// 且组名 PathEscape（emoji 组名）；空组名显式报错。本用例 home 无 profiles.yaml
+// （无 current 订阅），回写 pinned 的分支无事可做（批⑥b §4.8 的回写用例见
+// TestUnpinClearsPinned）。
 func TestUnpinSendsDeleteAndValidatesArgs(t *testing.T) {
 	var gotMethod, gotPath string
 	mux := http.NewServeMux()
@@ -205,8 +235,12 @@ func TestSnapshotSelectedWritesGroups(t *testing.T) {
 	}
 	idx2, _ := store.LoadIndex(home)
 	got := idx2.Items[0].Selected
-	if len(got) != 2 || got[0].Group != "组A" || got[0].Node != "JP-1" || got[1].Group != "组B" {
-		t.Fatalf("snapshot record = %+v, want 组A/组B without GLOBAL and without stale", got)
+	// GLOBAL 存在且 now 非空：批⑥b §4.8 起追加在末尾（组A 是无 fixed 的 URLTest、组B 是
+	// Selector——都不带 pinned）
+	if len(got) != 3 || got[0].Group != "组A" || got[0].Node != "JP-1" || got[0].Pinned ||
+		got[1].Group != "组B" || got[1].Pinned ||
+		got[2].Group != "GLOBAL" || got[2].Node != "组A" || got[2].Pinned {
+		t.Fatalf("snapshot record = %+v, want 组A/组B sorted + GLOBAL trailing, none pinned, no stale", got)
 	}
 }
 

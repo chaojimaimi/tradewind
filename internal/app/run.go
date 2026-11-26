@@ -158,6 +158,9 @@ func postHandshake(ctx context.Context, home paths.Home, mgr *core.Manager, tunP
 		pid = mgr.PID()
 	}
 	st.Core = store.CoreState{Desired: store.DesiredRunning, PID: pid, Generation: generation, Tun: settings.TunEnabled}
+	// last_form 随同一次 SaveState 落盘（批⑥b §4.8）——跨形态接力的判定键。放顶层
+	// 不放 core：markStopped 整体重建 core 会清掉它；顶层跨停机、跨重启都在。
+	st.LastForm = formName(settings.TunEnabled)
 	if !opts.ApplySysProxy {
 		st.SysProxy.Applied = false
 	}

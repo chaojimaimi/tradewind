@@ -43,9 +43,12 @@ type DelaySample struct {
 
 // Proxy 是 GET /proxies 的单条目（字段裁剪到 M1 所需）。
 type Proxy struct {
-	Name    string        `json:"name"`
-	Type    string        `json:"type"`
-	Now     string        `json:"now"`
+	Name string `json:"name"`
+	Type string `json:"type"`
+	Now  string `json:"now"`
+	// Fixed 是自动组（URLTest/Fallback）被手动 PUT 固定的节点（M16）：
+	// 非空 = 该组当前被手动固定，快照侧据此记 pinned；Selector 组无此字段。
+	Fixed   string        `json:"fixed"`
 	All     []string      `json:"all"`
 	History []DelaySample `json:"history"`
 }

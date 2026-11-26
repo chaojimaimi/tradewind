@@ -75,6 +75,10 @@ type CoreState struct {
 type State struct {
 	Core     CoreState     `json:"core"`
 	SysProxy SysProxyState `json:"sys_proxy"`
+	// LastForm 是最近一次成功启动的会话形态（"tun" 或 "user"；批⑥b §4.8）。
+	// WHY 放顶层而不放进 core 对象：markStopped 会整体重建 core，放进去会被清掉；
+	// 放顶层则跨停机、跨重启都在。旧文件无此键 = 空 = 首次启动。
+	LastForm string `json:"last_form,omitempty"`
 }
 
 // DefaultState 返回"无残留"的初始状态。

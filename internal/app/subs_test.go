@@ -85,8 +85,10 @@ func TestUseSwitchesCurrentSnapshotsAndReloads(t *testing.T) {
 		t.Fatalf("current = %q, want new02", idx.Current)
 	}
 	old := idx.Items[0]
-	if len(old.Selected) != 1 || old.Selected[0].Group != "组A" || old.Selected[0].Node != "HK-1" {
-		t.Fatalf("old subscription snapshot = %+v, want 组A/HK-1 recorded before switch", old.Selected)
+	// GLOBAL 存在且 now 非空：批⑥b §4.8 起快照在末尾追加 GLOBAL
+	if len(old.Selected) != 2 || old.Selected[0].Group != "组A" || old.Selected[0].Node != "HK-1" ||
+		old.Selected[1].Group != "GLOBAL" {
+		t.Fatalf("old subscription snapshot = %+v, want 组A/HK-1 + trailing GLOBAL recorded before switch", old.Selected)
 	}
 	// 热重载发生：PUT /configs；且 runtime.yaml 已按新订阅重合成
 	if len(reloads) != 1 || reloads[0] != http.MethodPut {

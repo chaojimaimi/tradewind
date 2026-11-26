@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/chaojimaimi/tradewind/internal/core"
 	"github.com/chaojimaimi/tradewind/internal/paths"
 	"github.com/chaojimaimi/tradewind/internal/service"
 	"github.com/chaojimaimi/tradewind/internal/store"
@@ -81,6 +82,10 @@ func startCoreViaService(ctx context.Context, home paths.Home, secret string) (i
 	if !waitCoreReady(formSockPath(true, home), secret, 10*time.Second) {
 		return 0, errors.New("app: core.sock not ready after service start")
 	}
+	// 跨形态接力（批⑥b §4.8）：必须在 postHandshake 写 last_form 之前判定；socket
+	// 显式按本次形态拨代理入口（coreClient 照 state 取，此刻 state 还是上一会话
+	// 的形态，会拨到用户态路径）。
+	replayIfFormChanged(ctx, home, core.NewClient(formSockPath(true, home), secret), formNameTun)
 	fmt.Printf("core spawned via service (pid %d, root)\n", resp.PID)
 	return resp.PID, nil
 }

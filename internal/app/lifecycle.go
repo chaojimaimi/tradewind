@@ -95,6 +95,10 @@ func startCore(home paths.Home, secret string) (*core.Manager, error) {
 		_ = mgr.Stop() // 握手失败也必须回收进程并清理 sock
 		return nil, err
 	}
+	// 跨形态接力（批⑥b §4.8）：必须在 postHandshake 写 last_form 之前判定（要读的
+	// 是上一会话的形态）；socket 显式给用户态路径——此刻 state 仍是上一会话的形态，
+	// coreClient（照 state 取）会拨到另一形态的路径。
+	replayIfFormChanged(context.Background(), home, core.NewClient(home.SockFile(), secret), formNameUser)
 	return mgr, nil
 }
 

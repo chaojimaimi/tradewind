@@ -25,10 +25,15 @@ type ExtraInfo struct {
 	Expire   int64 `yaml:"expire" json:"expire"`
 }
 
-// ProxySelection 预留 M1 的节点选择持久化结构（对齐 DESIGN §5.2），M0 不使用。
+// ProxySelection 是 profiles.yaml 里单个策略组的选择记录（M1 启用，对齐 DESIGN §5.2）。
 type ProxySelection struct {
 	Group string `yaml:"group" json:"group"`
 	Node  string `yaml:"node" json:"node"`
+	// Pinned：该记录来自一个被手动固定过的自动组（URLTest/Fallback，内核 fixed 非空，
+	// M16）。只有带它的记录，跨形态重放才会对自动组下 PUT——未固定的自动组重放
+	// now 会把自动测速钉死在快照那一刻的节点上（批⑥b §4.8）。
+	// 向后兼容：旧文件无此键 = 未固定。
+	Pinned bool `yaml:"pinned,omitempty" json:"pinned,omitempty"`
 }
 
 // ProfileItem 是 profiles.yaml.items[] 的单个订阅条目。
