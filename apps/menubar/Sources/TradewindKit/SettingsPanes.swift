@@ -290,7 +290,7 @@ struct GeneralPane: View {
 
     /// 「网络代理」区：内容见 ProxySectionContent——PAC 模式开关 + 绕过域名编辑行始终
     /// 在，TUN 模式行仅当功能开关 `FeatureFlags.privilegedTUN` 为 true 时参与装配
-    /// （M3 batch6 release-gate：R16 闭环前隐藏）。
+    /// （M3 batch6 release-gate；批⑥b 阶段二已随 R16 闭环 + §8 真机验证通过置 true 开放）。
     private var proxySection: some View {
         SettingsSection(title: "网络代理") {
             ProxySectionContent(proxyModeModel: proxyModeModel)
@@ -339,8 +339,8 @@ enum ProxySectionLayout {
 /// gateway_port 仅警告联动，由 Go 侧编排。
 struct ProxySectionContent: View {
     @ObservedObject var proxyModeModel: ProxyModeModel
-    /// TUN 行是否参与装配：生产默认取功能开关（R16 闭环前隐藏）；测试显式传 false/true
-    /// 做渲染结构对比。WHY var：带默认值的 `let` 被排除出合成 memberwise init。
+    /// TUN 行是否参与装配：生产默认取功能开关（批⑥b 阶段二已置 true）；测试显式传
+    /// false/true 做渲染结构对比。WHY var：带默认值的 `let` 被排除出合成 memberwise init。
     var includeTUN = FeatureFlags.privilegedTUN
     @Environment(\.colorScheme) private var scheme
 
@@ -368,8 +368,8 @@ struct ProxySectionContent: View {
     }
 
     /// TUN 模式行（`tun on|off` 编排，首装含提权弹窗；与系统代理为独立开关，切换不
-    /// 改用户意图，由 CLI 编排精确恢复）：功能开关关闭时不进装配序列——行与其模型/
-    /// 桥接层一并有意保留（见 FeatureFlags.privilegedTUN），加固后置 true 即重新可达。
+    /// 改用户意图，由 CLI 编排精确恢复）：行随功能开关进退（见
+    /// FeatureFlags.privilegedTUN，批⑥b 阶段二已置 true 开放）。
     private var tunRow: some View {
         SettingsRow(label: "TUN 模式",
                     subtitle: "root 特权服务托管内核（首次开启安装服务并弹管理员授权）") {

@@ -303,7 +303,7 @@ func tunProbeServiceCore(ctx context.Context, home paths.Home) (int, error) {
 
 // TunStatus 编排 `tradewind tun status`（§2.2）：合并——settings.tun_enabled /
 // 服务 status（未安装=清晰降级文案）/ helper 与 root 内核副本两项陈旧状态（R4）/
-// core.sock 健康 / 联锁状态。诊断面，不受联锁约束。
+// core.sock 健康。诊断面。
 func TunStatus(home paths.Home) error {
 	lines, err := tunStatusLines(home)
 	if err != nil {
@@ -334,19 +334,14 @@ func tunStatusLines(home paths.Home) ([]string, error) {
 	} else {
 		lines = append(lines, "core.sock:  unreachable")
 	}
-	// 联锁状态（tun_interlock.go）：受控命令默认拒绝这一事实要在诊断面如实可见
-	return append(lines, tunInterlockStatusLine()), nil
+	// 联锁已随 TUN 开放整体移除（批⑥b 阶段二）：诊断面不再有 interlock 行
+	return lines, nil
 }
 
-// tunNotInstalledLine 未安装行按联锁状态分两态（批⑥b §4.7 终审 P3-③）：联锁开着
-// → 既有安装指引不变；关着 → 点明受控命令默认拒绝与本机自测的确认出口（环境变量
-// 名与值复用联锁常量，不写第二份字面量）。
+// tunNotInstalledLine 未安装行的安装指引（联锁两态已随 TUN 开放收敛为单态——
+// 批⑥b §4.7 终审 P3-③ 的"默认拒绝"分支随之消亡）。
 func tunNotInstalledLine() string {
-	if tunInterlockOpen() {
-		return "service:    not installed（`tradewind tun install` 安装特权服务；`tun on` 会自动安装）"
-	}
-	return fmt.Sprintf("service:    not installed（联锁关闭：`tradewind tun install` 与 `tun on` 默认拒绝；本机自测需显式确认 %s=%s）",
-		tunInterlockAllowEnv, tunInterlockAllowVal)
+	return "service:    not installed（`tradewind tun install` 安装特权服务；`tun on` 会自动安装）"
 }
 
 func tunServiceStatusLine() []string {

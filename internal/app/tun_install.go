@@ -32,29 +32,23 @@ const tunElevateTimeout = 120 * time.Second
 
 // TunInstall 编排 `tradewind tun install`（幂等）：已装且 helper 与 root 内核副本
 // 均与当前一致 → no-op；否则生成脚本 → 提权执行 → 安装验证。本函数在测试中永远
-// 经桩 elevate，绝不真实提权。受联锁约束：未显式确认风险即拒绝，此前不拿任何资源。
+// 经桩 elevate，绝不真实提权。
 func TunInstall(home paths.Home) error {
-	if err := requireTunInterlockOpen("install"); err != nil {
-		return err
-	}
 	return tunInstallWith(home, productionTunEnv(home), false)
 }
 
 // TunReinstall 编排 `tradewind tun reinstall`（R4 陈旧修复）：强制重拷 helper + 内核
 // root 副本 + helper install + bootstrap（重装前服务 stop 收敛 root core，失败仅
 // 警告——bootout/bootstrap 由 helper install 幂等处理）。TUN 开启期间，安装验证
-// 通过后把会话重收敛回来（见 tunReconvergeTunSession）。受联锁约束（同 TunInstall）。
+// 通过后把会话重收敛回来（见 tunReconvergeTunSession）。
 func TunReinstall(home paths.Home) error {
-	if err := requireTunInterlockOpen("reinstall"); err != nil {
-		return err
-	}
 	return tunInstallWith(home, productionTunEnv(home), true)
 }
 
 // TunUninstall 编排 `tradewind tun uninstall`：服务 stop（先停 root core）→ 提权
 // bootout + 清 plist/日志/锚文件/遗留 helper/各候选三文件。锚与遗留残留都不在 →
 // no-op；只有遗留残留（失败安装留下的 root 属主 helper、没有 service.json）同样
-// 走提权清理。不受联锁约束（卸载是收敛手段，必须永远可用）。
+// 走提权清理（卸载是收敛手段，必须永远可用）。
 func TunUninstall(home paths.Home) error {
 	return tunUninstallWith(home, productionTunEnv(home))
 }
@@ -96,7 +90,7 @@ func tunInstallWith(home paths.Home, env tunEnv, force bool) error {
 		coreSHA: coreSHA,
 		dataDir: home.String(),
 		dataUID: os.Getuid(),
-	}, installScriptLayout(candidates), tunInterlockOpen())
+	}, installScriptLayout(candidates))
 	if err := tunRunElevated(env, script); err != nil {
 		return err
 	}

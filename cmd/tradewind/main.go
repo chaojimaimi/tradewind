@@ -30,10 +30,8 @@ Usage:
   tradewind delay [GROUP]                             latency test, default group from last selection
   tradewind mode [rule|global|direct]                 show or switch outbound mode (hot-applied when running)
   tradewind sysproxy on|off                           runtime system proxy toggle (idempotent; on requires core running)
-  tradewind tun off|status                            TUN mode off (escape hatch) and status — always available
-  tradewind tun on|install|reinstall                  暂未开放: installs/enables the privileged root service; refused by default
-                                                      while the privilege-escalation hardening (R16) is in progress. Local testing only:
-                                                      TRADEDWIND_ALLOW_INSECURE_TUN=1 tradewind tun on
+  tradewind tun on|off|status                         TUN mode via the privileged root service; status for diagnostics
+  tradewind tun install|reinstall                     manage the privileged service (first 'tun on' auto-installs it)
   tradewind tun uninstall                             remove the privileged helper/daemon — always available
   tradewind list [--json]                             list subscriptions (uid/name/type/updated/traffic/expire)
   tradewind use <UID|NAME>                            switch the current subscription (snapshot + hot reload)
@@ -556,21 +554,17 @@ func cmdService(_ []string) error {
 // cmdServiceInstall 分发隐藏 `tradewind install`：helper 安装子命令（提权脚本调用）。
 // {data_dir, data_uid, exec_dir} 内联 argv（root 无法自证调用者数据目录，评审二轮
 // P2-c）；exec_dir 是脚本经执行自测选定的目录（helper 副本 + 内核 root 副本所在）。
-// --allow-insecure-tun 是显式确认旗标（批⑥b §4.5）：`do shell script` 不继承用户
-// 环境，helper 自己判不了 TRADEDWIND_ALLOW_INSECURE_TUN，由看得到该环境变量的
-// 用户态 CLI 决定是否传入（安装脚本仅在联锁放行时追加）。argv 无秘密，密码红线
-// 不涉及。
+// argv 无秘密，密码红线不涉及。
 func cmdServiceInstall(_ paths.Home, args []string) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	dataDir := fs.String("data-dir", "", "user data directory (absolute)")
 	dataUID := fs.Int("data-uid", 0, "data directory owner uid")
 	execDir := fs.String("exec-dir", "", "execution directory holding the helper and root-owned core copies (absolute)")
-	allowInsecureTUN := fs.Bool("allow-insecure-tun", false, "explicitly acknowledge the unfinished privilege-escalation hardening (local testing only)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *dataDir == "" || *dataUID <= 0 || *execDir == "" {
-		return errors.New("usage: tradewind install --data-dir <abs path> --data-uid <uid> --exec-dir <abs path> [--allow-insecure-tun]")
+		return errors.New("usage: tradewind install --data-dir <abs path> --data-uid <uid> --exec-dir <abs path>")
 	}
-	return service.Install(*dataDir, *dataUID, *execDir, *allowInsecureTUN, os.Stdout)
+	return service.Install(*dataDir, *dataUID, *execDir, os.Stdout)
 }

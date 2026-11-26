@@ -55,18 +55,14 @@ func spawnTunStartDetached() error {
 	return spawnDetachedArgs(exe, "start", "--no-sysproxy")
 }
 
-// TunOn 编排 `tradewind tun on`：联锁 → 持 mutation lock → 快照/幂等判定 → 前置检查
+// TunOn 编排 `tradewind tun on`：持 mutation lock → 快照/幂等判定 → 前置检查
 // （服务安装 + geoip）→ settings 翻转 → 收敛（§2.2 步 5-8）。
-// 联锁（tun_interlock.go）在最前：未显式确认风险即拒绝，此前不拿任何资源。
 func TunOn(ctx context.Context, home paths.Home) error {
-	if err := requireTunInterlockOpen("on"); err != nil {
-		return err
-	}
 	return tunOnWith(ctx, home, productionTunEnv(home))
 }
 
 // TunOff 编排 `tradewind tun off`：对称收敛（settings 翻转 → 服务 stop 兜底 →
-// 用户态 core 回归 → sysproxy 意图按切换前 Applied 恢复）。逃生口，不受联锁约束。
+// 用户态 core 回归 → sysproxy 意图按切换前 Applied 恢复）。收敛手段，永远可用。
 func TunOff(ctx context.Context, home paths.Home) error {
 	return tunOffWith(ctx, home, productionTunEnv(home))
 }

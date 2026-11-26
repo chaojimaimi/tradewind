@@ -171,8 +171,8 @@ enum ToggleGroupLayout {
 /// ③ 开关组卡片：按 ToggleGroupLayout 的装配序列逐项渲染。
 struct ToggleGroupCard: View {
     @ObservedObject var model: PanelModel
-    /// TUN 行是否参与装配：生产默认取功能开关 `FeatureFlags.privilegedTUN`（R16 闭环前
-    /// 隐藏）；测试显式传 false/true 做渲染结构对比。
+    /// TUN 行是否参与装配：生产默认取功能开关 `FeatureFlags.privilegedTUN`（批⑥b
+    /// 阶段二已置 true 开放）；测试显式传 false/true 做渲染结构对比。
     /// WHY var：带默认值的 `let` 被排除出合成 memberwise init（NodeRow.selectable 同注）。
     var includeTUN = FeatureFlags.privilegedTUN
     @Environment(\.colorScheme) private var scheme
@@ -213,8 +213,8 @@ struct ToggleGroupCard: View {
         )
     }
 
-    /// TUN 模式行（批⑥ §4）：功能开关关闭时不进装配序列——行与其模型/桥接层一并
-    /// 有意保留（见 FeatureFlags.privilegedTUN），加固后置 true 即重新可达。
+    /// TUN 模式行（批⑥ §4）：行随功能开关进退（见 FeatureFlags.privilegedTUN，
+    /// 批⑥b 阶段二已置 true 开放）。
     private var tunRow: some View {
         ToggleRow(
             icon: "rectangle.on.rectangle", label: "TUN 模式",

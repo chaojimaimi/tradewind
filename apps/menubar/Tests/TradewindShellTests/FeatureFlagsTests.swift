@@ -2,16 +2,16 @@ import SwiftUI
 import Testing
 @testable import TradewindKit
 
-/// 功能开关的单一事实源（M3 batch6 release-gate）：v0.5.0-m3f1 以"特权服务保持关闭"
-/// 发版——R16 提权边界闭环前，特权 TUN 的用户入口（popover 开关行、设置页 TUN 行）
-/// 不得出现；逃生口与模型/桥接层保留，加固后置 true 即重新启用。
+/// 功能开关的单一事实源（M3 batch6 release-gate）：v0.5.0-m3f1 曾以"特权服务保持关闭"
+/// 发版；批⑥b 阶段二（R16 闭环 + §8 真机验证 A1–A15 通过，2026-11-26）后置 true 开放
+/// ——特权 TUN 的用户入口（popover 开关行、设置页 TUN 行）恢复渲染，发版闸改钉已开放态。
 @Suite(.serialized) @MainActor struct FeatureFlagsTests {
     // MARK: - 开关本身
 
-    /// 发版闸：开关默认关闭。置 true 之前须闭环 R16。
-    @Test func privilegedTUNStaysOffUntilR16IsClosed() {
-        #expect(!FeatureFlags.privilegedTUN,
-                "置 true 之前须闭环 R16（docs/plans/batch6-plan.md §9 第六轮）：root 内核以用户可写目录为工作目录的提权边界")
+    /// 发版闸（已开放）：开关钉在 true。R16 提权边界闭环 + §8 真机验证通过后开放。
+    @Test func privilegedTUNOnAfterR16Closed() {
+        #expect(FeatureFlags.privilegedTUN,
+                "R16 已闭环（批⑥b c1–c8，docs/plans/batch6-plan.md §9）且 §8 真机验证 A1–A15 于 2026-11-26 全部通过，特权 TUN 保持对用户开放")
     }
 
     // MARK: - popover 开关组：行可见性（纯函数）
@@ -114,9 +114,9 @@ import Testing
         #expect(shown > hidden)
     }
 
-    /// 设置页整体在开关关闭时仍能完成布局（「网络代理」区经 ProxySectionContent
-    /// 装配后并入 GeneralPane，不产生零尺寸或不崩溃）。
-    @Test func generalPaneLaysOutWithTheToggleHidden() async throws {
+    /// 设置页整体在开关当前取值（true，TUN 行参与装配）下仍能完成布局（「网络代理」区
+    /// 经 ProxySectionContent 装配后并入 GeneralPane，不产生零尺寸或不崩溃）。
+    @Test func generalPaneLaysOutWithTheProductionAssembly() async throws {
         let model = SettingsModel(bridge: CoreBridge(runner: SettingsSnapshotRunner()))
         await model.load()
         try #require(model.settings != nil) // 「网络代理」区只在快照就绪后渲染
@@ -128,8 +128,8 @@ import Testing
 
     // MARK: - intake 不受开关约束
 
-    /// 开关只隐藏用户入口，不改"本机是否实际在走 TUN"的呈现：经 CLI 显式确认开启的
-    /// 会话，status --json 报 tun.enabled=true → 菜单栏图标仍显示有接入。
+    /// 开关只隐藏用户入口，不改"本机是否实际在走 TUN"的呈现：TUN 会话在跑时，
+    /// status --json 报 tun.enabled=true → 菜单栏图标仍显示有接入。
     @Test func intakeStillCountsTUNReportedByTheCLI() throws {
         let report = try StatusReport.decode(#"{"core":{"running":true,"pid":1,"version":"v"},"mode":"rule","sys_proxy":{"applied":false,"services":0},"tun":{"enabled":true,"running":true},"profile":{"uid":"","name":""},"panel_url":""}"#)
         let model = PanelModel(bridge: nil)

@@ -112,8 +112,8 @@ type installSources struct {
 // tunInstallScript 按全候选的生产布局生成安装脚本（纯函数）。生产编排不直接用它
 // ——tunInstallWith 先过滤候选再调 tunInstallScriptFor；本函数服务于内容断言
 // （全候选布局即脚本的最大形态）。
-func tunInstallScript(src installSources, allowInsecureTUN bool) string {
-	return tunInstallScriptFor(src, productionTunScriptLayout(), allowInsecureTUN)
+func tunInstallScript(src installSources) string {
+	return tunInstallScriptFor(src, productionTunScriptLayout())
 }
 
 // tunInstallScriptFor 生成安装提权脚本（纯函数）：
@@ -127,11 +127,8 @@ func tunInstallScript(src installSources, allowInsecureTUN bool) string {
 //	   均成功才算该位置可用）；被拦 → stderr 一行 + 清理该候选 + 下一处；
 //	   全部被拦 → stderr 说明 + exit 3
 //	③ 清理其余候选里的陈旧三文件（历史安装可能落在别的候选）
-//	④ `<exec-dir>/tradewind-service install --data-dir --data-uid --exec-dir
-//	   [--allow-insecure-tun]`（旗标仅当 CLI 侧联锁放行时追加——批⑥b §4.5：
-//	   helper 自己判不了环境变量，由看得到 TRADEDWIND_ALLOW_INSECURE_TUN 的
-//	   用户态 CLI 决定是否传入）
-func tunInstallScriptFor(src installSources, lay tunScriptLayout, allowInsecureTUN bool) string {
+//	④ `<exec-dir>/tradewind-service install --data-dir --data-uid --exec-dir`
+func tunInstallScriptFor(src installSources, lay tunScriptLayout) string {
 	q := shQuote
 	var b strings.Builder
 	b.WriteString("#!/bin/sh\n")
@@ -237,15 +234,13 @@ try_candidate() {
 	for _, cand := range lay.candidates {
 		fmt.Fprintf(&b, `if [ "$EXE" != %s ]; then clean_candidate %s; fi`+"\n", q(cand), q(cand))
 	}
-	// ④ 显式确认旗标（批⑥b §4.5）：仅当 CLI 侧联锁放行时追加——`do shell script`
-	// 不继承用户环境，helper 自己判不了 TRADEDWIND_ALLOW_INSECURE_TUN
+	// ④ 显式确认旗标已随联锁开放一并移除（批⑥b 阶段二）：helper install 不再携带
+	// --allow-insecure-tun
 	b.WriteString(`
 # ④ 写锚 + 注册 daemon（plist/service.json 由 root 身份的 helper 自写）
-"$EXE/tradewind-service" install --data-dir "$DATA" --data-uid "$DATA_UID" --exec-dir "$EXE"`)
-	if allowInsecureTUN {
-		b.WriteString(" --allow-insecure-tun")
-	}
-	b.WriteString("\nexit \"$?\"\n")
+"$EXE/tradewind-service" install --data-dir "$DATA" --data-uid "$DATA_UID" --exec-dir "$EXE"
+exit "$?"
+`)
 	return b.String()
 }
 

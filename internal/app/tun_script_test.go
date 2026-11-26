@@ -38,8 +38,8 @@ func indexOfLine(lines []string, sub string) int {
 
 // TestTunInstallScriptContent 安装脚本内容断言（batch6 真机 fold-in）：候选顺序、
 // rm 先于 cp、摘要复核的位置（cp 之后、chown/自测之前）、执行自测行、遗留位置清理、
-// 其余候选清理、全败 exit 3、末行 install 带 --exec-dir、`--allow-insecure-tun`
-// 仅在放行形态出现、无 rm -rf、无 bashism。
+// 其余候选清理、全败 exit 3、末行 install 带 --exec-dir、确认旗标绝迹（TUN 已开放）、
+// 无 rm -rf、无 bashism。
 func TestTunInstallScriptContent(t *testing.T) {
 	src := installSources{
 		cliPath: "/Applications/Tradewind.app/cli",
@@ -48,7 +48,7 @@ func TestTunInstallScriptContent(t *testing.T) {
 		dataDir: "/Users/le e/Library/Application Support/tradewind",
 		dataUID: 501,
 	}
-	script := tunInstallScript(src, false)
+	script := tunInstallScript(src)
 	lines := scriptLines(script)
 	for _, want := range []string{
 		`CLI='/Applications/Tradewind.app/cli'`,
@@ -114,14 +114,9 @@ func TestTunInstallScriptContent(t *testing.T) {
 		}
 	}
 
-	// 显式确认旗标（批⑥b §4.5）：未放行形态绝不出现；放行形态出现在 ④ install 行上
+	// 确认旗标已随联锁开放一并移除（批⑥b 阶段二）：任何形态都不再出现
 	if strings.Contains(script, "--allow-insecure-tun") {
-		t.Fatalf("the acknowledgement flag must be absent unless the CLI-side interlock is open:\n%s", script)
-	}
-	withFlag := tunInstallScript(src, true)
-	wantFlagLine := `"$EXE/tradewind-service" install --data-dir "$DATA" --data-uid "$DATA_UID" --exec-dir "$EXE" --allow-insecure-tun`
-	if !strings.Contains(withFlag, wantFlagLine) {
-		t.Fatalf("acknowledged script missing %q:\n%s", wantFlagLine, withFlag)
+		t.Fatalf("the acknowledgement flag must be gone (TUN is open):\n%s", script)
 	}
 
 	// 候选顺序：锚目录 → libexec → /opt——三个探测在同一条 `||` 链上按序短路，
@@ -252,7 +247,7 @@ func TestTunScriptsParseUnderBinSh(t *testing.T) {
 			coreSHA: strings.Repeat("cd", 32),
 			dataDir: "/Users/le e/Library/Application Support/tradewind",
 			dataUID: 501,
-		}, false),
+		}),
 		"uninstall.sh": tunUninstallScript(),
 	}
 	for name, body := range scripts {
@@ -473,7 +468,7 @@ func TestTunInstallScriptFirstCandidatePasses(t *testing.T) {
 	}
 	c1 := f.layout.candidates[0]
 
-	code, stderr := f.run(t, tunInstallScriptFor(f.sources(), f.layout, false), "")
+	code, stderr := f.run(t, tunInstallScriptFor(f.sources(), f.layout), "")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr:\n%s", code, stderr)
 	}
@@ -506,7 +501,7 @@ func TestTunInstallScriptFallsBackWhenPolicyBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	code, stderr := f.run(t, tunInstallScriptFor(f.sources(), f.layout, false), c1)
+	code, stderr := f.run(t, tunInstallScriptFor(f.sources(), f.layout), c1)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr:\n%s", code, stderr)
 	}
@@ -533,7 +528,7 @@ func TestTunInstallScriptFallsBackWhenPolicyBlocks(t *testing.T) {
 func TestTunInstallScriptAllCandidatesBlocked(t *testing.T) {
 	f := newScriptFixture(t)
 
-	code, stderr := f.run(t, tunInstallScriptFor(f.sources(), f.layout, false), f.root)
+	code, stderr := f.run(t, tunInstallScriptFor(f.sources(), f.layout), f.root)
 	if code != 3 {
 		t.Fatalf("exit = %d, want 3; stderr:\n%s", code, stderr)
 	}
@@ -568,7 +563,7 @@ func TestTunInstallScriptDigestMismatchReclaimsFreshAnchor(t *testing.T) {
 	// 首候选（= 锚目录）被系统策略拦掉，让失配落在第二个候选上
 	bad := f.sources()
 	bad.cliSHA = strings.Repeat("11", 32)
-	code, stderr := f.run(t, tunInstallScriptFor(bad, f.layout, false), f.layout.anchorDir)
+	code, stderr := f.run(t, tunInstallScriptFor(bad, f.layout), f.layout.anchorDir)
 	if code != 5 {
 		t.Fatalf("exit = %d, want 5; stderr:\n%s", code, stderr)
 	}
@@ -583,7 +578,7 @@ func TestTunInstallScriptDigestMismatchReclaimsFreshAnchor(t *testing.T) {
 	if err := os.WriteFile(keep, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	code, _ = f.run(t, tunInstallScriptFor(bad, f.layout, false), f.layout.anchorDir)
+	code, _ = f.run(t, tunInstallScriptFor(bad, f.layout), f.layout.anchorDir)
 	if code != 5 {
 		t.Fatalf("exit = %d, want 5 on the second run", code)
 	}
@@ -600,7 +595,7 @@ func TestTunInstallScriptMissingSource(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	code, stderr := f.run(t, tunInstallScriptFor(f.sources(), f.layout, false), "")
+	code, stderr := f.run(t, tunInstallScriptFor(f.sources(), f.layout), "")
 	if code != 4 {
 		t.Fatalf("exit = %d, want 4; stderr:\n%s", code, stderr)
 	}
@@ -648,7 +643,7 @@ func TestTunInstallScriptDigestMismatchAborts(t *testing.T) {
 			f := newScriptFixture(t)
 			src := c.mutate(t, f)
 
-			code, stderr := f.run(t, tunInstallScriptFor(src, f.layout, false), "")
+			code, stderr := f.run(t, tunInstallScriptFor(src, f.layout), "")
 			if code != 5 {
 				t.Fatalf("exit = %d, want 5; stderr:\n%s", code, stderr)
 			}
@@ -685,7 +680,7 @@ func TestTunInstallScriptAcceptsUppercaseSidecar(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	code, stderr := f.run(t, tunInstallScriptFor(f.sources(), f.layout, false), "")
+	code, stderr := f.run(t, tunInstallScriptFor(f.sources(), f.layout), "")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0 (an upper-case sidecar is valid); stderr:\n%s", code, stderr)
 	}

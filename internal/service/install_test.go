@@ -77,17 +77,20 @@ func readWrittenAnchor(t *testing.T, p installPlan) (ConfigFile, os.FileMode) {
 	return got, info.Mode().Perm()
 }
 
-// TestInstallRequiresExplicitAckFlag helper 显式确认旗标（批⑥b §4.5，终审 P3-①）：
-// allow=false → 报错带旗标名，且零副作用——service.json / plist / logs / service-data
-// 均未出现、launchd 未碰。旗标检查先于 root 守卫，非 root 测试进程即覆盖本用例。
-func TestInstallRequiresExplicitAckFlag(t *testing.T) {
+// TestInstallRequiresRoot 非 root 进程直接拒绝（绝不静默降级为用户态写系统目录），
+// 且零副作用——service.json / plist / logs / service-data 均未出现。launchd 未碰
+// 由 root 守卫先返保证（Install 的 launchctl 缝不接受注入，realLaunchctl 硬编码，
+// fakeLaunchctl 接不进来）。显式确认旗标已随联锁开放一并移除（批⑥b 阶段二）：拒绝
+// 只可能来自 root 守卫。
+func TestInstallRequiresRoot(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; the non-root refusal cannot be exercised")
+	}
 	p := newInstallPlan(t)
-	lc := &fakeLaunchctl{}
 
-	err := Install(p.dataDir, p.dataUID, p.execDir, false, &strings.Builder{})
-	if err == nil || !strings.Contains(err.Error(), "--allow-insecure-tun") ||
-		!strings.Contains(err.Error(), "尚未完成加固") {
-		t.Fatalf("err = %v, want the explicit-acknowledgement refusal naming the flag", err)
+	err := Install(p.dataDir, p.dataUID, p.execDir, &strings.Builder{})
+	if err == nil || !strings.Contains(err.Error(), "must run as root") {
+		t.Fatalf("err = %v, want the root-only refusal", err)
 	}
 	for _, path := range []string{
 		filepath.Join(p.configDir, "service.json"),
@@ -96,11 +99,8 @@ func TestInstallRequiresExplicitAckFlag(t *testing.T) {
 		p.coreHome(),
 	} {
 		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
-			t.Fatalf("%s must not be written when the acknowledgement flag is absent (err = %v)", path, statErr)
+			t.Fatalf("%s must not be written on the root refusal (err = %v)", path, statErr)
 		}
-	}
-	if len(lc.calls) != 0 {
-		t.Fatalf("launchd must not be touched: %v", lc.calls)
 	}
 }
 

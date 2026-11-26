@@ -194,9 +194,9 @@ func TestTunInstallWithRequiresDigests(t *testing.T) {
 	}
 }
 
-// TestTunInstallWithEmbedsDigestsAndInterlockFlag 生成的脚本嵌入命令开始时算出的
-// 摘要；`--allow-insecure-tun` 仅在联锁放行时出现（批⑥b §4.5）。
-func TestTunInstallWithEmbedsDigestsAndInterlockFlag(t *testing.T) {
+// TestTunInstallWithEmbedsDigests 生成的脚本嵌入命令开始时算出的摘要（批⑥b §4.5）。
+// 确认旗标已随联锁开放一并移除（批⑥b 阶段二）：脚本绝不再携带 --allow-insecure-tun。
+func TestTunInstallWithEmbedsDigests(t *testing.T) {
 	home := paths.Home(stubSocketDir(t))
 	seedFakeCore(t, home)
 	env, _, _, _, _ := newTunTestEnv(t)
@@ -218,9 +218,8 @@ func TestTunInstallWithEmbedsDigestsAndInterlockFlag(t *testing.T) {
 	}
 	cliSHA, coreSHA := digestOf(exe), digestOf(home.Bin())
 
-	stubTunInterlock(t, "", false)
 	if err := tunInstallWith(home, env, false); err != nil {
-		t.Fatalf("tunInstallWith (interlock closed): %v", err)
+		t.Fatalf("tunInstallWith: %v", err)
 	}
 	for _, want := range []string{"CLI_SHA='" + cliSHA + "'", "CORE_SHA='" + coreSHA + "'"} {
 		if !strings.Contains(*script, want) {
@@ -228,16 +227,11 @@ func TestTunInstallWithEmbedsDigestsAndInterlockFlag(t *testing.T) {
 		}
 	}
 	if strings.Contains(*script, "--allow-insecure-tun") {
-		t.Fatalf("the flag must be absent while the interlock is closed:\n%s", *script)
+		t.Fatalf("the acknowledgement flag must be gone (TUN is open):\n%s", *script)
 	}
-
-	stubTunInterlock(t, "1", true)
-	if err := tunInstallWith(home, env, false); err != nil {
-		t.Fatalf("tunInstallWith (interlock open): %v", err)
-	}
-	wantLine := `"$EXE/tradewind-service" install --data-dir "$DATA" --data-uid "$DATA_UID" --exec-dir "$EXE" --allow-insecure-tun`
+	wantLine := `"$EXE/tradewind-service" install --data-dir "$DATA" --data-uid "$DATA_UID" --exec-dir "$EXE"`
 	if !strings.Contains(*script, wantLine) {
-		t.Fatalf("script missing the acknowledged install line %q:\n%s", wantLine, *script)
+		t.Fatalf("script missing the helper install line %q:\n%s", wantLine, *script)
 	}
 }
 
