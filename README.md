@@ -41,10 +41,12 @@ apps/menubar/build.sh                 # → apps/menubar/dist/Tradewind.app
 tar -xzf tradewind-<版本>-darwin-arm64.tar.gz
 mkdir -p /opt/homebrew/bin && cp tradewind /opt/homebrew/bin/   # 或 /usr/local/bin（PATH 内即可）
 cp -R Tradewind.app /Applications/
+mkdir -p ~/Library/Application\ Support/tradewind
+cp -R bin ui ~/Library/Application\ Support/tradewind/          # 内核（含 sha256 sidecar）+ 面板资源落数据目录
 ```
 
-1. **首次打开 Gatekeeper 放行**：签名无公证，直接双击会被拦截——**右键点击
-   Tradewind.app → 打开 → 打开**（或 `xattr -cr /Applications/Tradewind.app` 后再双击）。
+1. **首次打开 Gatekeeper 放行**：签名无公证，直接双击会被拦截——到**系统设置 →
+   隐私与安全性 → 仍要打开**（macOS 15 起右键「打开」已不能绕过，见 DESIGN §7.7）。
 2. 启动：点击菜单栏 Tradewind 图标，或终端 `tradewind start`（Ctrl+C 优雅退出并还原系统代理）。
 3. 升级：`tradewind self-update`（CLI+内核自动回滚；app 内关于页"检查更新"由 Sparkle 托管）。
 
