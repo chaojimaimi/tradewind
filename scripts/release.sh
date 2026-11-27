@@ -1,7 +1,9 @@
 #!/bin/bash
-# Tradewind 发版脚本（批③ B3-2，batch3-plan §4.2；batch5 §3.3 Sparkle 资产链）：
+# Tradewind 发版脚本（批③ B3-2，batch3-plan §4.2；batch5 §3.3 Sparkle 资产链；
+# batch7-plan §4.1 DMG 资产）：
 # 构建 → 打包（m3b5 形态）→ sha256 sidecar → Sparkle 资产链（zip + EdDSA 签名 +
-# appcast 单条目快照；工具/密钥缺失 → 警告跳过）→（--upload）GitHub Release →
+# appcast 单条目快照；工具/密钥缺失 → 警告跳过）→ DMG 一体化安装包（不依赖
+# Sparkle 工具，恒产出；签名身份缺失 → 警告跳过签名）→（--upload）GitHub Release →
 # （默认）本机守护换装 + app 重启。
 #
 # 用法：
@@ -83,9 +85,10 @@ main() {
   done
 
   # DRY_RUN 干跑（batch5 §5）：零副作用打印计划——flag 语义与资产清单可测
-  #（无 --prerelease 默认 / 资产清单含 zip+appcast / --upload 显式语义保持）
+  #（无 --prerelease 默认 / 资产清单含 tarball+sidecar+dmg（DMG 不依赖 SPARKLE_BIN，
+  # batch7-plan §4.1）/ Sparkle 工具在位时追加 zip+appcast / --upload 显式语义保持）
   if [ "${DRY_RUN:-0}" = "1" ]; then
-    local assets="tradewind-$VERSION-darwin-arm64.tar.gz tradewind-$VERSION-darwin-arm64.tar.gz.sha256"
+    local assets="tradewind-$VERSION-darwin-arm64.tar.gz tradewind-$VERSION-darwin-arm64.tar.gz.sha256 tradewind-$VERSION-darwin-arm64.dmg tradewind-$VERSION-darwin-arm64.dmg.sha256"
     if [ -n "${SPARKLE_BIN:-}" ] && [ -x "$SPARKLE_BIN/sign_update" ] && [ -f "${EDDSA_PRIV:-$HOME/.sparkle/tradewind.ed25519.priv}" ]; then
       assets="$assets Tradewind.app.zip appcast.xml"
     else
@@ -235,13 +238,70 @@ EOF
     SPARKLE_ASSETS=("$ZIP" "$APPCAST")
   fi
 
+  # --- 3.6 DMG 一体化安装包（batch7-plan §2.1/§4.1）：tarball staging 同源四件 + NOTICE +
+  # /Applications 符号链接 → UDZO 只读卷（壳端安装器模式判据前提：bundlePath 恒 /Volumes/）。
+  # DMG 不依赖 SPARKLE_BIN——无 Sparkle 工具也照产；上传走既有 gh release upload 路径。
+  DMG="$REPO_ROOT/dist/tradewind-$VERSION-darwin-arm64.dmg"
+  DMG_NAME="$(basename "$DMG")"
+  DMG_STAGE="$REPO_ROOT/dist/dmg-stage-$VERSION"
+  echo "==> dmg stage $DMG_STAGE"
+  rm -rf "$DMG_STAGE"
+  mkdir -p "$DMG_STAGE"
+  cp -R "$STAGE/Tradewind.app" "$DMG_STAGE/Tradewind.app"
+  cp "$STAGE/tradewind" "$STAGE/NOTICE.txt" "$DMG_STAGE/"
+  cp -R "$STAGE/bin" "$STAGE/ui" "$DMG_STAGE/"
+  ln -s /Applications "$DMG_STAGE/Applications"
+
+  # DMG 签名身份探测（batch7-plan §4.1）：语义复刻 apps/menubar/build.sh 的签名探测段
+  #（同名变量同默认值 + 钥匙串解锁/find-identity 参数拼装，release.sh 原无此机制）。
+  # 身份在 → codesign 签 DMG；缺 → 警告跳过签名，DMG 照常产出（build.sh"构建不失败"
+  # 降级哲学；ad-hoc 对 DMG 无验证意义，直接跳过而非降级"-"）。
+  SIGN_IDENTITY="${SIGN_IDENTITY:-Tradewind Developer}"
+  SIGN_KEYCHAIN="${SIGN_KEYCHAIN:-$HOME/.sparkle/tradewind-signing.keychain-db}"
+  SIGN_KEYCHAIN_PASS_FILE="${SIGN_KEYCHAIN_PASS_FILE:-$HOME/.sparkle/tradewind-signing.pass}"
+  SIGN_KC_SIGN=() # codesign 的 --keychain 参数（空 = 不指定钥匙串）
+  IDENTITY_FIND=(-v -p codesigning)
+  IDENTITY_SOURCE="default keychain search list"
+  if [ -f "$SIGN_KEYCHAIN" ] && [ -f "$SIGN_KEYCHAIN_PASS_FILE" ]; then
+    if security unlock-keychain -p "$(cat "$SIGN_KEYCHAIN_PASS_FILE")" "$SIGN_KEYCHAIN" 2>/dev/null; then
+      IDENTITY_FIND=(-p codesigning "$SIGN_KEYCHAIN")
+      SIGN_KC_SIGN=(--keychain "$SIGN_KEYCHAIN")
+      IDENTITY_SOURCE="keychain $SIGN_KEYCHAIN"
+    else
+      echo "warning: cannot unlock signing keychain $SIGN_KEYCHAIN with $SIGN_KEYCHAIN_PASS_FILE (mismatched password?) — keychain ignored" >&2
+    fi
+  fi
+  IDENTITY_LISTING="$(security find-identity "${IDENTITY_FIND[@]}" 2>/dev/null || true)"
+  DMG_SIGN_IDENTITY=""
+  if grep -v EXPIRED <<<"$IDENTITY_LISTING" | grep -qF "\"$SIGN_IDENTITY\""; then
+    echo "==> codesign identity: $SIGN_IDENTITY ($IDENTITY_SOURCE)"
+    DMG_SIGN_IDENTITY="$SIGN_IDENTITY"
+  else
+    echo "warning: codesign identity \"$SIGN_IDENTITY\" not found — skipping DMG signing（DMG 照常产出）" >&2
+  fi
+  echo "==> hdiutil create $DMG"
+  hdiutil create -volname "Tradewind" -srcfolder "$DMG_STAGE" -ov -format UDZO -o "$DMG"
+  if [ -n "$DMG_SIGN_IDENTITY" ]; then
+    echo "==> codesign $DMG_NAME"
+    codesign --sign "$DMG_SIGN_IDENTITY" ${SIGN_KC_SIGN[@]+"${SIGN_KC_SIGN[@]}"} "$DMG"
+  fi
+
+  # sha256 sidecar（与 tarball sidecar 同格式：<hex>  <文件名>，sha256sum 两空格）
+  DMG_SIDECAR="$DMG.sha256"
+  DMG_HEX="$(shasum -a 256 "$DMG" | awk '{print $1}')"
+  printf '%s  %s\n' "$DMG_HEX" "$DMG_NAME" > "$DMG_SIDECAR"
+  echo "==> dmg sidecar $DMG_SIDECAR"
+  DMG_ASSETS=("$DMG" "$DMG_SIDECAR")
+
   # --- 4. --upload：查重（已存在只补资产 --clobber）→ create（默认正式版） ----------
   if [ "$UPLOAD" -eq 1 ]; then
     NOTES="${VERSION}。
 
 资产：
   tradewind-${VERSION}-darwin-arm64.tar.gz（整包：CLI + Tradewind.app + bin/mihomo + ui/ + NOTICE）
-  ${TARBALL_NAME}.sha256（sha256 sidecar；self-update 消费）"
+  ${TARBALL_NAME}.sha256（sha256 sidecar；self-update 消费）
+  ${DMG_NAME}（一体化安装包：挂载后打开 DMG 里的 Tradewind 点安装）
+  ${DMG_NAME}.sha256（sha256 sidecar）"
     if [ "${#SPARKLE_ASSETS[@]}" -gt 0 ]; then
       NOTES="$NOTES
   Tradewind.app.zip + appcast.xml（app 自动更新；EdDSA 签名单条目快照）"
@@ -257,11 +317,13 @@ EOF
       echo "==> release $VERSION exists; uploading assets (--clobber)"
       gh release upload "$VERSION" "$TARBALL" "$SIDECAR" \
         ${SPARKLE_ASSETS[@]+"${SPARKLE_ASSETS[@]}"} \
+        ${DMG_ASSETS[@]+"${DMG_ASSETS[@]}"} \
         --repo chaojimaimi/tradewind --clobber
     else
       echo "==> gh release create $VERSION ($([ "$PRE" -eq 1 ] && echo 'prerelease（--pre）' || echo '正式版，无 Pre-release 标签'))"
       gh release create "$VERSION" "$TARBALL" "$SIDECAR" \
         ${SPARKLE_ASSETS[@]+"${SPARKLE_ASSETS[@]}"} \
+        ${DMG_ASSETS[@]+"${DMG_ASSETS[@]}"} \
         "${CREATE_FLAGS[@]}" \
         --notes "$NOTES"
     fi
@@ -305,7 +367,7 @@ EOF
   done
   # app 重启（build.sh 已 pkill 旧实例；bundle 已重建并签名）
   open "$REPO_ROOT/apps/menubar/dist/Tradewind.app"
-  echo "==> release $VERSION done (tarball+sidecar in dist/)"
+  echo "==> release $VERSION done (tarball+sidecar+dmg+dmg.sha256 in dist/)"
 }
 
 # 仅 $0 直跑时执行 main（source 供 golden 测试直接调用 generate_appcast，

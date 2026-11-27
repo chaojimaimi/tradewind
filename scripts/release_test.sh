@@ -1,10 +1,12 @@
 #!/bin/bash
-# release.sh 测试（batch5 §5；batch6b plan §4.7 验签自检扩展）：bash -n 语法门禁 +
-# generate_appcast golden（占位签名）+ DRY_RUN 干跑断言（无 --prerelease 默认 /
-# 资产清单含 zip+appcast / --upload 显式语义保持）+ Sparkle 链沙盒真跑（stub build/
-# mihomo/git + 伪 sign_update/edpubkey 注入）：happy path 恰好"签名一次 + --verify
-# 一次"且顺序正确；推导公钥≠内嵌公钥 / edpubkey 失败 → 签名前拦截（sign_update
-# 零调用）；--verify 失败 → appcast 前拦截（无 appcast、资产清单不出现 zip+appcast）。
+# release.sh 测试（batch5 §5；batch6b plan §4.7 验签自检扩展；batch7-plan §4.2 DMG
+# 资产断言）：bash -n 语法门禁 + generate_appcast golden（占位签名）+ DRY_RUN 干跑
+# 断言（无 --prerelease 默认 / 资产清单含 tarball+sidecar+dmg+dmg.sha256，Sparkle
+# 工具在位时追加 zip+appcast / --upload 显式语义保持）+ Sparkle 链沙盒真跑（stub
+# build/mihomo/git/hdiutil/security + 伪 sign_update/edpubkey 注入）：happy path 恰好
+# "签名一次 + --verify 一次"且顺序正确，且恒产出 dmg+dmg.sha256；推导公钥≠内嵌公钥 /
+# edpubkey 失败 → 签名前拦截（sign_update 零调用）；--verify 失败 → appcast 前拦截
+# （无 appcast、资产清单不出现 zip+appcast）。
 # 真私钥/真网络/真 deploy 零接触：密钥全用临时占位（内容不被读取），HOME 指向
 # mktemp 临时目录，--no-deploy 收尾。
 # 用法：bash scripts/release_test.sh
@@ -19,9 +21,11 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 pass() { echo "PASS: $1"; }
 
 # —— Sparkle 链沙盒（4b/5/6/7 共用）：以 stub 复刻 repo 形态，令 release.sh 真跑
-# Sparkle 链段本身（zip→推导比对→签名→--verify→appcast）。swift build/deploy/gh
-# 绝不进测试：build 产物与数据目录全用 stub；PATH 前置的 fakebin 只含 git stub
-#（BUILD_NUMBER=42，与断言无关）。沙盒都在 $TMP 下，由单一 trap 清理。
+# Sparkle 链段本身（zip→推导比对→签名→--verify→appcast）与 DMG 资产段（batch7：
+# staging→身份探测→hdiutil→sidecar）。swift build/deploy/gh 绝不进测试：build 产物
+# 与数据目录全用 stub；PATH 前置的 fakebin 含 git stub（BUILD_NUMBER=42，与断言无关）
+# 与 hdiutil/security stub（不真打 DMG 卷、恒无签名身份——release.sh 走"缺身份→警告
+# 跳过 DMG 签名"降级路径，行为确定）。沙盒都在 $TMP 下，由单一 trap 清理。
 make_sandbox() {
   local s="$1"
   mkdir -p "$s/scripts" "$s/apps/menubar" "$s/fakebin" \
@@ -39,6 +43,24 @@ EOF
 set -eu
 mkdir -p "$s/apps/menubar/dist/Tradewind.app/Contents/MacOS"
 EOF
+  cat > "$s/fakebin/hdiutil" <<'EOF'
+#!/bin/sh
+# 伪 hdiutil：识别 -o 后随的输出路径并落空文件（沙盒不真打 DMG 卷）
+out=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-o" ]; then out="$a"; fi
+  prev="$a"
+done
+if [ -n "$out" ]; then : > "$out"; fi
+exit 0
+EOF
+  cat > "$s/fakebin/security" <<'EOF'
+#!/bin/sh
+# 伪 security：恒无可用签名身份（空清单+非零退出）→ release.sh 走"缺身份→
+# 警告跳过 DMG 签名"降级路径（DMG 照常产出）
+exit 1
+EOF
   cat > "$s/data/bin/mihomo" <<'EOF'
 #!/bin/sh
 echo "stub mihomo v1.19.34"
@@ -50,7 +72,8 @@ EOF
   printf '#!/bin/sh\necho TESTEDPUBKEY\n' > "$s/fakebin/edpubkey" # EDPUBKEY_CMD stub
   printf '#!/bin/sh\necho "stub edpubkey failure" >&2\nexit 1\n' > "$s/fakebin/edpubkey-fail"
   chmod +x "$s/scripts/build.sh" "$s/apps/menubar/build.sh" "$s/data/bin/mihomo" \
-    "$s/fakebin/git" "$s/fakebin/sign_update" "$s/fakebin/edpubkey" "$s/fakebin/edpubkey-fail"
+    "$s/fakebin/git" "$s/fakebin/sign_update" "$s/fakebin/edpubkey" "$s/fakebin/edpubkey-fail" \
+    "$s/fakebin/hdiutil" "$s/fakebin/security"
   : > "$s/home/.sparkle/tradewind.ed25519.priv" # 占位空文件：内容经 stub 间接化，绝不被读取
 }
 
@@ -85,15 +108,18 @@ grep -q 'sparkle:edSignature="PLACEHOLDER_EDDSA_SIG"' "$TMP/appcast.xml" || fail
 grep -q '<sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>' "$TMP/appcast.xml" || fail "minimumSystemVersion != 13.0"
 pass "generate_appcast golden + lockpoints"
 
-# 3. DRY_RUN 默认（无 Sparkle 工具）：正式版默认（无 --prerelease）、不 upload、链跳过
+# 3. DRY_RUN 默认（无 Sparkle 工具）：正式版默认（无 --prerelease）、不 upload、链跳过；
+#    资产断言含 tarball+sidecar+dmg+dmg.sha256（DMG 不依赖 SPARKLE_BIN，batch7-plan §4.2）
 OUT="$(HOME="$TMP/fakehome" DRY_RUN=1 bash "$SCRIPT" v9.9.9-dry)"
 echo "$OUT" | grep -q "prerelease: no" || fail "default must not be prerelease (m3e1 正式版)"
 echo "$OUT" | grep -q "upload: no" || fail "default must not upload (--upload 显式语义保持)"
 echo "$OUT" | grep -q "Sparkle 资产链跳过" || fail "sparkle chain must be skipped without tools"
+echo "$OUT" | grep -q "darwin-arm64.dmg " || fail "dmg must be listed without Sparkle tools (DMG 不依赖 SPARKLE_BIN)"
+echo "$OUT" | grep -q "darwin-arm64.dmg.sha256" || fail "dmg sidecar must be listed without Sparkle tools"
 if echo "$OUT" | grep -q "Tradewind.app.zip appcast.xml$"; then
   fail "asset list must not contain zip+appcast when tools missing"
 fi
-pass "DRY_RUN default: 正式版 / no upload / sparkle skipped"
+pass "DRY_RUN default: 正式版 / no upload / sparkle skipped / dmg+dmg.sha256 always"
 
 # 4. DRY_RUN --upload + --pre + 伪 Sparkle 工具：资产清单含 zip+appcast；
 #    伪 sign_update 每次调用把首个参数追加进日志（调用次数/顺序断言用），--verify 恒过
@@ -113,7 +139,9 @@ OUT="$(HOME="$TMP/fakehome" SPARKLE_BIN="$TMP/fakebin" DRY_RUN=1 bash "$SCRIPT" 
 echo "$OUT" | grep -q "prerelease: yes" || fail "--pre must request prerelease"
 echo "$OUT" | grep -q "upload: yes" || fail "--upload flag must show upload"
 echo "$OUT" | grep -q "Tradewind.app.zip appcast.xml" || fail "asset list must contain zip+appcast"
-pass "DRY_RUN --upload --pre: prerelease / opt-in upload / zip+appcast assets"
+echo "$OUT" | grep -q "darwin-arm64.dmg " || fail "asset list must contain dmg (batch7 六资产)"
+echo "$OUT" | grep -q "darwin-arm64.dmg.sha256" || fail "asset list must contain dmg.sha256 (batch7 六资产)"
+pass "DRY_RUN --upload --pre: prerelease / opt-in upload / zip+appcast+dmg+dmg.sha256 assets"
 
 # 4b. Sparkle 链沙盒真跑（happy path，batch6b plan §4.7）：EDPUBKEY_CMD stub 输出与
 #     内嵌 pub 文件同串 → 链走通；sign_update 恰好两次：先签名（--ed-key-file）后 --verify
@@ -127,6 +155,9 @@ LOG="$S4/log/sign_update.log"
 [ "$(sed -n '2p' "$LOG")" = "--verify" ] || fail "second sign_update call must be --verify"
 [ -f "$S4/dist/Tradewind.app.zip" ] || fail "zip must be produced on happy path"
 [ -f "$S4/dist/appcast.xml" ] || fail "appcast.xml must be written on happy path"
+# DMG 资产段（batch7-plan §4.2）：不依赖 SPARKLE_BIN，沙盒链里恒产出 dmg+sidecar
+[ -f "$S4/dist/tradewind-v9.9.9-test-darwin-arm64.dmg" ] || fail "dmg must be produced on happy path"
+[ -f "$S4/dist/tradewind-v9.9.9-test-darwin-arm64.dmg.sha256" ] || fail "dmg sidecar must be produced on happy path"
 # 覆盖点被改动 → 发布记录里必须看得见（沙盒里 EDPUBKEY_CMD 与 EDDSA_PUB_FILE 真被
 # 改了；EDDSA_PRIV 等于沙盒 HOME 下的默认路径，不算覆盖，不得出现提示）
 echo "$OUT" | grep -q "^==> note: EDPUBKEY_CMD overridden:" || fail "an overridden EDPUBKEY_CMD must be visible in the release transcript"
@@ -134,7 +165,7 @@ echo "$OUT" | grep -q "^==> note: EDDSA_PUB_FILE overridden:" || fail "an overri
 if echo "$OUT" | grep -q "EDDSA_PRIV overridden"; then
   fail "EDDSA_PRIV at its default path must not be reported as overridden"
 fi
-pass "Sparkle chain happy path: sign once then --verify once, appcast written; overrides visible"
+pass "Sparkle chain happy path: sign once then --verify once, appcast+dmg written; overrides visible"
 
 # 5. 双闸·闸 1（签名前）：推导公钥 ≠ 内嵌公钥 → 拦截（sign_update 零调用；stderr 点名两份文件）
 S5="$(mktemp -d "$TMP/sandbox.XXXXXX")"

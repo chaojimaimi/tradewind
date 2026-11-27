@@ -34,8 +34,26 @@ apps/menubar/build.sh                 # → apps/menubar/dist/Tradewind.app
 
 ### 公开安装（Release 下载，免构建）
 
-无需克隆与构建，直接从 [Releases](https://github.com/chaojimaimi/tradewind/releases/latest) 下载
-`tradewind-<版本>-darwin-arm64.tar.gz` 并解压安装：
+无需克隆与构建，直接从 [Releases](https://github.com/chaojimaimi/tradewind/releases/latest) 下载。
+
+**首选：DMG 一体化安装包** —— 下载 `tradewind-<版本>-darwin-arm64.dmg` 并双击挂载：
+
+1. **打开 DMG 里的 Tradewind**（不是拖拽——打开即进入安装器：应用本体落「应用程序」，
+   内核/网页面板/命令行工具落 Tradewind 数据目录）。
+2. 点「开始安装」。
+3. 可选勾选「在终端可用 tradewind 命令」：创建指向 Tradewind 管理副本的 `tradewind`
+   链接并接管该命令（需输入一次管理员密码；之后 `self-update` 只升级数据目录真身，
+   链接自动跟随）。
+4. **首次打开 Gatekeeper 放行**：签名无公证，直接双击会被拦截——到**系统设置 →
+   隐私与安全性 → 仍要打开**（macOS 15 起右键「打开」已不能绕过，见 DESIGN §7.7）。
+5. 启动：点击菜单栏 Tradewind 图标，或终端 `tradewind start`（Ctrl+C 优雅退出并还原系统代理）。
+6. 升级：CLI+内核 `tradewind self-update`（自动回滚）；app 内关于页"检查更新"由 Sparkle 托管。
+
+注：重跑**旧版** DMG 会把数据目录里的 CLI 换回旧版（恢复：`tradewind self-update`）；
+「应用程序」里的 app 副本不会被降级（已装版本更新时安装器跳过）。习惯性拖拽到
+「应用程序」只装 app 本体——数据面（内核/面板/CLI）仍需打开 DMG 里的 Tradewind 安装。
+
+**命令行/脚本化安装：tarball** —— 下载 `tradewind-<版本>-darwin-arm64.tar.gz` 并解压安装：
 
 ```bash
 tar -xzf tradewind-<版本>-darwin-arm64.tar.gz
