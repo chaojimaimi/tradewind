@@ -18,12 +18,22 @@ public enum TradewindApp {
 /// WHY @MainActor：AppKit 回调与 PanelModel/TrafficStore 同处主 actor，编译器据此放行隔离访问。
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var statusItem: NSStatusItem?
+    /// internal 供单测断言（§3.9 #7：安装器早返回时状态项绝不装配）
+    var statusItem: NSStatusItem?
     /// popover 展开期间的全局点击监听（收起兜底，见 popoverWillShow）
     private var outsideClickMonitor: Any?
     private let popover = NSPopover()
-    /// 面板状态与 WS 速率（壳的数据中枢；菜单栏图标与 popover 速率卡同源于此）
-    private lazy var model: PanelModel = .live()
+    /// 面板状态与 WS 速率（壳的数据中枢；菜单栏图标与 popover 速率卡同源于此）。
+    /// WHY 显式闭包而非 `.live()`：构建次数计数进 modelBuildCount——§3.9 #7 以
+    /// 「terminate/reopen 不触碰 lazy model」为断言面（构建即触碰，计数即证据）。
+    private lazy var model: PanelModel = {
+        modelBuildCount += 1
+        return modelBuilder()
+    }()
+    /// 模型构建注入缝（安装器守卫测试用；生产恒 .live()）
+    var modelBuilder: () -> PanelModel = { .live() }
+    /// lazy model 实际构建次数（安装器模式全程应为 0）
+    private(set) var modelBuildCount = 0
     /// 设置窗口懒创建单例（M3 批② c2 §11.2-2）：关闭=orderOut 保活，复开零重建。
     /// WHY 自持独立桥：PanelModel.bridge 私有，设置页读写链路自成一体；
     /// c3 订阅页/通用页与 c4 连接页共用同一条桥（同一 CLI 路径解析，无状态）。
@@ -53,6 +63,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 且 applyAppearance 的 KVO 路径可安全触碰——Optional 链在窗口未创建时直接
     /// 短路，不会因切主题误触发整窗构建。
     private var settingsWindow: SettingsWindowController?
+    /// 安装器模式标志（批⑦ §3.2，App 层持有；三条既有路径守卫读它分叉）。
+    /// internal set 供单测直接置位驱动守卫分支。
+    var installerMode = false
+    /// 安装器窗（单例；重入=前置既有窗）。nil=未创建。
+    private var installerWindow: NSWindow?
+    /// 安装器窗前置记录（§3.9 #7 reopen 守卫断言面）。
+    private(set) var installerWindowShown = false
+    /// 安装器检测注入缝（§3.1 双判据；单测替换避免 Bundle.main 依赖）。
+    var installerDetection: () -> Bool = {
+        InstallerSupport.detect(bundlePath: Bundle.main.bundlePath)
+    }
 
     /// 按原 lazy 闭包同参构造设置窗口（openSettings 唯一触发点）。
     private func makeSettingsWindowIfNeeded() {
@@ -73,6 +94,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotKey: GlobalHotKey?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 安装器模式（批⑦ §3.2）：DMG 里的 app 首语句分支——命中即早返回，
+        // observeModel/observeShellPrefs/URL Scheme/状态项/热键/速率刷新/静默启动
+        // 全部不执行（lazy model 全程不构建）；主菜单是唯一保留的既有装配项。
+        if launchInstallerIfNeeded() { return }
         NSApp.setActivationPolicy(.accessory)
         popover.behavior = .transient // 系统行为：点击面板外自动收起
         // 设置…回调闭包注入（M3 批② c2）：popover 收起在 openSettings 内先行执行
@@ -99,24 +124,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        false // 仅状态栏驻留，无窗口
+        installerMode // 安装器关窗即退出（不留常驻，§3.2）；壳仅状态栏驻留恒 false
     }
 
     /// Dock 图标点击 reopen（§12 c3）：设置窗口在 .regular 期收进 Dock 后，点击 Dock
     /// 图标统一走 openSettings（deminiaturize 已内聚于 showSettings）；返回 false 声明
     /// 已处理。.accessory 下无 Dock 图标 reopen 不可达；边缘路径触发时退化为开窗，无害。
+    /// 安装器模式守卫（§3.2）：前置安装器窗、绝不 openSettings（不触碰 lazy model）。
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if installerMode {
+            makeInstallerWindowIfNeeded()
+            return false
+        }
         openSettings()
         return false
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        if installerMode { return } // 安装器守卫（§3.2）：不触碰 lazy model（退出期强建面板栈防御）
         model.traffic.persistNow() // 今日流量落盘（壳内累计的收尾）
     }
 
     deinit {
         // 壳偏好通知解除（observeShellPrefs 注册对；进程退出才 deinit，惯例防御）
         NotificationCenter.default.removeObserver(self)
+    }
+
+    // MARK: 安装器模式（批⑦ c1 §3.2：DMG 里的 app 进安装器模式）
+
+    /// 安装器模式启动分支：检测命中 → 置 installerMode → .regular（安装器需要
+    /// Dock 图标与前台定位；实例短命装完即退）→ 装主菜单（.regular 期无主菜单则
+    /// ⌘W/⌘Q/⌘C/⌘V 全失效，§12 c3 既有坑）→ 安装器窗前置。返回 true = didFinish
+    /// Launching 余下装配（状态项/热键/静默启动等）全部跳过。
+    /// internal 供单测直测检测分支（不跑 didFinishLaunching 全量的 AppKit 副作用）。
+    @discardableResult
+    func launchInstallerIfNeeded() -> Bool {
+        guard installerDetection() else { return false }
+        installerMode = true
+        NSApp.setActivationPolicy(.regular)
+        installMainMenu()
+        makeInstallerWindowIfNeeded()
+        return true
+    }
+
+    /// 安装器窗创建/前置（重入只前置）。模型与视图都在同模块，窗口关闭经
+    /// applicationShouldTerminateAfterLastWindowClosed(installerMode) 退出进程。
+    private func makeInstallerWindowIfNeeded() {
+        if let window = installerWindow {
+            window.makeKeyAndOrderFront(nil)
+            installerWindowShown = true
+            return
+        }
+        let model = InstallerModel(bundlePath: Bundle.main.bundlePath)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 560),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = "安装 Tradewind"
+        window.contentView = NSHostingView(rootView: InstallerWindow(model: model))
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        installerWindow = window
+        installerWindowShown = true
     }
 
     // MARK: 状态栏装配
@@ -196,7 +264,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 应用菜单：首项空 item 惯例（系统以应用名注入首项标题）；⌘Q 退壳不停内核
         let appMenu = NSMenu()
         appMenu.addItem(NSMenuItem())
-        appMenu.addItem(NSMenuItem(title: "退出壳（内核继续运行）",
+        // 退出项文案分叉（评审顺手修 2）：安装器模式退出即终止安装器进程本身，
+        // 无壳的「内核继续运行」语义；主菜单照常装配的原则不变（§3.2）。
+        appMenu.addItem(NSMenuItem(title: installerMode ? "退出安装器" : "退出壳（内核继续运行）",
                                    action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         let appItem = NSMenuItem()
         appItem.submenu = appMenu

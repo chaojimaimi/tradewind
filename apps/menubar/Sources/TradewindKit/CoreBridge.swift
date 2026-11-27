@@ -52,7 +52,11 @@ enum CLIPath {
         for candidate in ["/opt/homebrew/bin/tradewind", "/usr/local/bin/tradewind"] where fileExists(candidate) {
             return candidate
         }
-        return nil
+        // 批⑦ §3.6：DMG 安装器落位的数据目录候选（home 与 InstallerSupport.homeDir
+        // 同源，TRADEDWIND_HOME 可覆盖）。homebrew 优先于数据目录——尊重 tarball
+        // 用户显式安装与 self-update 通道。
+        let dataDirCandidate = InstallerSupport.homeDir(environment: environment) + "/tradewind"
+        return fileExists(dataDirCandidate) ? dataDirCandidate : nil
     }
 }
 

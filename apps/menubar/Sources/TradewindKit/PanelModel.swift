@@ -118,9 +118,24 @@ final class PanelModel: ObservableObject {
             return PanelModel(bridge: try CoreBridge.live())
         } catch {
             let model = PanelModel(bridge: nil)
-            model.toast = "tradewind CLI 未找到（设 TRADEDWIND_CLI 或安装）"
+            model.toast = missingCLIToast(
+                environment: ProcessInfo.processInfo.environment,
+                fileExists: { FileManager.default.fileExists(atPath: $0) })
             return model
         }
+    }
+
+    /// 缺件引导文案（批⑦ §3.7）：CLI 不可达 且 数据目录缺 bin/mihomo 与
+    /// ui/index.html（全新机器签名——拖拽误操作从 DMG 直启的回退面）→ DMG
+    /// 引导文案；其余场景（装过 ui 或内核的老机器）旧文案不变。纯函数（env/
+    /// fileExists 注入）可测，live() 只做真实环境接线。
+    static func missingCLIToast(environment: [String: String],
+                                fileExists: (String) -> Bool) -> String {
+        let home = InstallerSupport.homeDir(environment: environment)
+        let freshMachine = !fileExists(home + "/bin/mihomo") && !fileExists(home + "/ui/index.html")
+        return freshMachine
+            ? "未完成安装：请打开 DMG 里的 Tradewind 完成安装，或下载整包 tarball（见 README）"
+            : "tradewind CLI 未找到（设 TRADEDWIND_CLI 或安装）"
     }
 
     // MARK: 派生状态（demo 状态行/图标口径）
